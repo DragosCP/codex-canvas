@@ -1,4 +1,4 @@
-import { Check, FileText, Loader2, Undo2, X } from "lucide-react";
+import { Check, Database, FileText, Loader2, Square, Undo2, X } from "lucide-react";
 import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
 import type {
@@ -27,6 +27,7 @@ export function Inspector(props: {
   onAnswerApproval: (approval: PendingApproval, accepted: boolean) => void;
   onOpenDocument: (path: string) => void;
   onResizePointerDown: (event: PointerEvent<HTMLButtonElement>) => void;
+  onRequestGenerateMockup: (project: Project) => void;
   onReviewChanges: () => void;
   onRollback: () => void;
   onSelect: (selection: InspectorSelection) => void;
@@ -41,9 +42,18 @@ export function Inspector(props: {
         aria-label="Resize inspector"
         onPointerDown={props.onResizePointerDown}
       />
-      <header className="inspector-header">
+      <header
+        className={`inspector-header ${
+          props.selection.type === "canvas" ? "canvas-inspector-header" : ""
+        }`}
+      >
         <h2>{inspectorTitle(props.selection)}</h2>
-        <span>{props.activeTurn?.status ?? "idle"}</span>
+        {props.selection.type === "canvas" && props.canvas ? (
+          <CanvasModeSwitch
+            canvas={props.canvas}
+            onChange={(canvas) => props.onUpdateCanvas(canvas.projectId, canvas)}
+          />
+        ) : null}
       </header>
       {props.selection.type === "empty" && (
         <ActivityPanel
@@ -63,6 +73,7 @@ export function Inspector(props: {
             project={props.canvasProject}
             readOnly={props.canvasReadOnly}
             onChange={(canvas) => props.onUpdateCanvas(canvas.projectId, canvas)}
+            onRequestGenerateMockup={props.onRequestGenerateMockup}
           />
         )}
       {props.selection.type === "document" && (
@@ -107,6 +118,35 @@ export function Inspector(props: {
         />
       )}
     </aside>
+  );
+}
+
+function CanvasModeSwitch(props: {
+  canvas: ProjectCanvas;
+  onChange: (canvas: ProjectCanvas) => void;
+}) {
+  function switchMode(mode: ProjectCanvas["mode"]) {
+    if (props.canvas.mode === mode) return;
+    props.onChange({ ...props.canvas, mode, updatedAt: Date.now() });
+  }
+
+  return (
+    <div className="canvas-mode-switch" role="tablist" aria-label="Canvas mode">
+      <button
+        className={props.canvas.mode === "ui" ? "active" : ""}
+        onClick={() => switchMode("ui")}
+        type="button"
+      >
+        <Square size={15} /> UI
+      </button>
+      <button
+        className={props.canvas.mode === "backend" ? "active" : ""}
+        onClick={() => switchMode("backend")}
+        type="button"
+      >
+        <Database size={15} /> Backend
+      </button>
+    </div>
   );
 }
 

@@ -5,7 +5,7 @@
 - State: WIP
 - Location: `plans/wip/`
 - Completed: No
-- Current focus: project Canvas foundation is in; next canvas work should decide plan-to-canvas flow or backend mapping, not rework the shell.
+- Current focus: project Canvas foundation is in; P02 is now active for visual planning canvas implementation. Next canvas work should improve Canvas placement/manual editing, define the explicit Canvas-to-prompt handoff, and make Plan Mode emphasize proposed changes. Backend Generate should wait until the manual loop is useful.
 - Related docs: `docs/Arch.md`, `docs/Prod.md`, `docs/UI-UX.md`
 - Rule for this plan: keep execution state here; move durable backend/product/UI facts to the docs.
 
@@ -49,7 +49,7 @@ P03 started with the app shell and core loop before the visual planning canvas. 
 - Installer packaging remains disabled; `tauri:build` produces the release exe.
 - Broad PDF/Office/binary document ingestion is out of scope; current attachments only represent what the app-server/runtime can honestly use.
 - Full permission approval UX and denied-action states still need broader manual verification.
-- Plan-to-canvas synchronization, backend Generate, richer layers/comments/grouping, and backend canvas mapping are not implemented yet.
+- Plan-to-canvas synchronization, explicit Use Canvas prompt handoff, backend Generate, richer layers/comments/grouping, and backend canvas mapping are not implemented yet.
 
 ## Phase Checklist
 
@@ -73,24 +73,33 @@ Use this baseline after P03 implementation slices:
 
 Manual checks should match the slice touched. At minimum, keep proving: app launches, auto-connects, project/chat selection works, Send streams, restart/reopen reconciles sidebar and main chat, and the touched UI does not create overlap or dead-space regressions.
 
-## Next Slice Plan - Canvas Foundation And Plan Mode Inspector
+## Next Slice Plan - Canvas Placement, Manual Editing, And Prompt Handoff
 
 ### Scope
 
-- Add the first project-owned canvas foundation inside the desktop app.
-- Keep Canvas visually separate from project chat rows, and open it as a project surface.
-- Open or emphasize the same project canvas from Plan Mode as an expanded Inspector/Canvas Inspector surface.
-- Keep it desktop-owned for this slice. Do not add backend Generate, plan-to-canvas automation, or app-server API changes.
+- Improve the existing project-owned canvas foundation inside the desktop app.
+- Make the Canvas entry point clearer and more intentional, ideally near the project/chat workspace header with label/tooltip behavior when space allows.
+- Tighten the manual editing basics: empty state, add/edit/delete, move/resize feel, selected styling, and read-only/locked state.
+- Replace text-heavy add buttons with compact draggable palette icons for Container, Text, Modal, and Divider.
+- Add the first UI canvas hierarchy: top-level UI/Backend mode, compact side page menu with default Page 1/Page 2 labels, and Desktop/Mobile variant control. Backend remains a general project map without pages or device variants.
+- Add compact layer rows with state color dots and icons for visibility, lock, state/change, and delete where allowed.
+- Expose coordinates/dimensions in the selected item details and persisted canvas state so future plans can reason about placement.
+- Define and implement the first explicit "Use Canvas" prompt/plan handoff so canvas state becomes context by user intent, not silently.
+- Make Plan Mode open or emphasize the same project canvas and show room for proposed changes for the current plan.
+- Keep it desktop-owned for this slice. Do not add backend Generate, automatic codebase mapping, or app-server API changes.
 - Keep the normal chat/composer loop intact.
 
 ### Target Behavior
 
-- Plan Mode can reveal an expanded canvas workspace with real editing room.
-- A project-level Canvas action opens that project's canvas without requiring a new chat or Plan Mode.
+- A project-level Canvas action opens that project's canvas without requiring a new chat or Plan Mode, and the control reads as deliberate product UI rather than an unexplained icon.
+- The first canvas screen clearly explains the empty project state through action-oriented UI and lets the user add the first container quickly.
+- Manual canvas edits feel direct enough to be useful before automation: select, move, resize, edit, delete proposed containers, and see selected/locked/read-only states clearly.
+- Page switching is quick for UI work through a compact side page menu, while Backend stays a single project-level overview.
+- Right-click provides the fast path for common object edits such as layer order, duplicate/copy, lock, state/color, mark as current, reset placement, and delete.
+- The user has a clear way to say "use this canvas for the next message/plan," likely through a compact composer/context affordance or nearby canvas action.
+- Plan Mode can reveal an expanded canvas workspace with real editing room and show proposed changes for the plan while preserving enough chat context to understand the request.
 - Canvas remains project-scoped if the user switches chats; normal document/file inspector content remains chat-scoped.
 - Canvas state is project-level, so it is shared across chats in the same project.
-- The first canvas supports simple containers and text, with current/proposed/deleted visual states.
-- The user can select, move, resize, edit, delete, and lock simple canvas items.
 - Editing should be disabled while a thread in the project is running.
 - Normal Inspector remains a detail surface; Canvas Inspector is the spatial planning surface.
 - The first implementation should avoid heavy design-tool complexity and avoid boxes inside boxes unless the canvas item itself represents a UI container.
@@ -100,6 +109,7 @@ Manual checks should match the slice touched. At minimum, keep proving: app laun
 - Prefer focused new canvas types/components instead of growing `App.tsx`.
 - Store canvas state in desktop-owned local state/persistence alongside project metadata.
 - Start with simple DOM/SVG/canvas primitives already available in the stack unless investigation proves a small library is clearly worth adding.
+- Basic zoom/pan is allowed only if it stays light; comfortable add/edit/move/resize and the Canvas-to-prompt handoff are higher priority.
 - Make room for later layers, comments, backend mapping, and plan submission, but do not build those in this slice.
 - Update `docs/Prod.md` or `docs/UI-UX.md` only if the implemented behavior changes the durable canvas direction.
 
@@ -107,7 +117,7 @@ Manual checks should match the slice touched. At minimum, keep proving: app laun
 
 - Backend Generate.
 - Automatic codebase mapping.
-- Automatic plan-to-canvas synchronization.
+- Automatic plan-to-canvas synchronization beyond the explicit first Use Canvas handoff.
 - Multi-user/cross-device sync.
 - Full design-tool features, plugins, microphone/realtime, or broad app redesign.
 
@@ -115,7 +125,10 @@ Manual checks should match the slice touched. At minimum, keep proving: app laun
 
 - Run the P03 verification baseline.
 - Launch the built app and verify Canvas is not shown as a chat-like row in the sidebar.
-- Verify the project-level Canvas action opens the project canvas, and Plan Mode opens or emphasizes the expanded Canvas Inspector.
+- Verify the project-level Canvas action opens the project canvas, and the entry point is understandable without guessing.
+- Verify empty state and basic add/edit/delete/move/resize/select behavior.
+- Verify the explicit Use Canvas prompt/plan handoff appears only when appropriate and does not silently attach the canvas to every prompt.
+- Verify Plan Mode opens or emphasizes the expanded Canvas Inspector and leaves enough chat context visible.
 - Verify switching chats while Canvas is open keeps Canvas available for that project.
 - Verify canvas state persists after switching chats and restarting the app.
 - Verify editing is disabled while a project thread is running.

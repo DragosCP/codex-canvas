@@ -385,7 +385,10 @@ export function App() {
     syncThreadRef.current = syncThread;
   }, [syncThread]);
 
-  useEffect(() => saveDesktopState(desktop), [desktop]);
+  useEffect(() => {
+    const timer = window.setTimeout(() => saveDesktopState(desktop), 250);
+    return () => window.clearTimeout(timer);
+  }, [desktop]);
 
   useEffect(() => {
     function updateShellWidth() {
@@ -655,6 +658,41 @@ export function App() {
         ...current.canvases,
         [projectId]: canvas,
       },
+    }));
+  }
+
+  function requestCurrentUiMockup(project: Project) {
+    const prompt = [
+      "Inspect this local project and propose an existing low-fidelity UI canvas map.",
+      "",
+      "Focus on the UI the user sees today. Return compact Canvas entries I can review manually: page name, Desktop/Mobile, container name, state=current, x/y/width/height, lock suggestion, and one short agent comment per container.",
+      "",
+      "Do not edit files.",
+    ].join("\n");
+    setActionError(null);
+    setSendError(null);
+    setRetryDraft(null);
+    setActiveDraftProjectId(project.id);
+    setComposerText(prompt);
+    setAttachments([]);
+    setDesktop((current) => ({
+      ...current,
+      activeProjectId: project.id,
+      activeThreadId:
+        current.activeProjectId === project.id
+          ? current.activeThreadId
+          : project.lastActiveThreadId,
+      projects: current.projects.map((candidate) =>
+        candidate.id === project.id
+          ? {
+              ...candidate,
+              settings: {
+                ...candidate.settings,
+                planMode: true,
+              },
+            }
+          : candidate,
+      ),
     }));
   }
 
@@ -1757,6 +1795,7 @@ export function App() {
           onAnswerApproval={answerApproval}
           onOpenDocument={(path) => selectInspector({ type: "document", path })}
           onResizePointerDown={beginInspectorResize}
+          onRequestGenerateMockup={requestCurrentUiMockup}
           onReviewChanges={() => void reviewChanges()}
           onRollback={() => void rollbackChat()}
           onSelect={selectInspector}

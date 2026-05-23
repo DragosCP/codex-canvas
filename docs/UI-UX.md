@@ -41,25 +41,56 @@
 
 - Canvas is project-owned visual working memory, not a Plan Mode-only object.
 - Canvas should not appear as another chat row. It belongs to the project and can live as a project-level Inspector/workspace action.
+- The Canvas entry point should read as intentional project UI: prefer a clear project-level button near the project/chat workspace header, with a visible label when there is room and a tooltip when compact.
+- On a fresh project, the Canvas should support an obvious bootstrap action such as "Generate current UI mockup" that asks Codex to inspect the local project and create an editable low-fidelity current-state layout.
+- Generated current-state containers should start as reviewable, not magically correct: users should be nudged to inspect placement, adjust item names/coordinates, and mark what is accepted without making the canvas feel like a settings form.
 - Plans should be reviewable visually before implementation, not only as technical text.
+- A plan Expand/review action should show the current low-fidelity UI layout and the proposed plan changes in one spatial view, not as a separate unrelated mockup.
 - Every plan should prepare UI/backend canvas updates from the existing project-level canvas during planning time, rather than creating a new canvas.
 - Recommended v1: a project-level Canvas action opens the canvas surface, and the Plan Mode toggle in the chat composer footer opens or emphasizes the same canvas in expanded Canvas Inspector mode.
+- When Plan Mode is on, Canvas should become more prominent and should be able to show "proposed changes for this plan" without hiding the chat context the user is planning from.
 - Expanded Canvas Inspector should open at a useful default size, remember width, and offer one-click maximize for detailed spatial editing.
 - Normal Inspector is for details. Expanded Plan Mode Canvas Inspector is for spatial editing.
 - Inspector-style details can live inside the expanded Canvas Inspector for layers, properties, comments, and plan controls.
 - The canvas can be viewed from the project at any time; Plan Mode is a focused planning/editing path, not the only way to reach it.
+- Canvas can act as project context for a prompt or plan, but the user needs an explicit handoff such as a "Use Canvas" control or composer context chip. Do not silently attach the full canvas to every prompt.
+- The handoff should support repeated use over time: users can call out Canvas before a future prompt, let Codex read the latest snapshot, and then update the canvas through the plan or direct canvas edits.
+- The composer should grow a real `@` picker for project context. In that picker, Canvas should appear as a first-class item, ideally above files/folders, so typing `@canvas` attaches the current project canvas without making the user hunt through menus.
+- Selecting Canvas from the `@` picker should insert a visible removable chip, not only plain text. On Send, the desktop app should include a compact serialized canvas snapshot with page/device, relevant items, reference codes, states, coordinates, and comments. This should remain desktop-local in v1 instead of pretending Canvas is an app/plugin/server mention.
+- The `@Canvas` picker should later support both whole-canvas and specific-element references: Canvas, UI/Backend, Page 1/Page 2, then items such as `C1 Left nav`, `B1 Save button`, or `M1 Add project modal`.
 - Unlike Markdown/document inspector selections, Canvas is scoped to the active project rather than a single chat. If Canvas is open and the user switches chats in the project, the Canvas view should remain available instead of retargeting to a chat document.
 - Broader canvas access from the chat/thread header or a main workspace tab can be deferred until a later interface plan.
+- UI/Backend should be the top-level Canvas mode and belongs in the Canvas header row, aligned with the Canvas title, so the canvas body can spend its first row on tools and layers instead of duplicate chrome. V1 should hide Desktop/Mobile switching until the manual canvas loop proves it needs that extra dimension.
+- UI pages should be fast to switch through a compact side page menu near the canvas edge rather than adding more header clutter. Default labels should stay simple as P1, P2, P3, etc. in the first surface; page renaming can wait until it clearly improves the workflow.
+- Do not repeat project/canvas names inside the Canvas Inspector when the main chat/header already names the project and the inspector header already says Canvas.
 - The user can view the canvas at any time, but editing should be locked while any thread in the project is running.
 - A user should be able to feed canvas edits back into a pending plan before final submission.
-- Current UI should appear as locked blue containers. Proposed UI should appear as editable gold dashed containers. Deleted current UI should be visibly red or hidden behind an explicit deleted layer.
+- Canvas item state should expose only three end-user colors backed by an explicit state config: blue solid means current/existing UI, gold dashed means proposed/temporary UI, and red means marked for deletion.
+- Movement is not a fourth user-facing state. When a current blue item is intentionally moved, show the original geometry as a grey ghost at its saved `x/y/w/h`, then show the moved blue item at the new geometry, slightly visually separated in the layer list and with reset placement available.
+- Current/proposed/deleted should be a visual layer language first, not a prominent add-mode toggle. New manual items can default to proposed; selected-item Details should expose only gold/blue/red state swatches in that order, while layer row color and a small info guide explain the meaning.
+- Locking is protection from accidental edits, not the primary state language. Do not show lock icons inside canvas shapes; the color, fill, and border style should tell the user and the LLM what the item means. Lock controls can live in Layers/right-click when useful, but lock icons should stay neutral and must not compete with state colors.
+- Current blue items should not be deleted straight away. Delete on a proposed gold item removes it permanently; delete on a current blue item should use a red delete affordance and mark it as deleted/red. Deleted red items should not show an ordinary delete control in the layer row.
+- Visible canvas labels should be human reference codes, not raw database IDs. Use stable short references such as `C1`, `B1`, `T1`, `M1`, and `D1` so the user can say "move B1 under C2" and the LLM can read the same reference in the serialized canvas.
 - Mobile and desktop likely need separate canvases because the user experience can diverge substantially.
 
 ## Interaction Principles
 
 - Fewer clicks is better.
-- The user should work mostly with containers and text, plus minimal primitives such as modal and divider.
+- The user should work mostly with containers and text, plus minimal primitives such as modal, divider, and button.
 - The user should be able to select, move, resize, edit, delete proposed containers, group/ungroup, lock/unlock, comment, reset placement, and mark proposed work as current.
+- The first canvas surface needs strong basics before automation: a useful empty state, obvious add/edit/delete affordances, responsive move/resize behavior, selected-item styling that is hard to miss, and a clear read-only/locked presentation while a thread is running.
+- Basic zoom/pan is useful only if it does not make the first editing loop feel heavy; comfortable placement matters more than design-tool completeness.
+- Add tools should be compact draggable icons, not text-heavy buttons: Container, Text, Modal, Divider, and Button. Labels belong in tooltips or small captions only when there is room.
+- Button items should be compact and highly recognizable. Prefer a small round or pill shape with a centered `B`/reference code when space is tight, and keep button width/height linked so state changes do not turn a button into a broken container. Details can still describe the visible label as "Button." Other item kinds may also collapse their visible text to a short reference when the shape is too small.
+- The canvas should expose a subtle coordinate grid. Selected items should show concise coordinates and dimensions, and the serialized canvas state should store normalized coordinates so agents can reason about placement without relying on screenshots.
+- Layers should be compact rows with reference code, name, and small neutral icons for visibility/lock/delete where allowed. Tooltips should describe the action, such as "Unlock position" or "Lock position", rather than only naming the current state. Do not show leading type icons or separate state swatch shapes; the whole row should carry the state color/treatment. A tiny info button can reveal the visual language.
+- Layer sorting should help plan review: deleted first, moved-current pairs next, proposed next, and unchanged current last. Canvas z-order still controls visual stacking on the board.
+- Details should not become a debugging panel. For the selected item, show name, label/copy/note, one optional "Note for Codex" field, gold/blue/red state swatches, coordinates, and dimensions. Keep field lengths bounded so the canvas stays scannable. Created/updated time, plan references, and internal IDs can be stored, but should not crowd the first editing surface unless the user asks for that information.
+- Details should not duplicate layer/right-click actions. Remove persistent lock/unlock and delete buttons from Details; show reset placement only when the selected item is a moved current item.
+- Canvas persistence should feel automatic and calm. Prefer debounced autosave of the latest project canvas snapshot over a big Save button or a stored record for every drag/edit. Because users will experiment and sometimes change a state by mistake, include simple undo/redo for recent canvas edits instead of exposing full layer-history machinery. Later versions can add deliberate snapshots/checkpoints when users need to preserve alternatives.
+- Right-click should be a major shortcut path for canvas editing: bring forward/back, duplicate, copy, lock/unlock, change state/color, reset placement, mark as current, and delete when allowed.
+- Clicking empty canvas should not create a jarring details reset; Escape is the explicit deselect action.
 - Chat and canvas should not compete for the same active input surface; Canvas may be selected as a project row while Plan Mode gives it focused editing emphasis.
 - The canvas should avoid heavy design-tool complexity, admin/debug clutter, and boxes inside boxes unless there is a clear workflow reason.
 - Backend visuals should help the user notice reuse opportunities, such as an existing state or route that should receive a new feature instead of creating a duplicate path.
+- Backend Generate should wait until the manual canvas loop is useful; otherwise automatic backend nodes risk amplifying a confusing UI.

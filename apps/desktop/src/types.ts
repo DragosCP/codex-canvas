@@ -120,23 +120,58 @@ export type LocalChatDraft = {
   updatedAt: number;
 };
 
+export type CanvasMode = "ui" | "backend";
+
+export type CanvasDevice = "desktop" | "mobile";
+
 export type CanvasItemState = "current" | "proposed" | "deleted";
+
+export type CanvasItemKind =
+  | "container"
+  | "text"
+  | "modal"
+  | "divider"
+  | "button";
+
+export type CanvasPage = {
+  id: string;
+  name: string;
+  order: number;
+};
 
 export type CanvasItem = {
   id: string;
-  kind: "container" | "text";
+  numericId: number;
+  reference: string;
+  kind: CanvasItemKind;
   title: string;
   body: string;
   x: number;
   y: number;
   width: number;
   height: number;
+  originalX?: number | null;
+  originalY?: number | null;
+  originalWidth?: number | null;
+  originalHeight?: number | null;
   state: CanvasItemState;
   locked: boolean;
+  visible: boolean;
+  zIndex: number;
+  pageId: string | null;
+  device: CanvasDevice | null;
+  comment: string;
+  createdAt: number;
+  updatedAt: number;
 };
 
 export type ProjectCanvas = {
   projectId: string;
+  version: 2;
+  mode: CanvasMode;
+  activePageId: string;
+  activeDevice: CanvasDevice;
+  pages: CanvasPage[];
   items: CanvasItem[];
   updatedAt: number;
 };
