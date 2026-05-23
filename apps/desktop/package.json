@@ -1,0 +1,31 @@
+{
+  "name": "@openai/codex-desktop",
+  "version": "0.0.0-dev",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "app-server:mock": "node ../../scripts/p03-dev-app-server.mjs",
+    "app-server:real": "node ../../scripts/p03-real-app-server.mjs",
+    "smoke:real-command": "node ../../scripts/p03-real-command-smoke.mjs",
+    "dev": "vite --host 127.0.0.1",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview --host 127.0.0.1",
+    "proof": "node ../../scripts/p03-backend-proof-gate.mjs",
+    "test:compaction-render": "node ../../scripts/p03-compaction-render-test.mjs",
+    "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs",
+    "tauri:dev": "tauri dev",
+    "tauri:build": "tauri build"
+  },
+  "dependencies": {
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "2.10.1",
+    "@types/react": "^18.3.12",
+    "@types/react-dom": "^18.3.1",
+    "@vitejs/plugin-react": "^4.3.3",
+    "vite": "^5.4.11"
+  }
+}
