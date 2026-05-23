@@ -8,6 +8,7 @@ import {
   Layers,
   LockKeyhole,
   LockKeyholeOpen,
+  Maximize2,
   Minus,
   MousePointer2,
   Move,
@@ -18,13 +19,19 @@ import {
   Square,
   Trash2,
   Undo2,
+  ZoomIn,
+  ZoomOut,
   Type as TypeIcon,
 } from "lucide-react";
 import {
   type DragEvent,
+  type MouseEvent as ReactMouseEvent,
   type PointerEvent,
+  type WheelEvent as ReactWheelEvent,
+  forwardRef,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import {
@@ -50,10 +57,54 @@ type DragState = {
   original: CanvasItem;
 };
 
+type PanState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  originX: number;
+  originY: number;
+};
+
+type ViewportState = {
+  scale: number;
+  panX: number;
+  panY: number;
+};
+
+type ContextMenuState =
+  | {
+      type: "item";
+      itemId: string;
+      x: number;
+      y: number;
+    }
+  | {
+      type: "stage";
+      canvasX: number;
+      canvasY: number;
+      x: number;
+      y: number;
+    };
+
 const MAX_UNDO_STEPS = 40;
 const TITLE_MAX_LENGTH = 36;
 const BODY_MAX_LENGTH = 180;
 const COMMENT_MAX_LENGTH = 280;
+const CANVAS_GRID_SIZE = 28;
+const FIT_VIEW_PADDING = 48;
+const CANVAS_WORLD_WIDTH = 2400;
+const CANVAS_WORLD_HEIGHT = 1600;
+const MIN_CANVAS_SCALE = 0.35;
+const MAX_CANVAS_SCALE = 2.4;
+const WHEEL_ZOOM_SPEED = 0.0015;
+const PINCH_ZOOM_SPEED = 1.5;
+const TRACKPAD_SCROLL_DELTA_LIMIT = 64;
+const HORIZONTAL_PAN_RATIO = 0.35;
+const DEFAULT_VIEWPORT: ViewportState = {
+  scale: 1,
+  panX: 0,
+  panY: 0,
+};
 
 const canvasTools: Array<{
   kind: CanvasItemKind;
@@ -78,10 +129,16 @@ export function CanvasInspector(props: {
     props.canvas.items[0]?.id ?? null,
   );
   const [drag, setDrag] = useState<DragState | null>(null);
+  const [pan, setPan] = useState<PanState | null>(null);
+  const [viewport, setViewport] = useState<ViewportState>(DEFAULT_VIEWPORT);
+  const [spacePanActive, setSpacePanActive] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(true);
+  const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
   const [undoStack, setUndoStack] = useState<ProjectCanvas[]>([]);
   const [redoStack, setRedoStack] = useState<ProjectCanvas[]>([]);
+  const stageRef = useRef<HTMLElement | null>(null);
+  const contextMenuRef = useRef<HTMLDivElement | null>(null);
 
   const pages = useMemo(
     () => [...props.canvas.pages].sort((left, right) => left.order - right.order),
@@ -99,6 +156,10 @@ export function CanvasInspector(props: {
     .filter((item) => item.visible)
     .sort((left, right) => left.zIndex - right.zIndex);
   const layers = [...scopedItems].sort(compareLayerItems);
+  const contextMenuItem =
+    contextMenu?.type === "item"
+      ? props.canvas.items.find((item) => item.id === contextMenu.itemId) ?? null
+      : null;
 
   useEffect(() => {
     if (!selectedId) return;
@@ -109,21 +170,127 @@ export function CanvasInspector(props: {
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
-      if (event.key === "Escape") setSelectedId(null);
+      if (event.key === "Escape") {
+        setSelectedId(null);
+        setSpacePanActive(false);
+      }
+      if (event.code === "Space" && !isTextEditingTarget(event.target)) {
+        event.preventDefault();
+        setSpacePanActive(true);
+      }
+      if (
+        (event.key === "Delete" || event.key === "Backspace") &&
+        !isTextEditingTarget(event.target) &&
+        selectedItem
+      ) {
+        event.preventDefault();
+        deleteItem(selectedItem);
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) redoCanvas();
         else undoCanvas();
       }
+      if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "y") {
+        event.preventDefault();
+        redoCanvas();
+      }
     }
+    function handleKeyUp(event: KeyboardEvent) {
+      if (event.code === "Space") setSpacePanActive(false);
+    }
+    window.addEventListener("keyup", handleKeyUp);
     window.addEventListener("keydown", handleKeyDown);
-    return () => window.removeEventListener("keydown", handleKeyDown);
-  }, [props.canvas, redoStack, undoStack]);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown);
+      window.removeEventListener("keyup", handleKeyUp);
+    };
+  }, [props.canvas, redoStack, selectedItem, undoStack]);
 
   useEffect(() => {
     setUndoStack([]);
     setRedoStack([]);
+    setViewport(DEFAULT_VIEWPORT);
+    setPan(null);
+    setContextMenu(null);
   }, [props.canvas.projectId]);
+
+  useEffect(() => {
+    if (!contextMenu) return;
+    function handlePointerDown(event: globalThis.PointerEvent) {
+      if (
+        event.target instanceof Node &&
+        contextMenuRef.current?.contains(event.target)
+      ) {
+        return;
+      }
+      setContextMenu(null);
+    }
+    function handleMenuKeyDown(event: KeyboardEvent) {
+      if (event.key === "Escape") setContextMenu(null);
+    }
+    window.addEventListener("pointerdown", handlePointerDown);
+    window.addEventListener("keydown", handleMenuKeyDown);
+    return () => {
+      window.removeEventListener("pointerdown", handlePointerDown);
+      window.removeEventListener("keydown", handleMenuKeyDown);
+    };
+  }, [contextMenu]);
+
+  useEffect(() => {
+    function preventWebViewPageZoom(event: WheelEvent) {
+      if (event.ctrlKey || event.metaKey) {
+        event.preventDefault();
+      }
+    }
+
+    window.addEventListener("wheel", preventWebViewPageZoom, {
+      capture: true,
+      passive: false,
+    });
+    return () => {
+      window.removeEventListener("wheel", preventWebViewPageZoom, {
+        capture: true,
+      });
+    };
+  }, []);
+
+  useEffect(() => {
+    const stage = stageRef.current;
+    if (!stage) return;
+    let lastGestureScale = 1;
+
+    function handleGestureStart(event: Event) {
+      event.preventDefault();
+      lastGestureScale = gestureScale(event);
+    }
+
+    function handleGestureChange(event: Event) {
+      event.preventDefault();
+      const rect = stage?.getBoundingClientRect();
+      if (!rect) return;
+      const nextScale = gestureScale(event);
+      const rawFactor = nextScale / lastGestureScale;
+      const factor = Math.pow(rawFactor, PINCH_ZOOM_SPEED);
+      lastGestureScale = nextScale;
+      const point = gesturePoint(event, rect);
+      zoomAtPoint(point.x, point.y, factor);
+    }
+
+    function handleGestureEnd() {
+      lastGestureScale = 1;
+    }
+
+    const options: AddEventListenerOptions = { passive: false };
+    stage.addEventListener("gesturestart", handleGestureStart, options);
+    stage.addEventListener("gesturechange", handleGestureChange, options);
+    stage.addEventListener("gestureend", handleGestureEnd, options);
+    return () => {
+      stage.removeEventListener("gesturestart", handleGestureStart, options);
+      stage.removeEventListener("gesturechange", handleGestureChange, options);
+      stage.removeEventListener("gestureend", handleGestureEnd, options);
+    };
+  });
 
   function commitCanvas(
     patch: Partial<ProjectCanvas>,
@@ -245,6 +412,75 @@ export function CanvasInspector(props: {
     if (selectedId === item.id) setSelectedId(null);
   }
 
+  function duplicateItem(item: CanvasItem) {
+    if (props.readOnly) return;
+    const duplicate = createCanvasItem({
+      canvas: props.canvas,
+      kind: item.kind,
+      state: "proposed",
+      pageId: item.pageId,
+      device: item.device,
+      x: item.x + 28,
+      y: item.y + 28,
+    });
+    const next = {
+      ...duplicate,
+      title: item.title,
+      body: item.body,
+      width: item.width,
+      height: item.height,
+      comment: item.comment,
+      zIndex: nextZIndex(props.canvas.items),
+    };
+    commitItems([...props.canvas.items, next]);
+    setSelectedId(next.id);
+  }
+
+  function bringItemToFront(item: CanvasItem) {
+    if (props.readOnly) return;
+    updateItem(item.id, { zIndex: nextZIndex(props.canvas.items) });
+  }
+
+  function sendItemToBack(item: CanvasItem) {
+    if (props.readOnly) return;
+    updateItem(item.id, { zIndex: previousZIndex(props.canvas.items) });
+  }
+
+  function openItemMenu(
+    event: ReactMouseEvent<HTMLDivElement>,
+    item: CanvasItem,
+  ) {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedId(item.id);
+    setContextMenu({
+      type: "item",
+      itemId: item.id,
+      ...contextMenuPosition(event.clientX, event.clientY),
+    });
+  }
+
+  function openStageMenu(event: ReactMouseEvent<HTMLElement>) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = stagePointToCanvas(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      viewport,
+    );
+    setContextMenu({
+      type: "stage",
+      canvasX: Math.max(8, Math.round(point.x)),
+      canvasY: Math.max(8, Math.round(point.y)),
+      ...contextMenuPosition(event.clientX, event.clientY),
+    });
+  }
+
+  function runContextAction(action: () => void) {
+    action();
+    setContextMenu(null);
+  }
+
   function beginDrag(
     event: PointerEvent<HTMLDivElement>,
     item: CanvasItem,
@@ -255,20 +491,24 @@ export function CanvasInspector(props: {
     setSelectedId(item.id);
     if (props.readOnly || item.locked) return;
     pushUndoSnapshot();
+    const focusedItem = itemWithFocusedZIndex(item, props.canvas.items);
+    if (focusedItem.zIndex !== item.zIndex) {
+      updateItem(item.id, { zIndex: focusedItem.zIndex }, { recordHistory: false });
+    }
     event.currentTarget.setPointerCapture(event.pointerId);
     setDrag({
       itemId: item.id,
       mode,
       startX: event.clientX,
       startY: event.clientY,
-      original: item,
+      original: focusedItem,
     });
   }
 
   function continueDrag(event: PointerEvent<HTMLDivElement>) {
     if (!drag) return;
-    const dx = event.clientX - drag.startX;
-    const dy = event.clientY - drag.startY;
+    const dx = (event.clientX - drag.startX) / viewport.scale;
+    const dy = (event.clientY - drag.startY) / viewport.scale;
     const next =
       drag.mode === "move"
         ? {
@@ -279,7 +519,91 @@ export function CanvasInspector(props: {
     updateItem(drag.itemId, {
       ...next,
       ...movementPatch(drag.original),
+      zIndex: drag.original.zIndex,
     }, { recordHistory: false });
+  }
+
+  function beginPan(event: PointerEvent<HTMLElement>, force = false) {
+    if (!force && !shouldStartPan(event)) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    setPan({
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      originX: viewport.panX,
+      originY: viewport.panY,
+    });
+  }
+
+  function continuePan(event: PointerEvent<HTMLElement>) {
+    if (!pan || pan.pointerId !== event.pointerId) return;
+    setViewport((current) => ({
+      ...current,
+      panX: pan.originX + event.clientX - pan.startX,
+      panY: pan.originY + event.clientY - pan.startY,
+    }));
+  }
+
+  function endPointer() {
+    setDrag(null);
+    setPan(null);
+  }
+
+  function continuePointer(event: PointerEvent<HTMLDivElement>) {
+    continueDrag(event);
+    continuePan(event);
+  }
+
+  function handleWheel(event: ReactWheelEvent<HTMLElement>) {
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    if (shouldWheelPan(event)) {
+      setViewport((current) => ({
+        ...current,
+        panX: current.panX - event.deltaX,
+        panY: current.panY - event.deltaY,
+      }));
+      return;
+    }
+    const factor = Math.exp(-event.deltaY * WHEEL_ZOOM_SPEED);
+    zoomAtPoint(event.clientX - rect.left, event.clientY - rect.top, factor);
+  }
+
+  function zoomAtPoint(stageX: number, stageY: number, factor: number) {
+    setViewport((current) => {
+      const scale = clamp(
+        current.scale * factor,
+        MIN_CANVAS_SCALE,
+        MAX_CANVAS_SCALE,
+      );
+      const canvasX = (stageX - current.panX) / current.scale;
+      const canvasY = (stageY - current.panY) / current.scale;
+      return {
+        scale,
+        panX: stageX - canvasX * scale,
+        panY: stageY - canvasY * scale,
+      };
+    });
+  }
+
+  function zoomFromCenter(factor: number) {
+    const rect = stageRef.current?.getBoundingClientRect();
+    if (!rect) return;
+    zoomAtPoint(rect.width / 2, rect.height / 2, factor);
+  }
+
+  function resetViewport() {
+    const rect = stageRef.current?.getBoundingClientRect();
+    const bounds = visibleCanvasBounds(stageItems);
+    if (!rect || !bounds) {
+      setViewport(DEFAULT_VIEWPORT);
+      setPan(null);
+      return;
+    }
+    setViewport(fitBoundsToStage(bounds, rect));
+    setPan(null);
   }
 
   function beginToolDrag(event: DragEvent<HTMLButtonElement>, kind: CanvasItemKind) {
@@ -294,9 +618,14 @@ export function CanvasInspector(props: {
     if (!canvasTools.some((tool) => tool.kind === kind)) return;
     event.preventDefault();
     const rect = event.currentTarget.getBoundingClientRect();
+    const point = stagePointToCanvas(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      viewport,
+    );
     addItem(kind, {
-      x: Math.max(8, Math.round(event.clientX - rect.left - 24)),
-      y: Math.max(8, Math.round(event.clientY - rect.top - 18)),
+      x: Math.max(8, Math.round(point.x - 24)),
+      y: Math.max(8, Math.round(point.y - 18)),
     });
   }
 
@@ -349,6 +678,30 @@ export function CanvasInspector(props: {
             })}
             <span className="canvas-tool-spacer" />
             <button
+              aria-label="Zoom out"
+              onClick={() => zoomFromCenter(0.85)}
+              title="Zoom out"
+              type="button"
+            >
+              <ZoomOut size={15} />
+            </button>
+            <button
+              aria-label="Reset view"
+              onClick={resetViewport}
+              title="Reset view"
+              type="button"
+            >
+              <Maximize2 size={15} />
+            </button>
+            <button
+              aria-label="Zoom in"
+              onClick={() => zoomFromCenter(1.18)}
+              title="Zoom in"
+              type="button"
+            >
+              <ZoomIn size={15} />
+            </button>
+            <button
               aria-label="Undo"
               disabled={props.readOnly || undoStack.length === 0}
               onClick={undoCanvas}
@@ -368,14 +721,19 @@ export function CanvasInspector(props: {
             </button>
           </div>
           <section
-            className={`canvas-stage ${props.canvas.mode}`}
+            className={`canvas-stage ${props.canvas.mode} ${
+              pan ? "panning" : spacePanActive ? "pan-ready" : ""
+            }`}
+            ref={stageRef}
             onDragOver={(event) => event.preventDefault()}
             onDrop={dropTool}
-            onPointerMove={continueDrag}
-            onPointerUp={() => setDrag(null)}
-            onPointerCancel={() => setDrag(null)}
+            onPointerDown={beginPan}
+            onPointerMove={continuePointer}
+            onPointerUp={endPointer}
+            onPointerCancel={endPointer}
+            onWheel={handleWheel}
+            onContextMenu={openStageMenu}
           >
-            <div className="canvas-grid" />
             {scopedItems.length === 0 && (
               <div className="canvas-empty">
                 <MousePointer2 size={18} />
@@ -400,22 +758,35 @@ export function CanvasInspector(props: {
                 )}
               </div>
             )}
-            {stageItems
-              .filter(hasOriginalGeometry)
-              .map((item) => (
-                <CanvasOriginGhost item={item} key={`${item.id}-origin`} />
-              ))}
-            {stageItems.map((item) => {
-              const selected = item.id === selectedId;
-              return (
-                <CanvasStageItem
-                  item={item}
-                  key={item.id}
-                  onBeginDrag={beginDrag}
-                  selected={selected}
-                />
-              );
-            })}
+            <div
+              className="canvas-viewport"
+              style={{
+                transform: `translate(${viewport.panX}px, ${viewport.panY}px) scale(${viewport.scale})`,
+                width: CANVAS_WORLD_WIDTH,
+                height: CANVAS_WORLD_HEIGHT,
+              }}
+            >
+              <div className="canvas-grid" />
+              {stageItems
+                .filter(hasOriginalGeometry)
+                .map((item) => (
+                  <CanvasOriginGhost item={item} key={`${item.id}-origin`} />
+                ))}
+              {stageItems.map((item) => {
+                const selected = item.id === selectedId;
+                return (
+                  <CanvasStageItem
+                    item={item}
+                    key={item.id}
+                    onBeginDrag={beginDrag}
+                    onBeginPan={beginPan}
+                    onOpenContextMenu={openItemMenu}
+                    selected={selected}
+                    spacePanActive={spacePanActive}
+                  />
+                );
+              })}
+            </div>
           </section>
         </section>
 
@@ -475,6 +846,9 @@ export function CanvasInspector(props: {
               (selectedItem ? (
                 <CanvasDetails
                   item={selectedItem}
+                  onApplyPosition={() =>
+                    updateItem(selectedItem.id, applyPlacementPatch(selectedItem))
+                  }
                   onUpdate={(patch) => updateItem(selectedItem.id, patch)}
                   readOnly={props.readOnly}
                 />
@@ -486,6 +860,36 @@ export function CanvasInspector(props: {
           </section>
         </aside>
       </div>
+      {contextMenu && (
+        <CanvasContextMenu
+          item={contextMenuItem}
+          menu={contextMenu}
+          onAddItem={(kind, point) => runContextAction(() => addItem(kind, point))}
+          onApplyPosition={(item) =>
+            runContextAction(() =>
+              updateItem(item.id, applyPlacementPatch(item)),
+            )
+          }
+          onBringToFront={(item) =>
+            runContextAction(() => bringItemToFront(item))
+          }
+          onChangeState={(item, state) =>
+            runContextAction(() => updateItem(item.id, statePatchForItem(item, state)))
+          }
+          onClose={() => setContextMenu(null)}
+          onDelete={(item) => runContextAction(() => deleteItem(item))}
+          onDuplicate={(item) => runContextAction(() => duplicateItem(item))}
+          onResetPosition={(item) =>
+            runContextAction(() => updateItem(item.id, resetPlacementPatch(item)))
+          }
+          onSendToBack={(item) => runContextAction(() => sendItemToBack(item))}
+          onToggleLock={(item) =>
+            runContextAction(() => updateItem(item.id, { locked: !item.locked }))
+          }
+          readOnly={props.readOnly}
+          ref={contextMenuRef}
+        />
+      )}
     </div>
   );
 }
@@ -493,10 +897,16 @@ export function CanvasInspector(props: {
 function CanvasStageItem(props: {
   item: CanvasItem;
   selected: boolean;
+  spacePanActive: boolean;
   onBeginDrag: (
     event: PointerEvent<HTMLDivElement>,
     item: CanvasItem,
     mode: DragState["mode"],
+  ) => void;
+  onBeginPan: (event: PointerEvent<HTMLElement>, force?: boolean) => void;
+  onOpenContextMenu: (
+    event: ReactMouseEvent<HTMLDivElement>,
+    item: CanvasItem,
   ) => void;
 }) {
   const Icon = iconForKind(props.item.kind);
@@ -517,7 +927,15 @@ function CanvasStageItem(props: {
         zIndex: props.item.zIndex,
       }}
       tabIndex={0}
-      onPointerDown={(event) => props.onBeginDrag(event, props.item, "move")}
+      onPointerDown={(event) => {
+        if (event.button === 2) return;
+        if (event.button === 1 || props.spacePanActive) {
+          props.onBeginPan(event, props.spacePanActive);
+          return;
+        }
+        props.onBeginDrag(event, props.item, "move");
+      }}
+      onContextMenu={(event) => props.onOpenContextMenu(event, props.item)}
     >
       <div className="canvas-item-header">
         <Icon size={13} />
@@ -672,6 +1090,7 @@ function LockBadge(props: { locked: boolean; compact?: boolean }) {
 function CanvasDetails(props: {
   item: CanvasItem;
   readOnly: boolean;
+  onApplyPosition: () => void;
   onUpdate: (patch: Partial<CanvasItem>) => void;
 }) {
   const locked = props.item.locked || props.readOnly;
@@ -765,14 +1184,22 @@ function CanvasDetails(props: {
         />
       </div>
       {hasOriginalGeometry(props.item) && (
-        <button
-          className="canvas-reset-placement"
-          disabled={props.readOnly}
-          onClick={() => props.onUpdate(resetPlacementPatch(props.item))}
-          type="button"
-        >
-          Reset position
-        </button>
+        <div className="canvas-placement-actions">
+          <button
+            disabled={props.readOnly}
+            onClick={props.onApplyPosition}
+            type="button"
+          >
+            Apply position
+          </button>
+          <button
+            disabled={props.readOnly}
+            onClick={() => props.onUpdate(resetPlacementPatch(props.item))}
+            type="button"
+          >
+            Reset position
+          </button>
+        </div>
       )}
       <p className="canvas-detail-meta">
         {stateLabel(props.item.state)} - {props.item.width}x{props.item.height}
@@ -802,6 +1229,161 @@ function NumberField(props: {
     </label>
   );
 }
+
+const CanvasContextMenu = forwardRef<
+  HTMLDivElement,
+  {
+    item: CanvasItem | null;
+    menu: ContextMenuState;
+    readOnly: boolean;
+    onAddItem: (kind: CanvasItemKind, point: { x: number; y: number }) => void;
+    onApplyPosition: (item: CanvasItem) => void;
+    onBringToFront: (item: CanvasItem) => void;
+    onChangeState: (item: CanvasItem, state: CanvasItemState) => void;
+    onClose: () => void;
+    onDelete: (item: CanvasItem) => void;
+    onDuplicate: (item: CanvasItem) => void;
+    onResetPosition: (item: CanvasItem) => void;
+    onSendToBack: (item: CanvasItem) => void;
+    onToggleLock: (item: CanvasItem) => void;
+  }
+>(function CanvasContextMenu(props, ref) {
+  const style = {
+    left: props.menu.x,
+    top: props.menu.y,
+  };
+
+  if (props.menu.type === "stage") {
+    const point = { x: props.menu.canvasX, y: props.menu.canvasY };
+    return (
+      <div
+        className="canvas-context-menu"
+        ref={ref}
+        role="menu"
+        style={style}
+      >
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onAddItem("container", point)}
+          role="menuitem"
+          type="button"
+        >
+          Add container
+        </button>
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onAddItem("button", point)}
+          role="menuitem"
+          type="button"
+        >
+          Add button
+        </button>
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onAddItem("text", point)}
+          role="menuitem"
+          type="button"
+        >
+          Add text
+        </button>
+      </div>
+    );
+  }
+
+  if (!props.item) return null;
+
+  const item = props.item;
+  const moved = hasOriginalGeometry(item);
+  return (
+    <div className="canvas-context-menu" ref={ref} role="menu" style={style}>
+      <button
+        disabled={props.readOnly}
+        onClick={() => props.onBringToFront(item)}
+        role="menuitem"
+        type="button"
+      >
+        Bring to front
+      </button>
+      <button
+        disabled={props.readOnly}
+        onClick={() => props.onSendToBack(item)}
+        role="menuitem"
+        type="button"
+      >
+        Send to back
+      </button>
+      <button
+        disabled={props.readOnly}
+        onClick={() => props.onDuplicate(item)}
+        role="menuitem"
+        type="button"
+      >
+        Duplicate
+      </button>
+      <button
+        disabled={props.readOnly}
+        onClick={() => props.onToggleLock(item)}
+        role="menuitem"
+        type="button"
+      >
+        {item.locked ? "Unlock position" : "Lock position"}
+      </button>
+      {moved && (
+        <>
+          <hr />
+          <button
+            disabled={props.readOnly}
+            onClick={() => props.onApplyPosition(item)}
+            role="menuitem"
+            type="button"
+          >
+            Apply position
+          </button>
+          <button
+            disabled={props.readOnly}
+            onClick={() => props.onResetPosition(item)}
+            role="menuitem"
+            type="button"
+          >
+            Reset position
+          </button>
+        </>
+      )}
+      <hr />
+      {item.state !== "current" && (
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onChangeState(item, "current")}
+          role="menuitem"
+          type="button"
+        >
+          Mark current
+        </button>
+      )}
+      {item.state !== "proposed" && (
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onChangeState(item, "proposed")}
+          role="menuitem"
+          type="button"
+        >
+          Mark temporary
+        </button>
+      )}
+      {item.state !== "deleted" && (
+        <button
+          className={item.state === "current" ? "danger" : ""}
+          disabled={props.readOnly}
+          onClick={() => props.onDelete(item)}
+          role="menuitem"
+          type="button"
+        >
+          {deleteActionTitle(item)}
+        </button>
+      )}
+    </div>
+  );
+});
 
 function scopeItems(canvas: ProjectCanvas) {
   if (canvas.mode === "backend") {
@@ -917,6 +1499,146 @@ function displayDimensions(item: CanvasItem) {
   return { width: size, height: size };
 }
 
+function stagePointToCanvas(
+  stageX: number,
+  stageY: number,
+  viewport: ViewportState,
+) {
+  return {
+    x: (stageX - viewport.panX) / viewport.scale,
+    y: (stageY - viewport.panY) / viewport.scale,
+  };
+}
+
+function shouldStartPan(event: PointerEvent<HTMLElement>) {
+  return event.button === 1 || event.currentTarget.classList.contains("pan-ready");
+}
+
+function shouldWheelPan(event: ReactWheelEvent<HTMLElement>) {
+  if (event.ctrlKey || event.metaKey || Math.abs(event.deltaZ) > 0) {
+    return false;
+  }
+  const absX = Math.abs(event.deltaX);
+  const absY = Math.abs(event.deltaY);
+  if (event.shiftKey || absX > absY * HORIZONTAL_PAN_RATIO) {
+    return true;
+  }
+  if (event.deltaMode !== 0) {
+    return false;
+  }
+  if (!Number.isInteger(event.deltaX) || !Number.isInteger(event.deltaY)) {
+    return true;
+  }
+  return absY > 0 && absY < TRACKPAD_SCROLL_DELTA_LIMIT;
+}
+
+function isTextEditingTarget(target: EventTarget | null) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tagName = target.tagName.toLowerCase();
+  return (
+    tagName === "input" ||
+    tagName === "textarea" ||
+    tagName === "select" ||
+    target.isContentEditable
+  );
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function visibleCanvasBounds(items: CanvasItem[]) {
+  if (items.length === 0) return null;
+  const boxes = items.flatMap((item) => {
+    const itemBox = {
+      minX: item.x,
+      minY: item.y,
+      maxX: item.x + displayDimensions(item).width,
+      maxY: item.y + displayDimensions(item).height,
+    };
+    if (!hasOriginalGeometry(item)) return [itemBox];
+    return [
+      itemBox,
+      {
+        minX: item.originalX,
+        minY: item.originalY,
+        maxX: item.originalX + (item.originalWidth ?? item.width),
+        maxY: item.originalY + (item.originalHeight ?? item.height),
+      },
+    ];
+  });
+  return {
+    minX: Math.min(...boxes.map((box) => box.minX)),
+    minY: Math.min(...boxes.map((box) => box.minY)),
+    maxX: Math.max(...boxes.map((box) => box.maxX)),
+    maxY: Math.max(...boxes.map((box) => box.maxY)),
+  };
+}
+
+function itemWithFocusedZIndex(item: CanvasItem, items: CanvasItem[]) {
+  const highestZIndex = Math.max(item.zIndex, ...items.map((candidate) => candidate.zIndex));
+  if (item.zIndex >= highestZIndex) return item;
+  return { ...item, zIndex: highestZIndex + 1 };
+}
+
+function nextZIndex(items: CanvasItem[]) {
+  return items.reduce((highest, item) => Math.max(highest, item.zIndex), 0) + 1;
+}
+
+function previousZIndex(items: CanvasItem[]) {
+  return items.reduce((lowest, item) => Math.min(lowest, item.zIndex), 0) - 1;
+}
+
+function contextMenuPosition(clientX: number, clientY: number) {
+  const width = 190;
+  const height = 310;
+  return {
+    x: Math.max(8, Math.min(clientX, window.innerWidth - width)),
+    y: Math.max(8, Math.min(clientY, window.innerHeight - height)),
+  };
+}
+
+function fitBoundsToStage(
+  bounds: NonNullable<ReturnType<typeof visibleCanvasBounds>>,
+  rect: DOMRect,
+): ViewportState {
+  const width = Math.max(CANVAS_GRID_SIZE, bounds.maxX - bounds.minX);
+  const height = Math.max(CANVAS_GRID_SIZE, bounds.maxY - bounds.minY);
+  const availableWidth = Math.max(CANVAS_GRID_SIZE, rect.width - FIT_VIEW_PADDING * 2);
+  const availableHeight = Math.max(CANVAS_GRID_SIZE, rect.height - FIT_VIEW_PADDING * 2);
+  const scale = clamp(
+    Math.min(1, availableWidth / width, availableHeight / height),
+    MIN_CANVAS_SCALE,
+    MAX_CANVAS_SCALE,
+  );
+  return {
+    scale,
+    panX: (rect.width - width * scale) / 2 - bounds.minX * scale,
+    panY: (rect.height - height * scale) / 2 - bounds.minY * scale,
+  };
+}
+
+function gestureScale(event: Event) {
+  const candidate = event as Event & { scale?: number };
+  return typeof candidate.scale === "number" && Number.isFinite(candidate.scale)
+    ? candidate.scale
+    : 1;
+}
+
+function gesturePoint(event: Event, rect: DOMRect) {
+  const candidate = event as Event & { clientX?: number; clientY?: number };
+  return {
+    x:
+      typeof candidate.clientX === "number"
+        ? candidate.clientX - rect.left
+        : rect.width / 2,
+    y:
+      typeof candidate.clientY === "number"
+        ? candidate.clientY - rect.top
+        : rect.height / 2,
+  };
+}
+
 function buttonSize(width: number, height: number) {
   const uneven = Math.abs(width - height) > 8;
   const oversized = width > 64 || height > 64;
@@ -931,6 +1653,16 @@ function resetPlacementPatch(item: CanvasItem): Partial<CanvasItem> {
     y: item.originalY,
     width: item.originalWidth ?? item.width,
     height: item.originalHeight ?? item.height,
+    ...statePatch("current"),
+  };
+}
+
+function applyPlacementPatch(_item: CanvasItem): Partial<CanvasItem> {
+  return {
+    originalX: null,
+    originalY: null,
+    originalWidth: null,
+    originalHeight: null,
     ...statePatch("current"),
   };
 }

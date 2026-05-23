@@ -116,7 +116,7 @@ Status note: Phase 2 has a first implemented slice in `apps/desktop/src`: canvas
 - [x] If a locked-off current panel is moved without confirmed state change, show its original position as a grey dashed outline.
 - [x] Offer reset placement to animate or return the moved panel to the saved coordinates, and show that control only in the moved condition.
 - [ ] Allow "mark as current" so accepted future panels become current panels after implementation.
-- [ ] Track canvas coordinates and panel-local coordinates.
+- [ ] Track canvas coordinates, normalized/grid coordinates, and panel-local coordinates in serialized snapshots.
 
 ## Phase 4 - Canvas Interaction Rules
 
@@ -125,11 +125,17 @@ Status note: Phase 2 has a first implemented slice in `apps/desktop/src`: canvas
 - [ ] Escape deselects.
 - [x] Delete removes only temporary/proposed containers. Delete on current/blue should mark the item deleted/red instead of dropping it.
 - [x] Gold delete is permanent delete, blue delete is a red mark-as-deleted affordance, and red/deleted rows do not show a normal delete action.
-- [ ] Mouse wheel and trackpad pinch zoom the canvas.
-- [ ] Two-finger trackpad pan and middle-mouse drag move the canvas.
-- [ ] Right-click on canvas/container opens contextual actions: bring to front, send to back, duplicate, lock/unlock, group, ungroup, mark as current, reset placement when available.
-- [ ] Right-click can also expose copy, change state/color, visibility, and delete where allowed so common edits take fewer clicks.
+- [x] Mouse wheel and trackpad pinch zoom the canvas without treating smooth two-finger scroll as mouse-wheel zoom.
+- [x] Two-finger trackpad scroll, shift/horizontal wheel, middle-mouse drag, and Space+drag move the canvas.
+- [x] Enable the desktop WebView pinch path while preventing whole-page zoom so pinch can be handled by Canvas.
+- [x] Increase native pinch-gesture sensitivity to match the faster wheel zoom feel.
+- [x] Add compact toolbar controls for zoom in, zoom out, fit/reset view, undo, and redo.
+- [x] Delete/Backspace keyboard behavior follows the same state rules as layer delete.
+- [x] Right-click on canvas/container opens contextual actions for bring to front, send to back, duplicate, lock/unlock, state changes, apply/reset position when available, and delete where allowed.
+- [ ] Add copy, group, ungroup, and richer visibility actions to the context menu once the basic menu feels right.
+- [x] Blank-canvas right-click can add simple items without opening the browser/WebView menu.
 - [ ] Keep the tool palette minimal, likely near the right-side layer panel.
+- [x] Use translucent planning fills, longer temporary/original dashes, and simple drag-to-front z-order behavior.
 - [ ] Lock editing while any thread in the project is running, but keep view access available.
 - [x] Do not render lock icons inside canvas shapes; keep lock/unlock affordances in Layers and right-click actions, not as duplicated Details buttons.
 - [ ] If the canvas is the active workspace, prevent accidental chat submission from the same surface; chat and canvas should not compete for the same send action.

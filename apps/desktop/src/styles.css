@@ -2427,10 +2427,26 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   border: 1px solid #42453e;
   border-radius: 7px;
   background: #23251f;
+  touch-action: none;
 }
 
 .canvas-stage.backend {
   background: #202623;
+}
+
+.canvas-stage.pan-ready {
+  cursor: grab;
+}
+
+.canvas-stage.panning {
+  cursor: grabbing;
+}
+
+.canvas-viewport {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform-origin: 0 0;
 }
 
 .canvas-grid {
@@ -2445,6 +2461,7 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .canvas-empty {
   position: absolute;
   inset: 0;
+  z-index: 2;
   display: grid;
   place-content: center;
   justify-items: center;
@@ -2482,19 +2499,21 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   border-radius: 8px;
   padding: 9px;
   color: #f0f6ff;
-  background: rgba(39, 68, 100, 0.9);
+  background: rgba(39, 68, 100, 0.6);
   box-shadow: 0 10px 24px #00000030;
   cursor: move;
+  text-rendering: geometricPrecision;
   user-select: none;
+  -webkit-font-smoothing: antialiased;
 }
 
 .canvas-item.text {
-  background: rgba(42, 75, 86, 0.9);
+  background: rgba(42, 75, 86, 0.58);
 }
 
 .canvas-item.modal {
   border-color: #7eb0f0;
-  background: rgba(31, 52, 79, 0.94);
+  background: rgba(31, 52, 79, 0.64);
   box-shadow:
     0 16px 38px #00000042,
     inset 0 0 0 5px #ffffff0d;
@@ -2555,26 +2574,39 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .canvas-item.proposed {
-  border-color: #d7ad53;
-  border-style: dashed;
+  border-color: transparent;
+  border-style: solid;
   color: #fff6dd;
-  background: rgba(65, 54, 29, 0.92);
+  background: rgba(65, 54, 29, 0.58);
 }
 
 .canvas-item.deleted {
   border-color: #c76255;
   color: #ffe5df;
-  background: rgba(65, 38, 35, 0.92);
+  background: rgba(65, 38, 35, 0.58);
 }
 
 .canvas-item.changed-position {
   border-color: #72a8df;
   border-style: solid;
   color: #f0f6ff;
-  background: rgba(39, 68, 100, 0.9);
+  background: rgba(39, 68, 100, 0.6);
   box-shadow:
     0 10px 24px #00000030,
     0 0 0 2px rgba(215, 173, 83, 0.56);
+}
+
+.canvas-item.proposed::before {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, #d7ad53 58%, transparent 0) top / 16px 1px repeat-x,
+    linear-gradient(90deg, #d7ad53 58%, transparent 0) bottom / 16px 1px repeat-x,
+    linear-gradient(0deg, #d7ad53 58%, transparent 0) left / 1px 16px repeat-y,
+    linear-gradient(0deg, #d7ad53 58%, transparent 0) right / 1px 16px repeat-y;
+  content: "";
+  pointer-events: none;
 }
 
 .canvas-item.selected {
@@ -2677,9 +2709,24 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   place-items: start;
   min-width: 34px;
   min-height: 24px;
-  border: 1px dashed #8a8f87;
+  border: 1px solid transparent;
   border-radius: 8px;
   background: rgba(194, 198, 186, 0.04);
+  pointer-events: none;
+  text-rendering: geometricPrecision;
+  -webkit-font-smoothing: antialiased;
+}
+
+.canvas-origin-ghost::before {
+  position: absolute;
+  inset: -1px;
+  border-radius: inherit;
+  background:
+    linear-gradient(90deg, #8a8f87 58%, transparent 0) top / 16px 1px repeat-x,
+    linear-gradient(90deg, #8a8f87 58%, transparent 0) bottom / 16px 1px repeat-x,
+    linear-gradient(0deg, #8a8f87 58%, transparent 0) left / 1px 16px repeat-y,
+    linear-gradient(0deg, #8a8f87 58%, transparent 0) right / 1px 16px repeat-y;
+  content: "";
   pointer-events: none;
 }
 
@@ -2940,11 +2987,59 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   gap: 6px;
 }
 
-.canvas-reset-placement {
-  justify-self: stretch;
+.canvas-placement-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+}
+
+.canvas-placement-actions button {
   border: 1px solid #625c4d;
   background: #2f2e28;
   color: #e8dcc4;
+}
+
+.canvas-context-menu {
+  position: fixed;
+  z-index: 60;
+  display: grid;
+  gap: 2px;
+  min-width: 176px;
+  padding: 6px;
+  border: 1px solid #4c4d48;
+  border-radius: 8px;
+  background: #f1f0ec;
+  box-shadow: 0 18px 42px #00000052;
+  color: #171815;
+}
+
+.canvas-context-menu button {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  border: 0;
+  border-radius: 5px;
+  background: transparent;
+  color: inherit;
+  font-size: 13px;
+  text-align: left;
+}
+
+.canvas-context-menu button:hover:not(:disabled),
+.canvas-context-menu button:focus-visible:not(:disabled) {
+  background: #dedbd2;
+}
+
+.canvas-context-menu button.danger {
+  color: #bc2d22;
+}
+
+.canvas-context-menu hr {
+  width: 100%;
+  height: 1px;
+  margin: 4px 0;
+  border: 0;
+  background: #d5d2c9;
 }
 
 .canvas-detail-meta {
@@ -2957,7 +3052,8 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .canvas-tool-strip button:disabled,
 .canvas-page-rail button:disabled,
 .canvas-layer-row button:disabled,
-.canvas-reset-placement:disabled,
+.canvas-placement-actions button:disabled,
+.canvas-context-menu button:disabled,
 .canvas-state-picker button:disabled,
 .canvas-details-toggle:disabled,
 .canvas-info-button:disabled,
