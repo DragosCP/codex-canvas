@@ -31,7 +31,18 @@ export function allItems(thread: Thread | null): ThreadItem[] {
 }
 
 export function threadTitle(thread: Thread): string {
-  return thread.name || thread.preview || "New chat";
+  const title = thread.name || thread.preview || "New chat";
+  return isGeneratedCurrentUiMockupTitle(title)
+    ? "Generate current UI mockup"
+    : title;
+}
+
+function isGeneratedCurrentUiMockupTitle(title: string) {
+  return title
+    .trimStart()
+    .startsWith(
+      "Inspect this local project and generate a low-fidelity current UI Canvas mockup.",
+    );
 }
 
 export function appendDelta(

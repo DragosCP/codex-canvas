@@ -5,7 +5,7 @@
 - State: WIP
 - Location: `plans/wip/`
 - Completed: No
-- Current focus: project Canvas foundation is in; P02 is now active for visual planning canvas implementation. Next canvas work should improve Canvas placement/manual editing, define the explicit Canvas-to-prompt handoff, and make Plan Mode emphasize proposed changes. Backend Generate should wait until the manual loop is useful.
+- Current focus: project Canvas foundation is in; P02 is now active for visual planning canvas implementation. Next canvas work should improve Canvas placement/manual editing, define the explicit Canvas-to-prompt handoff, and turn prompt-only Plan Mode into Proposal Review with clear Canvas status. Backend Generate should wait until the manual loop is useful.
 - Related docs: `docs/Arch.md`, `docs/Prod.md`, `docs/UI-UX.md`
 - Rule for this plan: keep execution state here; move durable backend/product/UI facts to the docs.
 
@@ -37,6 +37,7 @@ P03 started with the app shell and core loop before the visual planning canvas. 
 - Projects and chats: add/select project, runtime path normalization, grouped project chats, New Chat session-local drafts, thread read/resume/start, rename, archive, search/filter, restart recovery, and stale-thread cleanup.
 - Sidebar product pass: slim project/chat rows, no top-level Plugins/Automations/global Chats, Show more/less for project chats, settings/account popover, usage remaining from real app-server rate limits.
 - Composer product pass: textarea-first composer, plus menu, native file picker/drag-drop intake, quiet attachment cards with image thumbnails/lightbox preview, unsupported-file blocking, permissions/model/effort popovers, Shift+Tab Plan Mode, compact send behavior, retry/stop rules, context meter.
+- Current Plan Mode implementation is only a prompt prefix. The desired product flow is a real Proposal Review that tells Codex whether Canvas is not attached, sparse, or usable, and gates implementation/canvas promotion behind Accept/Modify/Decline.
 - Chat rendering pass: final-answer/commentary separation, compact thought-process reveal, slim command rows, edited-file summaries, Markdown-styled message text, Markdown document inspector opening, compaction divider, hidden internal evidence prose.
 - Inspector/responsive pass: Activity default, active-chat document retargeting, wrapped/styled document preview, file-change detail without loading large diffs by default, responsive inspector collapse, phone-width sidebar drawer, and inspector-aware resizing that gives Canvas room while preserving a phone-width chat.
 - Account/settings pass: compact bottom-left popover, account identity, logout, real rate-limit rows when available, no right-inspector settings surface.

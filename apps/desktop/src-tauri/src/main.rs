@@ -34,12 +34,12 @@ struct RuntimeInfo {
 impl BackendState {
     fn start() -> Self {
         let mut startup_error = None;
-        let child = if readyz(BRIDGE_PORT) {
-            None
-        } else {
-            match spawn_real_wsl_backend() {
-                Ok(child) => Some(child),
-                Err(error) => {
+        let child = match spawn_real_wsl_backend() {
+            Ok(child) => Some(child),
+            Err(error) => {
+                if readyz(BRIDGE_PORT) {
+                    None
+                } else {
                     startup_error = Some(error);
                     None
                 }
@@ -176,16 +176,25 @@ fn base64_encode(bytes: &[u8]) -> String {
 
 fn spawn_real_wsl_backend() -> Result<Child, String> {
     let repo_root = repo_root();
-    let mut command = Command::new("cmd.exe");
+    let script = repo_root.join("scripts").join("p03-real-app-server.mjs");
+    let cache_dir = repo_root.join(".cache");
+    fs::create_dir_all(&cache_dir)
+        .map_err(|error| format!("Failed to create desktop backend log directory: {error}"))?;
+    let log = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(cache_dir.join("p03-tauri-backend.log"))
+        .map_err(|error| format!("Failed to open desktop backend log: {error}"))?;
+    let log_stderr = log
+        .try_clone()
+        .map_err(|error| format!("Failed to clone desktop backend log: {error}"))?;
+    let mut command = Command::new("node");
     command
-        .args([
-            "/c",
-            "corepack pnpm --filter @openai/codex-desktop app-server:real",
-        ])
+        .arg(script)
         .current_dir(&repo_root)
         .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null());
+        .stdout(Stdio::from(log))
+        .stderr(Stdio::from(log_stderr));
 
     #[cfg(windows)]
     command.creation_flags(CREATE_NO_WINDOW);

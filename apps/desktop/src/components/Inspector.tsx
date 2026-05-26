@@ -4,6 +4,8 @@ import { threadTitle } from "../itemUtils";
 import type {
   InspectorSelection,
   PendingApproval,
+  CanvasSuggestion,
+  PlanProposal,
   Project,
   ProjectCanvas,
   Thread,
@@ -20,7 +22,10 @@ export function Inspector(props: {
   activeThread: Thread | null;
   canvas: ProjectCanvas | null;
   canvasProject: Project | null;
+  canvasProposal: PlanProposal | null;
+  canvasSuggestion: CanvasSuggestion | null;
   canvasReadOnly: boolean;
+  canvasSaveStatus: "saving" | "saved";
   documentError: string | null;
   documentText: string | null;
   fileChanges: Extract<ThreadItem, { type: "fileChange" }>[];
@@ -32,8 +37,37 @@ export function Inspector(props: {
   onRollback: () => void;
   onSelect: (selection: InspectorSelection) => void;
   onUpdateCanvas: (projectId: string, canvas: ProjectCanvas) => void;
+  onUpdateCanvasProposal: (proposalTurnId: string, canvas: ProjectCanvas) => void;
+  onUpdateCanvasSuggestion: (
+    suggestionTurnId: string,
+    canvas: ProjectCanvas,
+  ) => void;
   selection: InspectorSelection;
 }) {
+  const canvasSelected =
+    props.selection.type === "canvas" ||
+    props.selection.type === "canvasProposal" ||
+    props.selection.type === "canvasSuggestion";
+  const proposalSelected =
+    props.selection.type === "canvasProposal" ||
+    props.selection.type === "canvasSuggestion";
+  const canvasProposalSummary = proposalSelected
+    ? (props.selection.type === "canvasProposal"
+        ? props.canvasProposal?.canvasProposalSummary
+        : props.canvasSuggestion?.canvasProposalSummary)
+    : null;
+  function updateVisibleCanvas(canvas: ProjectCanvas) {
+    if (props.selection.type === "canvasProposal") {
+      props.onUpdateCanvasProposal(props.selection.proposalTurnId, canvas);
+      return;
+    }
+    if (props.selection.type === "canvasSuggestion") {
+      props.onUpdateCanvasSuggestion(props.selection.suggestionTurnId, canvas);
+      return;
+    }
+    props.onUpdateCanvas(canvas.projectId, canvas);
+  }
+
   return (
     <aside className="inspector">
       <button
@@ -44,14 +78,19 @@ export function Inspector(props: {
       />
       <header
         className={`inspector-header ${
-          props.selection.type === "canvas" ? "canvas-inspector-header" : ""
+          canvasSelected ? "canvas-inspector-header" : ""
         }`}
       >
         <h2>{inspectorTitle(props.selection)}</h2>
-        {props.selection.type === "canvas" && props.canvas ? (
+        {canvasSelected && (
+          <span className={`canvas-save-status ${props.canvasSaveStatus}`}>
+            {props.canvasSaveStatus === "saving" ? "Saving" : "Saved"}
+          </span>
+        )}
+        {canvasSelected && props.canvas ? (
           <CanvasModeSwitch
             canvas={props.canvas}
-            onChange={(canvas) => props.onUpdateCanvas(canvas.projectId, canvas)}
+            onChange={updateVisibleCanvas}
           />
         ) : null}
       </header>
@@ -65,15 +104,36 @@ export function Inspector(props: {
           onSelect={props.onSelect}
         />
       )}
-      {props.selection.type === "canvas" &&
+      {canvasSelected &&
         props.canvas &&
         props.canvasProject && (
           <CanvasInspector
             canvas={props.canvas}
             project={props.canvasProject}
             readOnly={props.canvasReadOnly}
-            onChange={(canvas) => props.onUpdateCanvas(canvas.projectId, canvas)}
+            onChange={updateVisibleCanvas}
             onRequestGenerateMockup={props.onRequestGenerateMockup}
+            focusReference={
+              props.selection.type === "canvas" ||
+              props.selection.type === "canvasProposal" ||
+              props.selection.type === "canvasSuggestion"
+                ? (props.selection.focusReference ?? null)
+                : null
+            }
+            focusRequestId={
+              props.selection.type === "canvas" ||
+              props.selection.type === "canvasProposal" ||
+              props.selection.type === "canvasSuggestion"
+                ? props.selection.focusRequestId
+                : undefined
+            }
+            proposalMode={proposalSelected}
+            proposalLabel={
+              props.selection.type === "canvasSuggestion"
+                ? "Canvas suggestion"
+                : "Plan proposal"
+            }
+            proposalSummary={canvasProposalSummary}
           />
         )}
       {props.selection.type === "document" && (
@@ -297,6 +357,10 @@ function inspectorTitle(selection: InspectorSelection) {
     case "document":
       return selection.title ?? "Document";
     case "canvas":
+      return "Canvas";
+    case "canvasProposal":
+      return "Canvas";
+    case "canvasSuggestion":
       return "Canvas";
     case "command":
       return "Command";

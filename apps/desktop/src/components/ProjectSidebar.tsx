@@ -470,7 +470,9 @@ export function ProjectSidebar(props: {
                         </button>
                         <div className="thread-row-meta">
                           <small className="thread-time">
-                            {draft.text.trim() || draft.attachments.length > 0
+                            {draft.text.trim() ||
+                            draft.attachments.length > 0 ||
+                            (draft.contexts?.length ?? 0) > 0
                               ? formatRelative(draft.updatedAt)
                               : "Draft"}
                           </small>

@@ -1,16 +1,22 @@
 import {
+  Check,
   ChevronDown,
   FileText,
   FolderOpen,
+  PanelRightOpen,
+  Pencil,
   PencilLine,
   RefreshCw,
   TerminalSquare,
+  X,
 } from "lucide-react";
-import { useEffect, useRef } from "react";
+import { type ReactNode, useEffect, useRef } from "react";
 import { commandStatusText, itemLabel } from "../itemUtils";
 import type {
+  CanvasSuggestion,
   InspectorSelection,
   LocalChatDraft,
+  PlanProposal,
   Project,
   Thread,
   ThreadItem,
@@ -23,7 +29,22 @@ export function ChatThread(props: {
   activeProject: Project | null;
   activeDraft: LocalChatDraft | null;
   activeThread: Thread | null;
+  onAcceptPlanProposal: (proposal: PlanProposal) => void;
+  onApplyCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
+  onDeclinePlanProposal: (proposal: PlanProposal) => void;
+  onDismissCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
+  onModifyPlanProposal: (proposal: PlanProposal) => void;
+  onOpenCanvasSuggestion: (
+    suggestion: CanvasSuggestion,
+    focusReference?: string | null,
+  ) => void;
+  onOpenPlanProposalCanvas: (
+    proposal: PlanProposal,
+    focusReference?: string | null,
+  ) => void;
   onSelect: (selection: InspectorSelection) => void;
+  canvasSuggestions: Record<string, CanvasSuggestion>;
+  planProposals: Record<string, PlanProposal>;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
@@ -84,7 +105,16 @@ export function ChatThread(props: {
         <TurnView
           activeProject={activeProject}
           key={turn.id}
+          onAcceptPlanProposal={props.onAcceptPlanProposal}
+          onApplyCanvasSuggestion={props.onApplyCanvasSuggestion}
+          onDeclinePlanProposal={props.onDeclinePlanProposal}
+          onDismissCanvasSuggestion={props.onDismissCanvasSuggestion}
+          onModifyPlanProposal={props.onModifyPlanProposal}
+          onOpenCanvasSuggestion={props.onOpenCanvasSuggestion}
+          onOpenPlanProposalCanvas={props.onOpenPlanProposalCanvas}
           onSelect={props.onSelect}
+          canvasSuggestion={props.canvasSuggestions[turn.id] ?? null}
+          planProposal={props.planProposals[turn.id] ?? null}
           turn={turn}
         />
       ))}
@@ -95,7 +125,22 @@ export function ChatThread(props: {
 function TurnView(props: {
   activeProject: Project;
   turn: Turn;
+  onAcceptPlanProposal: (proposal: PlanProposal) => void;
+  onApplyCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
+  onDeclinePlanProposal: (proposal: PlanProposal) => void;
+  onDismissCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
+  onModifyPlanProposal: (proposal: PlanProposal) => void;
+  onOpenCanvasSuggestion: (
+    suggestion: CanvasSuggestion,
+    focusReference?: string | null,
+  ) => void;
+  onOpenPlanProposalCanvas: (
+    proposal: PlanProposal,
+    focusReference?: string | null,
+  ) => void;
   onSelect: (selection: InspectorSelection) => void;
+  canvasSuggestion: CanvasSuggestion | null;
+  planProposal: PlanProposal | null;
 }) {
   const userItems = props.turn.items.filter(
     (item): item is Extract<ThreadItem, { type: "userMessage" }> =>
@@ -119,12 +164,16 @@ function TurnView(props: {
   return (
     <article className={`turn-card ${props.turn.status}`}>
       {userItems.map((item) => (
-        <UserMessageView key={item.id} item={item} />
+        <UserMessageView
+          activeProject={props.activeProject}
+          key={item.id}
+          item={item}
+        />
       ))}
       {props.turn.error && (
         <div className="error-line">{props.turn.error.message}</div>
       )}
-      {activityItems.length > 0 && (
+      {(activityItems.length > 0 || props.turn.status === "inProgress") && (
         <TurnActivity
           activeProject={props.activeProject}
           durationMs={props.turn.durationMs}
@@ -138,10 +187,31 @@ function TurnView(props: {
       {finalItems.map((item) => (
         <AssistantMessageView
           activeProject={props.activeProject}
+          canvasSuggestion={props.canvasSuggestion}
           key={item.id}
           item={item}
+          planProposal={props.planProposal}
         />
       ))}
+      {props.planProposal && finalItems.length > 0 && (
+        <PlanProposalReview
+          proposal={props.planProposal}
+          onAccept={props.onAcceptPlanProposal}
+          onDecline={props.onDeclinePlanProposal}
+          onModify={props.onModifyPlanProposal}
+          onOpenCanvas={props.onOpenPlanProposalCanvas}
+        />
+      )}
+      {props.canvasSuggestion &&
+        props.canvasSuggestion.status !== "pending" &&
+        finalItems.length > 0 && (
+          <CanvasSuggestionReview
+            suggestion={props.canvasSuggestion}
+            onApply={props.onApplyCanvasSuggestion}
+            onDismiss={props.onDismissCanvasSuggestion}
+            onOpenCanvas={props.onOpenCanvasSuggestion}
+          />
+        )}
       {fileChangeItems.map((item) => (
         <FileChangeView
           activeProject={props.activeProject}
@@ -176,13 +246,17 @@ type ActivityItem =
   | Extract<ThreadItem, { type: "reasoning" }>;
 
 function UserMessageView(props: {
+  activeProject: Project;
   item: Extract<ThreadItem, { type: "userMessage" }>;
 }) {
   return (
     <div className="message user-message">
       {props.item.content.map((part, index) =>
         part.type === "text" ? (
-          <RichText key={index} text={part.text} />
+          <RichText
+            key={index}
+            text={friendlyUserText(part.text, props.activeProject)}
+          />
         ) : (
           <p className="attachment-note" key={index}>
             {attachmentLabel(part)}
@@ -201,14 +275,300 @@ function attachmentLabel(part: Extract<ThreadItem, { type: "userMessage" }>["con
 
 function AssistantMessageView(props: {
   activeProject: Project;
+  canvasSuggestion: CanvasSuggestion | null;
   item: Extract<ThreadItem, { type: "agentMessage" }>;
+  planProposal: PlanProposal | null;
 }) {
   const text = friendlyText(props.item.text, props.activeProject);
+  const visibleText = friendlyCanvasProposalText(
+    text,
+    props.canvasSuggestion,
+    props.planProposal,
+  );
   return (
     <div className="message assistant-message">
-      {text ? <RichText text={text} /> : <span className="muted">Streaming...</span>}
+      {visibleText ? (
+        <RichText text={visibleText} />
+      ) : (
+        <span className="muted">Streaming...</span>
+      )}
     </div>
   );
+}
+
+function PlanProposalReview(props: {
+  proposal: PlanProposal;
+  onAccept: (proposal: PlanProposal) => void;
+  onDecline: (proposal: PlanProposal) => void;
+  onModify: (proposal: PlanProposal) => void;
+  onOpenCanvas: (proposal: PlanProposal, focusReference?: string | null) => void;
+}) {
+  const pending = props.proposal.status === "pending";
+  const canOpenCanvas = Boolean(props.proposal.canvasProposalSnapshot);
+  return (
+    <div className={`plan-proposal-review ${props.proposal.status}`}>
+      <div className="plan-proposal-copy">
+        <strong>Plan proposal</strong>
+        <span>
+          {renderPlanProposalCanvasText(props.proposal, (reference) =>
+            props.onOpenCanvas(props.proposal, reference),
+          )}
+        </span>
+      </div>
+      {pending ? (
+        <div className="plan-proposal-actions" aria-label="Plan decision">
+          {canOpenCanvas && (
+            <button
+              type="button"
+              onClick={() => props.onOpenCanvas(props.proposal)}
+              title="Open proposal canvas"
+            >
+              <PanelRightOpen size={14} />
+              <span>Canvas</span>
+            </button>
+          )}
+          <button
+            className="plan-proposal-accept"
+            type="button"
+            onClick={() => props.onAccept(props.proposal)}
+          >
+            <Check size={14} />
+            <span>Accept</span>
+          </button>
+          <button type="button" onClick={() => props.onModify(props.proposal)}>
+            <Pencil size={14} />
+            <span>Modify</span>
+          </button>
+          <button type="button" onClick={() => props.onDecline(props.proposal)}>
+            <X size={14} />
+            <span>Decline</span>
+          </button>
+        </div>
+      ) : (
+        <span className="plan-proposal-status">
+          {planProposalStatusText(props.proposal.status)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+export function CanvasSuggestionReview(props: {
+  suggestion: CanvasSuggestion;
+  onApply: (suggestion: CanvasSuggestion) => void;
+  onDismiss: (suggestion: CanvasSuggestion) => void;
+  onOpenCanvas: (
+    suggestion: CanvasSuggestion,
+    focusReference?: string | null,
+  ) => void;
+  surface?: "inline" | "strip";
+}) {
+  const pending = props.suggestion.status === "pending";
+  const canOpenCanvas = Boolean(props.suggestion.canvasProposalSnapshot);
+  return (
+    <div
+      className={`plan-proposal-review canvas-suggestion-review ${
+        props.surface === "strip" ? "review-strip" : "inline"
+      } ${props.suggestion.status}`}
+    >
+      <div className="plan-proposal-copy">
+        <strong>{canvasSuggestionTitle(props.suggestion)}</strong>
+        <span>
+          {renderCanvasReviewText(
+            props.suggestion,
+            (reference) => props.onOpenCanvas(props.suggestion, reference),
+            isGeneratedCurrentUiMockupPrompt(props.suggestion.prompt)
+              ? generatedCanvasSuggestionText(props.suggestion)
+              : null,
+          )}
+        </span>
+      </div>
+      {pending ? (
+        <div className="plan-proposal-actions" aria-label="Canvas suggestion">
+          {canOpenCanvas && (
+            <button
+              type="button"
+              onClick={() => props.onOpenCanvas(props.suggestion)}
+              title="Open suggestion in Canvas"
+            >
+              <PanelRightOpen size={14} />
+              <span>Canvas</span>
+            </button>
+          )}
+          <button
+            className="plan-proposal-accept"
+            type="button"
+            onClick={() => props.onApply(props.suggestion)}
+            disabled={props.suggestion.canvasProposalParseStatus !== "parsed"}
+          >
+            <Check size={14} />
+            <span>Apply</span>
+          </button>
+          <button type="button" onClick={() => props.onDismiss(props.suggestion)}>
+            <X size={14} />
+            <span>Dismiss</span>
+          </button>
+        </div>
+      ) : (
+        <span className="plan-proposal-status">
+          {canvasSuggestionStatusText(props.suggestion.status)}
+        </span>
+      )}
+    </div>
+  );
+}
+
+function planProposalStatusText(status: PlanProposal["status"]) {
+  if (status === "accepted") return "Accepted";
+  if (status === "declined") return "Declined";
+  return "Replaced";
+}
+
+function canvasSuggestionStatusText(status: CanvasSuggestion["status"]) {
+  if (status === "applied") return "Applied";
+  return "Dismissed";
+}
+
+function canvasSuggestionTitle(suggestion: CanvasSuggestion) {
+  return isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
+    ? "Generated current UI draft"
+    : "Canvas suggestion";
+}
+
+function generatedCanvasSuggestionText(suggestion: CanvasSuggestion) {
+  if (suggestion.canvasProposalParseStatus === "parsed") {
+    return generatedCanvasDraftSummary(suggestion.canvasProposalSnapshot);
+  }
+  if (suggestion.canvasProposalParseStatus === "pending") {
+    return "Waiting for generated Canvas draft.";
+  }
+  if (suggestion.canvasProposalParseStatus === "failed") {
+    return "Generated Canvas draft could not be parsed cleanly.";
+  }
+  if (suggestion.canvasProposalParseStatus === "empty") {
+    return "No generated Canvas draft was returned.";
+  }
+  return "Review the generated Canvas draft before applying it.";
+}
+
+function generatedCanvasDraftSummary(snapshot: CanvasSuggestion["canvasProposalSnapshot"]) {
+  if (!snapshot) return "Generated Canvas draft captured.";
+  const visibleItems = snapshot.items.filter((item) => item.visible !== false);
+  const pageIds = new Set(
+    visibleItems
+      .map((item) => item.pageId)
+      .filter((pageId): pageId is string => Boolean(pageId)),
+  );
+  const pages = pageIds.size > 0 ? pageIds.size : snapshot.pages.length;
+  const pageText = `${pages} page${pages === 1 ? "" : "s"}`;
+  const itemText = `${visibleItems.length} item${visibleItems.length === 1 ? "" : "s"}`;
+  return `Draft ready: ${itemText} across ${pageText}.`;
+}
+
+type CanvasReviewRecord = Pick<
+  PlanProposal | CanvasSuggestion,
+  | "canvasStatus"
+  | "canvasProposalParseStatus"
+  | "canvasSummary"
+  | "canvasProposalSummary"
+  | "canvasProposalSnapshot"
+>;
+
+function canvasReviewText(record: CanvasReviewRecord) {
+  if (record.canvasStatus === "not_attached") {
+    return "Canvas had no usable data for this response.";
+  }
+  if (record.canvasProposalParseStatus === "parsed") {
+    return `${record.canvasSummary}. ${record.canvasProposalSummary}`;
+  }
+  if (record.canvasProposalParseStatus === "pending") {
+    return `${record.canvasSummary}. Waiting for canvas proposal changes.`;
+  }
+  if (record.canvasProposalParseStatus === "empty") {
+    return `${record.canvasSummary}. No parseable canvas changes returned.`;
+  }
+  if (record.canvasProposalParseStatus === "failed") {
+    return `${record.canvasSummary}. Canvas proposal could not be parsed cleanly.`;
+  }
+  return record.canvasSummary;
+}
+
+const CANVAS_REFERENCE_PATTERN = /\b[BCDTMG][1-9]\d*\b/g;
+
+function renderPlanProposalCanvasText(
+  proposal: PlanProposal,
+  onOpenReference: (reference: string) => void,
+) {
+  return renderCanvasReviewText(proposal, onOpenReference);
+}
+
+function renderCanvasReviewText(
+  record: CanvasReviewRecord,
+  onOpenReference: (reference: string) => void,
+  textOverride: string | null = null,
+) {
+  const text = textOverride ?? canvasReviewText(record);
+  const references = canvasReviewReferences(record);
+  if (references.size === 0) return text;
+  const parts: ReactNode[] = [];
+  let lastIndex = 0;
+  for (const match of text.matchAll(CANVAS_REFERENCE_PATTERN)) {
+    const rawReference = match[0];
+    const index = match.index ?? 0;
+    const reference = rawReference.toUpperCase();
+    if (index > lastIndex) {
+      parts.push(text.slice(lastIndex, index));
+    }
+    if (references.has(reference)) {
+      parts.push(
+        <button
+          className="plan-reference-button"
+          key={`${reference}-${index}`}
+          onClick={() => onOpenReference(reference)}
+          title={`Open ${reference} in Canvas`}
+          type="button"
+        >
+          {rawReference}
+        </button>,
+      );
+    } else {
+      parts.push(rawReference);
+    }
+    lastIndex = index + rawReference.length;
+  }
+  if (lastIndex < text.length) {
+    parts.push(text.slice(lastIndex));
+  }
+  return parts.length > 0 ? parts : text;
+}
+
+function canvasReviewReferences(record: CanvasReviewRecord) {
+  const references = new Set<string>();
+  record.canvasProposalSnapshot?.items.forEach((item) => {
+    references.add(item.reference.toUpperCase());
+  });
+  record.canvasProposalSnapshot?.groups.forEach((group) => {
+    references.add(group.reference.toUpperCase());
+  });
+  return references;
+}
+
+function friendlyCanvasProposalText(
+  text: string,
+  suggestion: CanvasSuggestion | null,
+  proposal: PlanProposal | null,
+) {
+  const withoutProposal = stripCanvasProposalBlocks(text);
+  const compact = withoutProposal.trim();
+  const record = suggestion ?? proposal;
+  if (record?.canvasProposalParseStatus === "parsed") {
+    if (!compact || isGenericGeneratedCanvasCapture(compact)) {
+      return suggestion && isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
+        ? "Generated a current UI draft. Review it above the composer."
+        : "Captured a Canvas proposal. Review it below.";
+    }
+  }
+  return compact;
 }
 
 function FileChangeView(props: {
@@ -256,7 +616,7 @@ function TurnActivity(props: {
   status: Turn["status"];
 }) {
   return (
-    <details className="turn-activity">
+    <details className={`turn-activity ${props.status}`}>
       <summary>
         <span>{activitySummaryLabel(props.durationMs, props.status)}</span>
         <ChevronDown className="details-chevron" size={14} />
@@ -483,6 +843,104 @@ function friendlyText(text: string, activeProject: Project) {
   );
 }
 
+function friendlyUserText(text: string, activeProject: Project) {
+  return friendlyText(stripHiddenPromptContext(text), activeProject);
+}
+
+function stripHiddenPromptContext(text: string) {
+  let visible = text.trim();
+  if (isGeneratedCurrentUiMockupPrompt(visible)) {
+    return GENERATED_MOCKUP_USER_TEXT;
+  }
+  const userRequestMarker = "\n\nUser request:\n";
+  if (visible.startsWith("Plan Mode:") && visible.includes(userRequestMarker)) {
+    visible = visible.slice(
+      visible.indexOf(userRequestMarker) + userRequestMarker.length,
+    );
+  }
+  for (const marker of [
+    "\n\nProject Canvas for this plan:\n",
+    "\n\nProject Canvas attached by the user:\n",
+    "\n\nProject context explicitly attached by the user:\n",
+    "\n\nFiles to inspect if needed:\n",
+  ]) {
+    const index = visible.indexOf(marker);
+    if (index !== -1) visible = visible.slice(0, index);
+  }
+  return visible.trim();
+}
+
+const GENERATED_MOCKUP_USER_TEXT = "Generate current UI mockup.";
+
+function isGeneratedCurrentUiMockupPrompt(text: string) {
+  return text
+    .trimStart()
+    .startsWith(
+      "Inspect this local project and generate a low-fidelity current UI Canvas mockup.",
+    );
+}
+
+function stripCanvasProposalBlocks(text: string) {
+  const stripped = text
+    .replace(/```canvas-proposal[\s\S]*?```/gi, "")
+    .replace(/```[\s\S]*?```/g, (block) => {
+      const body = block
+        .replace(/^```[^\n]*\n?/, "")
+        .replace(/```$/, "")
+        .trim();
+      return isCanvasProposalPayload(body) ? "" : block;
+    });
+  return stripLooseCanvasProposalLines(stripped)
+    .replace(/^\s*(?:#{1,6}\s*)?(?:\*\*)?Canvas proposal(?:\*\*)?\s*:?\s*$/gim, "")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function stripLooseCanvasProposalLines(text: string) {
+  const lines = text.split(/\r?\n/);
+  const proposalLineCount = lines.filter(isLikelyCanvasProposalLine).length;
+  if (proposalLineCount < 3) return text;
+  return lines.filter((line) => !isLikelyCanvasProposalLine(line)).join("\n");
+}
+
+function isCanvasProposalPayload(text: string) {
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  if (lines.length === 0) return false;
+  const proposalLineCount = lines.filter(isLikelyCanvasProposalLine).length;
+  if (proposalLineCount >= 2) return true;
+  return (
+    proposalLineCount === 1 &&
+    /\b(state|grid|xywh|norm|bounds)=/i.test(text) &&
+    /\b(create|current|proposed|deleted)\b/i.test(text)
+  );
+}
+
+function isLikelyCanvasProposalLine(line: string) {
+  const cleaned = line
+    .trim()
+    .replace(/^[-*]\s+/, "")
+    .replace(/^\d+[.)]\s+/, "")
+    .trim();
+  if (!cleaned) return false;
+  if (/^(create|new|add)\s+(container|button|text|modal|divider|card|input|header|toolbar|row|dropdown|icon)\b/i.test(cleaned)) {
+    return /\b(state|page|grid|xywh|norm|label|title)=/i.test(cleaned);
+  }
+  if (/^(delete|remove|mark\s+deleted)\b/i.test(cleaned)) {
+    return /\b[BCDTMG][1-9]\d*\b/i.test(cleaned);
+  }
+  if (/^[BCDTMG][1-9]\d*\b/i.test(cleaned)) {
+    return /\b(state|xywh|grid|norm|bounds|x|y|w|h|width|height)=/i.test(cleaned);
+  }
+  return false;
+}
+
+function isGenericGeneratedCanvasCapture(text: string) {
+  return /^Generated (?:Canvas|a current UI) draft captured\.?$/i.test(text.trim());
+}
+
 function stripInternalEvidenceSurface(text: string) {
   return text
     .replace(
@@ -499,7 +957,7 @@ function escapeRegExp(value: string) {
 
 function activitySummaryLabel(durationMs: number | null, status: Turn["status"]) {
   if (durationMs && status !== "inProgress") return `Worked for ${formatDuration(durationMs)}`;
-  if (status === "inProgress") return "Thought process";
+  if (status === "inProgress") return "Thinking";
   if (status === "failed") return "Thought process";
   if (status === "interrupted") return "Thought process";
   return "Thought process";

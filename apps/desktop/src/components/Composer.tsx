@@ -28,6 +28,9 @@ import { contextDetails } from "../contextMeter";
 import { permissionPresets } from "../localState";
 import type {
   ComposerAttachment,
+  ComposerCanvasContext,
+  ComposerCanvasContextOption,
+  ComposerContextReference,
   Model,
   PendingApproval,
   ProjectSettings,
@@ -73,7 +76,11 @@ export function Composer(props: {
   canSend: boolean;
   canRetry: boolean;
   contextUsage: ThreadTokenUsage | null;
+  contexts: ComposerContextReference[];
   currentSettings: ProjectSettings;
+  canUseCanvasContext: boolean;
+  canvasContextOptions: ComposerCanvasContextOption[];
+  canvasContextProjectName: string | null;
   modelDisplay: {
     label: string;
     title: string;
@@ -81,9 +88,11 @@ export function Composer(props: {
   };
   models: Model[];
   onAddAttachmentPaths: (paths: string[]) => void;
+  onAddCanvasContext: (context: ComposerCanvasContext) => void;
   onAttachmentError: (message: string) => void;
   onCancel: () => void;
   onRemoveAttachment: (id: string) => void;
+  onRemoveContext: (context: ComposerContextReference) => void;
   onRetry: () => void;
   onSend: (event?: FormEvent) => void;
   onSettingsChange: (patch: Partial<ProjectSettings>) => void;
@@ -97,9 +106,12 @@ export function Composer(props: {
   const [plusOpen, setPlusOpen] = useState(false);
   const [permissionsOpen, setPermissionsOpen] = useState(false);
   const [modelOpen, setModelOpen] = useState(false);
+  const [contextPickerOpen, setContextPickerOpen] = useState(false);
+  const [contextPickerQuery, setContextPickerQuery] = useState("");
   const [dragActive, setDragActive] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addAttachmentPathsRef = useRef(props.onAddAttachmentPaths);
   const selectedModel = props.models.find(
@@ -107,6 +119,14 @@ export function Composer(props: {
   );
   const imageAttachments = props.attachments.filter(
     (attachment) => attachment.kind === "image",
+  );
+  const canvasQuery = canvasMentionQuery(contextPickerQuery);
+  const canvasContextMatches = canvasQuery.matches;
+  const filteredCanvasContextOptions = canvasContextMatches
+    ? filterCanvasContextOptions(props.canvasContextOptions, canvasQuery.filter)
+    : [];
+  const currentCanvasContext = props.contexts.find(
+    (context) => context.type === "canvas",
   );
 
   useEffect(() => {
@@ -233,6 +253,7 @@ export function Composer(props: {
   }
 
   function openMenu(menu: "plus" | "permissions" | "model") {
+    setContextPickerOpen(false);
     setPlusOpen(menu === "plus" ? (value) => !value : false);
     setPermissionsOpen(menu === "permissions" ? (value) => !value : false);
     setModelOpen(menu === "model" ? (value) => !value : false);
@@ -242,6 +263,31 @@ export function Composer(props: {
     setPlusOpen(false);
     setPermissionsOpen(false);
     setModelOpen(false);
+  }
+
+  function handleTextChange(value: string) {
+    props.onTextChange(value);
+    const match = trailingContextMention(value);
+    if (!match) {
+      setContextPickerOpen(false);
+      setContextPickerQuery("");
+      return;
+    }
+    closeComposerMenus();
+    setContextPickerOpen(true);
+    setContextPickerQuery(match.query);
+  }
+
+  function attachCanvasContext(option = filteredCanvasContextOptions[0]) {
+    if (!props.canUseCanvasContext || !option) {
+      setContextPickerOpen(false);
+      return;
+    }
+    props.onAddCanvasContext(option.context);
+    props.onTextChange(stripTrailingContextMention(props.text));
+    setContextPickerOpen(false);
+    setContextPickerQuery("");
+    window.requestAnimationFrame(() => textareaRef.current?.focus());
   }
 
   return (
@@ -301,12 +347,88 @@ export function Composer(props: {
         </div>
       )}
 
+      {props.contexts.length > 0 && (
+        <div className="composer-context-strip" aria-label="Added context">
+          {props.contexts.map((context) => (
+            <button
+              key={`${context.type}:${context.projectId}`}
+              type="button"
+              className="composer-context-chip"
+              title={`Remove ${canvasContextChipLabel(context)} Canvas context`}
+              onClick={() => props.onRemoveContext(context)}
+            >
+              <Square size={13} />
+              <span>@Canvas</span>
+              <small>{canvasContextChipLabel(context)}</small>
+              <X size={13} />
+            </button>
+          ))}
+        </div>
+      )}
+
+      {contextPickerOpen && (
+        <div className="composer-context-picker" role="listbox" aria-label="Project context">
+          {canvasContextMatches && filteredCanvasContextOptions.length > 0 ? (
+            filteredCanvasContextOptions.map((option) => {
+              const selected =
+                currentCanvasContext != null &&
+                sameCanvasContext(currentCanvasContext, option.context);
+              return (
+                <button
+                  key={option.id}
+                  type="button"
+                  className="composer-context-option"
+                  disabled={!props.canUseCanvasContext || selected}
+                  onMouseDown={(event) => event.preventDefault()}
+                  onClick={() => attachCanvasContext(option)}
+                  role="option"
+                  aria-selected={selected}
+                >
+                  {canvasContextIcon(option.context)}
+                  <span>
+                    {option.label}
+                    <small>{option.detail}</small>
+                  </span>
+                  <kbd>{canvasContextShortcut(option.context)}</kbd>
+                </button>
+              );
+            })
+          ) : canvasContextMatches ? (
+            <div className="composer-context-empty">
+              {props.canvasContextProjectName
+                ? "No Canvas match found"
+                : "Select a project first"}
+            </div>
+          ) : (
+            <div className="composer-context-empty">No project context found</div>
+          )}
+        </div>
+      )}
+
       <textarea
+        ref={textareaRef}
         value={props.text}
-        onChange={(event) => props.onTextChange(event.target.value)}
+        onChange={(event) => handleTextChange(event.target.value)}
         onFocus={closeComposerMenus}
         onPointerDown={closeComposerMenus}
         onKeyDown={(event) => {
+          if (contextPickerOpen) {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              setContextPickerOpen(false);
+              setContextPickerQuery("");
+              return;
+            }
+            if (
+              event.key === "Enter" &&
+              !event.shiftKey &&
+              canvasContextMatches
+            ) {
+              event.preventDefault();
+              attachCanvasContext();
+              return;
+            }
+          }
           if (event.key !== "Enter" || event.shiftKey) return;
           event.preventDefault();
           if (props.canSend) props.onSend();
@@ -532,6 +654,97 @@ export function Composer(props: {
       )}
     </form>
   );
+}
+
+function trailingContextMention(value: string) {
+  const match = /(?:^|\s)@([^\n@]*)$/.exec(value);
+  if (!match) return null;
+  return { query: match[1] ?? "" };
+}
+
+function stripTrailingContextMention(value: string) {
+  const match = /(?:^|\s)@[^\n@]*$/.exec(value);
+  if (!match) return value;
+  const prefix = value.slice(0, match.index);
+  return prefix.length > 0 ? `${prefix.trimEnd()} ` : "";
+}
+
+function canvasMentionQuery(value: string) {
+  const trimmed = value.trim();
+  if (!trimmed) return { matches: true, filter: "" };
+  const parts = trimmed.split(/[\s>/]+/).filter(Boolean);
+  const root = (parts[0] ?? "").toLowerCase();
+  const matches = "canvas".startsWith(root) || root === "canvas";
+  const filter = root === "canvas" ? parts.slice(1).join(" ").toLowerCase() : "";
+  return { matches, filter };
+}
+
+function filterCanvasContextOptions(
+  options: ComposerCanvasContextOption[],
+  filter: string,
+) {
+  if (!filter) return options;
+  const terms = filter.split(/\s+/).filter(Boolean);
+  return options.filter((option) => {
+    const haystack = [
+      option.label,
+      option.detail,
+      option.context.projectName,
+      canvasContextShortcut(option.context),
+      option.context.target?.kind ?? "canvas",
+      option.context.target && "reference" in option.context.target
+        ? option.context.target.reference
+        : "",
+    ]
+      .join(" ")
+      .toLowerCase();
+    return terms.every((term) => haystack.includes(term));
+  });
+}
+
+function sameCanvasContext(
+  left: ComposerCanvasContext,
+  right: ComposerCanvasContext,
+) {
+  return canvasContextKey(left) === canvasContextKey(right);
+}
+
+function canvasContextKey(context: ComposerCanvasContext) {
+  const target = context.target ?? { kind: "project" as const };
+  if (target.kind === "project") return `${context.projectId}:project`;
+  if (target.kind === "page") {
+    return `${context.projectId}:page:${target.mode}:${target.pageId ?? "backend"}:${
+      target.subPageId ?? "all"
+    }`;
+  }
+  if (target.kind === "item") {
+    return `${context.projectId}:item:${target.itemId}`;
+  }
+  return `${context.projectId}:group:${target.groupId}`;
+}
+
+function canvasContextChipLabel(context: ComposerCanvasContext) {
+  const target = context.target;
+  if (!target || target.kind === "project") return context.projectName;
+  if (target.kind === "page") return `${context.projectName} · ${target.pageName}`;
+  return `${context.projectName} · ${target.reference}`;
+}
+
+function canvasContextShortcut(context: ComposerCanvasContext) {
+  const target = context.target;
+  if (!target || target.kind === "project") return "@canvas";
+  if (target.kind === "page") return target.subPageName ?? target.pageName;
+  return target.reference;
+}
+
+function canvasContextIcon(context: ComposerCanvasContext) {
+  const target = context.target;
+  if (!target || target.kind === "project" || target.kind === "page") {
+    return <Square size={15} />;
+  }
+  if (target.kind === "group") return <FolderPlus size={15} />;
+  if (target.kind === "item" && target.label.length > 1) return <FileText size={15} />;
+  return <Square size={15} />;
 }
 
 function AttachmentCard(props: {

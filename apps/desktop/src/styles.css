@@ -1086,11 +1086,172 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   padding: 6px 0;
 }
 
+.plan-proposal-review {
+  display: grid;
+  align-items: stretch;
+  gap: 8px;
+  width: 100%;
+  padding: 10px 0 0;
+  border-top: 1px solid #3d3e39;
+  color: #d8d1c3;
+}
+
+.composer-review-strip {
+  width: min(980px, calc(100% - clamp(20px, 4vw, 40px)));
+  max-width: 100%;
+  margin: 0 auto 8px;
+}
+
+.plan-proposal-review.review-strip {
+  padding: 9px 11px;
+  border: 1px solid #575139;
+  border-radius: 10px;
+  background: #2f302a;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.16);
+}
+
+.plan-proposal-review.review-strip .plan-proposal-copy strong {
+  color: #f2d58f;
+}
+
+.plan-proposal-copy {
+  display: grid;
+  gap: 2px;
+  min-width: 0;
+}
+
+.plan-proposal-copy strong {
+  color: #f3eadc;
+  font-size: 13px;
+  font-weight: 720;
+}
+
+.plan-proposal-copy span,
+.plan-proposal-status {
+  color: #aaa59a;
+  font-size: 12px;
+  line-height: 1.35;
+}
+
+.plan-reference-button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 18px;
+  margin: 0 1px;
+  padding: 0 5px;
+  border: 0;
+  border-radius: 999px;
+  background: rgba(215, 177, 114, 0.18);
+  color: #efd18f;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 760;
+  cursor: pointer;
+}
+
+.plan-reference-button:hover,
+.plan-reference-button:focus-visible {
+  background: rgba(215, 177, 114, 0.28);
+  color: #ffe6aa;
+  outline: 1px solid rgba(215, 177, 114, 0.42);
+}
+
+.plan-proposal-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-shrink: 0;
+  flex-wrap: wrap;
+}
+
+.plan-proposal-review.review-strip .plan-proposal-actions,
+.canvas-suggestion-review.review-strip .plan-proposal-actions {
+  padding-top: 8px;
+  border-top: 1px solid rgba(87, 81, 57, 0.62);
+}
+
+.plan-proposal-actions button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 1px solid #4c4b44;
+  border-radius: 7px;
+  background: #30312d;
+  color: #eee5d6;
+  font: inherit;
+  font-size: 13px;
+  cursor: pointer;
+}
+
+.plan-proposal-actions .plan-proposal-accept {
+  border-color: #d6b370;
+  background: #443b25;
+}
+
+.plan-proposal-actions button:hover,
+.plan-proposal-actions button:focus-visible {
+  border-color: #e1c48f;
+  background: #3b3c36;
+  outline: none;
+}
+
+.plan-proposal-actions button:disabled {
+  cursor: default;
+  opacity: 0.48;
+}
+
+.plan-proposal-review.accepted .plan-proposal-status {
+  color: #9ed29b;
+}
+
+.plan-proposal-review.applied .plan-proposal-status {
+  color: #9ed29b;
+}
+
+.plan-proposal-review.declined .plan-proposal-status {
+  color: #d49a8b;
+}
+
+.plan-proposal-review.dismissed .plan-proposal-status {
+  color: #d49a8b;
+}
+
+.plan-proposal-review.superseded .plan-proposal-status {
+  color: #d8c28a;
+}
+
+.canvas-save-status {
+  margin-left: auto;
+  padding: 2px 7px;
+  border: 1px solid #474842;
+  border-radius: 999px;
+  color: #aaa59a;
+  font-size: 11px;
+  line-height: 1.4;
+}
+
+.canvas-save-status.saved {
+  color: #a9cfa3;
+}
+
+.canvas-save-status.saving {
+  color: #d8c28a;
+}
+
 .turn-activity {
   width: 100%;
   justify-self: start;
   color: #9f9a91;
   font-size: 13px;
+  min-height: 34px;
+}
+
+.turn-activity.inProgress {
+  color: #b5afa4;
 }
 
 .context-compaction-divider {
@@ -1138,6 +1299,10 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   width: 100%;
   padding: 6px 0;
   border-bottom: 1px solid #33342f;
+}
+
+.turn-activity.inProgress > summary {
+  border-bottom-color: rgba(51, 52, 47, 0.55);
 }
 
 .turn-activity summary span,
@@ -1417,6 +1582,121 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 
 .composer.drag-active {
   border-color: #c89c5f;
+}
+
+.composer-context-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  min-width: 0;
+}
+
+.composer-context-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  min-height: 28px;
+  padding: 0 8px;
+  border: 1px solid rgba(215, 177, 114, 0.42);
+  border-radius: 999px;
+  background: rgba(80, 62, 27, 0.44);
+  color: #f0dfbd;
+  font-size: 12px;
+}
+
+.composer-context-chip span,
+.composer-context-chip small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-context-chip small {
+  max-width: min(210px, 45vw);
+  color: #bdb5a6;
+}
+
+.composer-context-chip:hover,
+.composer-context-chip:focus-visible {
+  background: rgba(96, 74, 33, 0.62);
+  outline: 0;
+}
+
+.composer-context-picker {
+  position: absolute;
+  bottom: 92px;
+  left: 12px;
+  z-index: 42;
+  display: grid;
+  gap: 2px;
+  width: min(320px, calc(100% - 24px));
+  max-height: min(330px, 52vh);
+  padding: 6px;
+  overflow-y: auto;
+  border: 1px solid #4b4b45;
+  border-radius: 10px;
+  background: #3b3c37;
+  box-shadow: 0 16px 34px rgba(0, 0, 0, 0.36);
+}
+
+.composer-context-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 9px;
+  min-height: 42px;
+  padding: 0 9px;
+  color: #f3efe5;
+  text-align: left;
+}
+
+.composer-context-option[aria-selected="true"] {
+  background: rgba(215, 177, 114, 0.12);
+}
+
+.composer-context-option:hover,
+.composer-context-option:focus-visible {
+  background: #4a4b45;
+  outline: 0;
+}
+
+.composer-context-option:disabled {
+  color: #a8a299;
+  cursor: default;
+  opacity: 0.72;
+}
+
+.composer-context-option span {
+  display: grid;
+  gap: 1px;
+  min-width: 0;
+  font-size: 13px;
+}
+
+.composer-context-option small {
+  overflow: hidden;
+  color: #aaa59a;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-context-option kbd {
+  max-width: 78px;
+  overflow: hidden;
+  color: #d7b172;
+  font: inherit;
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.composer-context-empty {
+  padding: 9px 10px;
+  color: #aaa59a;
+  font-size: 12px;
 }
 
 .composer textarea {
@@ -1815,6 +2095,10 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .app-shell.chat-phone-layout .composer-model-button {
   width: 78px;
   max-width: 78px;
+}
+
+.app-shell.chat-phone-layout .composer-context-chip small {
+  max-width: 90px;
 }
 
 .attachment-strip {
@@ -2328,7 +2612,7 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 
 .canvas-workspace {
   display: grid;
-  grid-template-columns: 44px minmax(280px, 1fr) minmax(190px, 0.34fr);
+  grid-template-columns: 44px minmax(280px, 1fr) minmax(228px, 0.41fr);
   gap: 8px;
   min-width: 0;
   min-height: 0;
@@ -2336,7 +2620,7 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .canvas-workspace.backend {
-  grid-template-columns: minmax(280px, 1fr) minmax(190px, 0.34fr);
+  grid-template-columns: minmax(280px, 1fr) minmax(228px, 0.41fr);
 }
 
 .canvas-page-rail {
@@ -2380,6 +2664,136 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   gap: 8px;
   min-width: 0;
   min-height: 0;
+}
+
+.canvas-top-stack {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
+.canvas-proposal-context {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+  padding: 0 2px;
+  color: #d8d1c3;
+  font-size: 12px;
+}
+
+.canvas-proposal-copyline {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+}
+
+.canvas-proposal-context strong {
+  flex-shrink: 0;
+  color: #f1d9a4;
+  font-weight: 720;
+}
+
+.canvas-proposal-context span {
+  min-width: 0;
+  overflow: hidden;
+  color: #aaa59a;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-subpage-strip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  min-width: 0;
+  padding: 0 1px;
+  overflow-x: auto;
+}
+
+.canvas-subpage-strip.single {
+  min-height: 28px;
+}
+
+.canvas-subpage-chip {
+  display: inline-flex;
+  align-items: center;
+  min-width: 0;
+  border: 1px solid #3f433c;
+  border-radius: 8px;
+  background: #252722;
+}
+
+.canvas-subpage-chip.active {
+  border-color: #6a5a36;
+  background: #302d22;
+}
+
+.canvas-subpage-chip > button:first-child {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  min-height: 28px;
+  min-width: 0;
+  border: 0;
+  background: transparent;
+  color: #d6d0c4;
+}
+
+.canvas-subpage-chip strong {
+  color: #f0d196;
+  font-size: 11px;
+  font-weight: 760;
+}
+
+.canvas-subpage-chip span {
+  max-width: 120px;
+  overflow: hidden;
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.canvas-subpage-delete,
+.canvas-subpage-add {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 28px;
+  color: #d0c8b9;
+}
+
+.canvas-subpage-delete {
+  width: 28px;
+  padding: 0;
+  border: 0;
+  border-left: 1px solid #474237;
+  border-radius: 0 7px 7px 0;
+  background: transparent;
+}
+
+.canvas-subpage-delete:hover:not(:disabled),
+.canvas-subpage-delete:focus-visible:not(:disabled) {
+  color: #ef8b7b;
+  background: #3a2b26;
+}
+
+.canvas-subpage-add {
+  gap: 5px;
+  width: auto;
+  min-width: 30px;
+  padding: 0 9px;
+  border: 1px solid #474237;
+  border-radius: 8px;
+  background: #292923;
+  color: #e2c98f;
+}
+
+.canvas-subpage-strip.single .canvas-subpage-add {
+  width: 30px;
+  padding: 0;
 }
 
 .canvas-detail-form input,
@@ -2456,6 +2870,15 @@ button.settings-popover-row:focus-visible:not(:disabled) {
     linear-gradient(#ffffff09 1px, transparent 1px),
     linear-gradient(90deg, #ffffff09 1px, transparent 1px);
   background-size: 28px 28px;
+}
+
+.canvas-marquee {
+  position: absolute;
+  border: 1px solid #d9cfae;
+  border-radius: 6px;
+  background: rgba(217, 207, 174, 0.08);
+  box-shadow: inset 0 0 0 1px #00000024;
+  pointer-events: none;
 }
 
 .canvas-empty {
@@ -2587,10 +3010,6 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .canvas-item.changed-position {
-  border-color: #72a8df;
-  border-style: solid;
-  color: #f0f6ff;
-  background: rgba(39, 68, 100, 0.6);
   box-shadow:
     0 10px 24px #00000030,
     0 0 0 2px rgba(215, 173, 83, 0.56);
@@ -2610,11 +3029,19 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .canvas-item.selected {
-  outline: 1px solid #f4dfac;
-  outline-offset: 1px;
+  outline: 2px solid #f5dfad;
+  outline-offset: 2px;
   box-shadow:
-    0 10px 24px #00000030,
-    0 0 0 3px #f4dfac26;
+    0 12px 28px #0000003b,
+    0 0 0 5px rgba(244, 223, 172, 0.18),
+    0 0 0 1px rgba(255, 246, 220, 0.74) inset;
+}
+
+.canvas-item.grouped.selected {
+  outline-color: rgba(244, 223, 172, 0.7);
+  box-shadow:
+    0 8px 18px #00000026,
+    0 0 0 3px rgba(244, 223, 172, 0.13);
 }
 
 .canvas-item.locked {
@@ -2736,6 +3163,52 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   color: #b9b8ae;
 }
 
+.canvas-group-frame {
+  position: absolute;
+  display: block;
+  border: 1px solid rgba(194, 198, 186, 0.38);
+  border-radius: 12px;
+  background: rgba(194, 198, 186, 0.035);
+  pointer-events: none;
+}
+
+.canvas-group-frame.proposed {
+  border-color: rgba(215, 173, 83, 0.34);
+  background: rgba(215, 173, 83, 0.035);
+}
+
+.canvas-group-frame.current {
+  border-color: rgba(108, 169, 235, 0.34);
+  background: rgba(59, 110, 163, 0.035);
+}
+
+.canvas-group-frame.deleted {
+  border-color: rgba(214, 103, 90, 0.34);
+  background: rgba(214, 103, 90, 0.035);
+}
+
+.canvas-group-frame.selected {
+  border: 2px solid rgba(244, 223, 172, 0.78);
+  background: rgba(244, 223, 172, 0.045);
+  box-shadow: 0 0 0 4px rgba(244, 223, 172, 0.09);
+}
+
+.canvas-group-frame > span {
+  position: absolute;
+  top: -10px;
+  left: 10px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 24px;
+  height: 18px;
+  border-radius: 999px;
+  background: #171a16e6;
+  color: #f4e7ca;
+  font-size: 10.5px;
+  font-weight: 760;
+}
+
 .canvas-resize-handle {
   position: absolute;
   right: 3px;
@@ -2811,7 +3284,8 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   align-content: start;
   gap: 6px;
   min-height: 0;
-  overflow: auto;
+  overflow-x: hidden;
+  overflow-y: auto;
 }
 
 .canvas-layer-group {
@@ -2820,7 +3294,49 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   min-width: 0;
 }
 
+.canvas-layer-group-set {
+  display: grid;
+  gap: 4px;
+  min-width: 0;
+  padding-block: 3px;
+}
+
+.canvas-layer-children {
+  position: relative;
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+  padding-left: 13px;
+}
+
+.canvas-layer-children::before {
+  position: absolute;
+  top: 2px;
+  bottom: 5px;
+  left: 5px;
+  width: 1px;
+  background: #666960;
+  content: "";
+  opacity: 0.72;
+}
+
+.canvas-layer-group.grouped {
+  position: relative;
+}
+
+.canvas-layer-group.grouped::before {
+  position: absolute;
+  top: 14px;
+  left: -8px;
+  width: 7px;
+  height: 1px;
+  background: #666960;
+  content: "";
+  opacity: 0.72;
+}
+
 .canvas-layer-row {
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 1fr) auto auto auto;
   align-items: center;
@@ -2829,6 +3345,12 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   border-radius: 7px;
   border-left: 2px solid #6ca9eb;
   background: rgba(59, 110, 163, 0.08);
+}
+
+.canvas-layer-row.group {
+  grid-template-columns: minmax(0, 1fr) auto auto;
+  border-left-color: #aaa69e;
+  background: rgba(194, 198, 186, 0.08);
 }
 
 .canvas-layer-row.proposed {
@@ -2853,9 +3375,28 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   margin-left: 12px;
 }
 
+.canvas-layer-row.grouped {
+  grid-template-columns: minmax(0, 1fr);
+  min-height: 25px;
+}
+
 .canvas-layer-row.selected {
-  background: rgba(232, 220, 194, 0.13);
-  box-shadow: inset 0 0 0 1px #e0d0a84d;
+  background: rgba(232, 220, 194, 0.16);
+  box-shadow:
+    inset 0 0 0 1px rgba(244, 223, 172, 0.5),
+    0 0 0 1px rgba(244, 223, 172, 0.08);
+}
+
+.canvas-layer-row.selected::before {
+  position: absolute;
+  top: 4px;
+  bottom: 4px;
+  left: 3px;
+  width: 3px;
+  border-radius: 999px;
+  background: #f5dfad;
+  box-shadow: 0 0 0 2px rgba(244, 223, 172, 0.12);
+  content: "";
 }
 
 .canvas-layer-row > button:first-child {
@@ -2911,17 +3452,34 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .canvas-details {
   border-top: 1px solid #343731;
   padding-top: 8px;
+  overflow: hidden;
+}
+
+.canvas-details.open .canvas-detail-form {
+  max-height: clamp(160px, 42vh, 430px);
+  padding-right: 2px;
 }
 
 .canvas-details-toggle {
   justify-content: start;
-  width: fit-content;
+  gap: 6px;
+  width: 100%;
   min-height: 26px;
   padding: 0;
   color: #b8b4aa;
   font-size: 11px;
   font-weight: 700;
   text-transform: uppercase;
+}
+
+.canvas-details-subject {
+  min-width: 0;
+  overflow: hidden;
+  color: #f1e9d8;
+  font-weight: 650;
+  text-overflow: ellipsis;
+  text-transform: none;
+  white-space: nowrap;
 }
 
 .canvas-detail-form label {
@@ -2933,7 +3491,9 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .canvas-detail-form textarea {
-  min-height: 58px;
+  height: 34px;
+  min-height: 34px;
+  line-height: 1.3;
   resize: vertical;
 }
 
@@ -2987,6 +3547,16 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   gap: 6px;
 }
 
+.canvas-detail-grid label {
+  grid-template-columns: auto minmax(0, 1fr);
+  align-items: center;
+  gap: 6px;
+}
+
+.canvas-detail-grid label > span {
+  min-width: 14px;
+}
+
 .canvas-placement-actions {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -2997,6 +3567,16 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   border: 1px solid #625c4d;
   background: #2f2e28;
   color: #e8dcc4;
+}
+
+.canvas-group-lock {
+  justify-content: center;
+  gap: 7px;
+  min-height: 30px;
+  border: 1px solid #5b5f56;
+  border-radius: 7px;
+  background: #242620;
+  color: #ded7c9;
 }
 
 .canvas-context-menu {
@@ -3051,10 +3631,12 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .canvas-mode-switch button:disabled,
 .canvas-tool-strip button:disabled,
 .canvas-page-rail button:disabled,
+.canvas-subpage-strip button:disabled,
 .canvas-layer-row button:disabled,
 .canvas-placement-actions button:disabled,
 .canvas-context-menu button:disabled,
 .canvas-state-picker button:disabled,
+.canvas-group-lock:disabled,
 .canvas-details-toggle:disabled,
 .canvas-info-button:disabled,
 .canvas-empty button:disabled,
@@ -3213,6 +3795,10 @@ dd {
     margin-bottom: 12px;
   }
 
+  .composer-review-strip {
+    width: calc(100% - 24px);
+  }
+
   .app-shell.inspector-open .turn-list {
     padding-inline: 14px;
   }
@@ -3222,6 +3808,10 @@ dd {
   }
 
   .app-shell.inspector-open .composer {
+    width: calc(100% - 18px);
+  }
+
+  .app-shell.inspector-open .composer-review-strip {
     width: calc(100% - 18px);
   }
 
@@ -3356,6 +3946,11 @@ dd {
     width: calc(100% - 14px);
     margin-bottom: 8px;
     border-radius: 18px;
+  }
+
+  .composer-review-strip {
+    width: calc(100% - 14px);
+    margin-bottom: 6px;
   }
 
   .composer textarea {

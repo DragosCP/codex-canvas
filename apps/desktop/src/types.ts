@@ -75,6 +75,8 @@ export type DesktopState = {
   pinnedThreadIds: string[];
   expandedProjectIds: string[];
   canvases: Record<string, ProjectCanvas>;
+  planProposals: Record<string, PlanProposal>;
+  canvasSuggestions: Record<string, CanvasSuggestion>;
   layout: LayoutState;
 };
 
@@ -87,7 +89,26 @@ export type PendingApproval = {
 
 export type InspectorSelection =
   | { type: "empty" }
-  | { type: "canvas"; projectId: string }
+  | {
+      type: "canvas";
+      projectId: string;
+      focusReference?: string | null;
+      focusRequestId?: number;
+    }
+  | {
+      type: "canvasProposal";
+      projectId: string;
+      proposalTurnId: string;
+      focusReference?: string | null;
+      focusRequestId?: number;
+    }
+  | {
+      type: "canvasSuggestion";
+      projectId: string;
+      suggestionTurnId: string;
+      focusReference?: string | null;
+      focusRequestId?: number;
+    }
   | { type: "document"; path: string; title?: string }
   | { type: "command"; item: Extract<ThreadItem, { type: "commandExecution" }> }
   | { type: "fileChange"; item: Extract<ThreadItem, { type: "fileChange" }> }
@@ -110,12 +131,127 @@ export type ComposerAttachment = {
   title: string;
 };
 
+export type ComposerCanvasContext = {
+  type: "canvas";
+  projectId: string;
+  projectName: string;
+  target?: ComposerCanvasContextTarget;
+};
+
+export type ComposerContextReference = ComposerCanvasContext;
+
+export type ComposerCanvasContextTarget =
+  | {
+      kind: "project";
+    }
+  | {
+      kind: "page";
+      mode: CanvasMode;
+      pageId: string | null;
+      pageName: string;
+      subPageId?: string | null;
+      subPageName?: string | null;
+    }
+  | {
+      kind: "item";
+      mode: CanvasMode;
+      pageId: string | null;
+      pageName: string;
+      subPageId?: string | null;
+      subPageName?: string | null;
+      itemId: string;
+      reference: string;
+      label: string;
+    }
+  | {
+      kind: "group";
+      mode: CanvasMode;
+      pageId: string | null;
+      pageName: string;
+      subPageId?: string | null;
+      subPageName?: string | null;
+      groupId: string;
+      reference: string;
+      label: string;
+    };
+
+export type ComposerCanvasContextOption = {
+  id: string;
+  context: ComposerCanvasContext;
+  label: string;
+  detail: string;
+};
+
+export type PlanCanvasStatus =
+  | "not_attached"
+  | "empty"
+  | "sparse"
+  | "usable";
+
+export type PlanProposalStatus =
+  | "pending"
+  | "accepted"
+  | "declined"
+  | "superseded";
+
+export type CanvasProposalParseStatus =
+  | "none"
+  | "pending"
+  | "parsed"
+  | "empty"
+  | "failed";
+
+export type PlanProposal = {
+  id: string;
+  projectId: string;
+  threadId: string;
+  turnId: string;
+  prompt: string;
+  contexts: ComposerContextReference[];
+  canvasStatus: PlanCanvasStatus;
+  canvasSummary: string;
+  canvasBaseSnapshot: ProjectCanvas | null;
+  canvasProposalSnapshot: ProjectCanvas | null;
+  canvasProposalParseStatus: CanvasProposalParseStatus;
+  canvasProposalParserVersion?: number;
+  canvasProposalChangeCount: number;
+  canvasProposalSummary: string;
+  canvasProposalErrors: string[];
+  status: PlanProposalStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CanvasSuggestionStatus = "pending" | "applied" | "dismissed";
+
+export type CanvasSuggestion = {
+  id: string;
+  projectId: string;
+  threadId: string;
+  turnId: string;
+  prompt: string;
+  contexts: ComposerContextReference[];
+  canvasStatus: PlanCanvasStatus;
+  canvasSummary: string;
+  canvasBaseSnapshot: ProjectCanvas | null;
+  canvasProposalSnapshot: ProjectCanvas | null;
+  canvasProposalParseStatus: CanvasProposalParseStatus;
+  canvasProposalParserVersion?: number;
+  canvasProposalChangeCount: number;
+  canvasProposalSummary: string;
+  canvasProposalErrors: string[];
+  status: CanvasSuggestionStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type LocalChatDraft = {
   id: string;
   projectId: string;
   projectPath: string;
   text: string;
   attachments: ComposerAttachment[];
+  contexts: ComposerContextReference[];
   createdAt: number;
   updatedAt: number;
 };
@@ -137,6 +273,25 @@ export type CanvasPage = {
   id: string;
   name: string;
   order: number;
+  subPages: CanvasSubPage[];
+};
+
+export type CanvasSubPage = {
+  id: string;
+  pageId: string;
+  name: string;
+  order: number;
+};
+
+export type CanvasBounds = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
 };
 
 export type CanvasItem = {
@@ -150,6 +305,7 @@ export type CanvasItem = {
   y: number;
   width: number;
   height: number;
+  bounds: CanvasBounds;
   originalX?: number | null;
   originalY?: number | null;
   originalWidth?: number | null;
@@ -159,8 +315,26 @@ export type CanvasItem = {
   visible: boolean;
   zIndex: number;
   pageId: string | null;
+  subPageId: string | null;
   device: CanvasDevice | null;
+  groupId: string | null;
   comment: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CanvasGroup = {
+  id: string;
+  numericId: number;
+  reference: string;
+  title: string;
+  state: CanvasItemState;
+  itemIds: string[];
+  bounds: CanvasBounds;
+  locked: boolean;
+  pageId: string | null;
+  subPageId: string | null;
+  device: CanvasDevice | null;
   createdAt: number;
   updatedAt: number;
 };
@@ -170,9 +344,11 @@ export type ProjectCanvas = {
   version: 2;
   mode: CanvasMode;
   activePageId: string;
+  activeSubPageId: string;
   activeDevice: CanvasDevice;
   pages: CanvasPage[];
   items: CanvasItem[];
+  groups: CanvasGroup[];
   updatedAt: number;
 };
 

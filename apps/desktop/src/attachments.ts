@@ -1,5 +1,9 @@
 import { normalizeProjectPathForRuntime, runtimePathKey } from "./runtime";
-import type { ComposerAttachment, Project } from "./types";
+import type {
+  ComposerAttachment,
+  ComposerContextReference,
+  Project,
+} from "./types";
 
 const imageExtensions = new Set([".png", ".jpg", ".jpeg", ".gif", ".webp"]);
 const inspectableExtensions = new Set([
@@ -105,8 +109,13 @@ export function unsupportedAttachments(attachments: ComposerAttachment[]) {
 export function hasDraftContent(draft: {
   text: string;
   attachments: ComposerAttachment[];
+  contexts?: ComposerContextReference[];
 }) {
-  return draft.text.trim().length > 0 || draft.attachments.length > 0;
+  return (
+    draft.text.trim().length > 0 ||
+    draft.attachments.length > 0 ||
+    (draft.contexts?.length ?? 0) > 0
+  );
 }
 
 export function promptWithInspectableFiles(

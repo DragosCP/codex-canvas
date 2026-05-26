@@ -19,6 +19,7 @@ import {
   Square,
   Trash2,
   Undo2,
+  Ungroup,
   ZoomIn,
   ZoomOut,
   Type as TypeIcon,
@@ -35,26 +36,35 @@ import {
   useState,
 } from "react";
 import {
+  CANVAS_GRID_UNIT,
   CANVAS_ITEM_STATE_CONFIG,
   CANVAS_ITEM_STATE_ORDER,
+  CANVAS_WORLD_HEIGHT,
+  CANVAS_WORLD_WIDTH,
   createCanvasItem,
+  defaultSubPageId,
 } from "../canvasState";
 import type {
+  CanvasBounds,
   CanvasDevice,
+  CanvasGroup,
   CanvasItem,
   CanvasItemKind,
   CanvasItemState,
   CanvasPage,
+  CanvasSubPage,
   Project,
   ProjectCanvas,
 } from "../types";
 
 type DragState = {
   itemId: string;
+  itemIds: string[];
   mode: "move" | "resize";
   startX: number;
   startY: number;
   original: CanvasItem;
+  originals: CanvasItem[];
 };
 
 type PanState = {
@@ -63,6 +73,17 @@ type PanState = {
   startY: number;
   originX: number;
   originY: number;
+};
+
+type MarqueeState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  currentX: number;
+  currentY: number;
+  baseSelection: string[];
+  additive: boolean;
+  moved: boolean;
 };
 
 type ViewportState = {
@@ -90,10 +111,8 @@ const MAX_UNDO_STEPS = 40;
 const TITLE_MAX_LENGTH = 36;
 const BODY_MAX_LENGTH = 180;
 const COMMENT_MAX_LENGTH = 280;
-const CANVAS_GRID_SIZE = 28;
+const CANVAS_GRID_SIZE = CANVAS_GRID_UNIT;
 const FIT_VIEW_PADDING = 48;
-const CANVAS_WORLD_WIDTH = 2400;
-const CANVAS_WORLD_HEIGHT = 1600;
 const MIN_CANVAS_SCALE = 0.35;
 const MAX_CANVAS_SCALE = 2.4;
 const WHEEL_ZOOM_SPEED = 0.0015;
@@ -121,15 +140,24 @@ const canvasTools: Array<{
 export function CanvasInspector(props: {
   canvas: ProjectCanvas;
   project: Project;
+  focusReference?: string | null;
+  focusRequestId?: number;
+  proposalMode?: boolean;
+  proposalLabel?: string;
+  proposalSummary?: string | null;
   readOnly: boolean;
   onChange: (canvas: ProjectCanvas) => void;
   onRequestGenerateMockup: (project: Project) => void;
 }) {
-  const [selectedId, setSelectedId] = useState<string | null>(
-    props.canvas.items[0]?.id ?? null,
+  const initialSelectedId = props.canvas.items[0]?.id ?? null;
+  const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
+  const [selectedIds, setSelectedIds] = useState<string[]>(
+    initialSelectedId ? [initialSelectedId] : [],
   );
+  const [selectedGroupId, setSelectedGroupId] = useState<string | null>(null);
   const [drag, setDrag] = useState<DragState | null>(null);
   const [pan, setPan] = useState<PanState | null>(null);
+  const [marquee, setMarquee] = useState<MarqueeState | null>(null);
   const [viewport, setViewport] = useState<ViewportState>(DEFAULT_VIEWPORT);
   const [spacePanActive, setSpacePanActive] = useState(false);
   const [legendOpen, setLegendOpen] = useState(false);
@@ -139,39 +167,162 @@ export function CanvasInspector(props: {
   const [redoStack, setRedoStack] = useState<ProjectCanvas[]>([]);
   const stageRef = useRef<HTMLElement | null>(null);
   const contextMenuRef = useRef<HTMLDivElement | null>(null);
+  const lastFocusRequestIdRef = useRef<number | null>(null);
 
   const pages = useMemo(
     () => [...props.canvas.pages].sort((left, right) => left.order - right.order),
     [props.canvas.pages],
   );
+  const activePage = useMemo(
+    () =>
+      pages.find((page) => page.id === props.canvas.activePageId) ??
+      pages[0] ??
+      null,
+    [pages, props.canvas.activePageId],
+  );
+  const activePageIndex = activePage
+    ? pages.findIndex((page) => page.id === activePage.id)
+    : -1;
+  const activeSubPages = activePage
+    ? [...activePage.subPages].sort((left, right) => left.order - right.order)
+    : [];
+  const activeSubPage =
+    activeSubPages.find(
+      (subPage) => subPage.id === props.canvas.activeSubPageId,
+    ) ??
+    activeSubPages[0] ??
+    null;
   const selectedItem = useMemo(
     () => props.canvas.items.find((item) => item.id === selectedId) ?? null,
     [props.canvas.items, selectedId],
+  );
+  const selectedItems = useMemo(
+    () =>
+      selectedIds
+        .map((itemId) => props.canvas.items.find((item) => item.id === itemId))
+        .filter((item): item is CanvasItem => item !== undefined),
+    [props.canvas.items, selectedIds],
   );
   const scopedItems = useMemo(
     () => scopeItems(props.canvas),
     [props.canvas],
   );
+  const scopedGroups = useMemo(
+    () => scopeGroups(props.canvas, scopedItems),
+    [props.canvas, scopedItems],
+  );
   const stageItems = scopedItems
     .filter((item) => item.visible)
     .sort((left, right) => left.zIndex - right.zIndex);
   const layers = [...scopedItems].sort(compareLayerItems);
+  const groupedLayerIds = new Set(
+    scopedGroups.flatMap((group) => group.itemIds),
+  );
+  const layerGroups = [...scopedGroups].sort((left, right) =>
+    compareLayerGroups(left, right, props.canvas.items),
+  );
+  const ungroupedLayers = layers.filter((item) => !groupedLayerIds.has(item.id));
   const contextMenuItem =
     contextMenu?.type === "item"
       ? props.canvas.items.find((item) => item.id === contextMenu.itemId) ?? null
       : null;
+  const selectedGroup = selectedGroupId
+    ? scopedGroups.find((group) => group.id === selectedGroupId) ?? null
+    : null;
+  const detailsSubject = selectedGroup
+    ? `${selectedGroup.reference} Group`
+    : selectedItem
+      ? `${selectedItem.reference} ${displayKindLabel(selectedItem.kind)}`
+      : null;
+  const contextMenuGroup =
+    contextMenuItem?.groupId
+      ? props.canvas.groups.find((group) => group.id === contextMenuItem.groupId) ??
+        null
+      : null;
 
   useEffect(() => {
-    if (!selectedId) return;
-    if (!scopedItems.some((item) => item.id === selectedId)) {
-      setSelectedId(scopedItems[0]?.id ?? null);
+    const scopedIds = new Set(scopedItems.map((item) => item.id));
+    const scopedGroupIds = new Set(scopedGroups.map((group) => group.id));
+    const nextSelectedIds = selectedIds.filter((itemId) => scopedIds.has(itemId));
+    if (nextSelectedIds.length !== selectedIds.length) {
+      setSelectedIds(nextSelectedIds);
     }
-  }, [scopedItems, selectedId]);
+    if (selectedGroupId && !scopedGroupIds.has(selectedGroupId)) {
+      setSelectedGroupId(null);
+    }
+    if (selectedId && !scopedIds.has(selectedId)) {
+      setSelectedId(nextSelectedIds[0] ?? null);
+    } else if (!selectedId && nextSelectedIds.length > 0) {
+      setSelectedId(nextSelectedIds[0]);
+    }
+  }, [scopedGroups, scopedItems, selectedGroupId, selectedId, selectedIds]);
+
+  useEffect(() => {
+    if (selectedGroupId) {
+      document
+        .querySelector(`[data-canvas-group-id="${selectedGroupId}"]`)
+        ?.scrollIntoView({ block: "nearest" });
+      return;
+    }
+    if (!selectedId) return;
+    document
+      .querySelector(`[data-canvas-layer-id="${selectedId}"]`)
+      ?.scrollIntoView({ block: "nearest" });
+  }, [selectedGroupId, selectedId]);
+
+  useEffect(() => {
+    if (!props.focusReference) return;
+    const requestId = props.focusRequestId ?? 0;
+    if (lastFocusRequestIdRef.current === requestId) return;
+    const reference = props.focusReference.toUpperCase();
+    const group =
+      props.canvas.groups.find(
+        (candidate) => candidate.reference.toUpperCase() === reference,
+      ) ?? null;
+    const item =
+      props.canvas.items.find(
+        (candidate) => candidate.reference.toUpperCase() === reference,
+      ) ?? null;
+    const target = group ?? item;
+    if (!target) return;
+    const targetPageId = target.pageId ?? props.canvas.activePageId;
+    const targetSubPageId = target.subPageId ?? props.canvas.activeSubPageId;
+    if (
+      props.canvas.mode === "ui" &&
+      targetPageId &&
+      (targetPageId !== props.canvas.activePageId ||
+        targetSubPageId !== props.canvas.activeSubPageId)
+    ) {
+      props.onChange({
+        ...props.canvas,
+        activePageId: targetPageId,
+        activeSubPageId: targetSubPageId,
+        updatedAt: Date.now(),
+      });
+      return;
+    }
+    lastFocusRequestIdRef.current = requestId;
+    if (group) {
+      selectGroup(group);
+      focusCanvasBounds(expandBounds(group.bounds, 72));
+      return;
+    }
+    if (item) {
+      const itemGroup = groupForItem(item, props.canvas.groups);
+      if (itemGroup) {
+        selectGroup(itemGroup);
+        focusCanvasBounds(expandBounds(itemGroup.bounds, 72));
+        return;
+      }
+      selectOnly(item.id);
+      focusCanvasBounds(expandBounds(itemBounds(item), 72));
+    }
+  }, [props.focusReference, props.focusRequestId, props.canvas]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
       if (event.key === "Escape") {
-        setSelectedId(null);
+        selectOnly(null);
         setSpacePanActive(false);
       }
       if (event.code === "Space" && !isTextEditingTarget(event.target)) {
@@ -181,7 +332,8 @@ export function CanvasInspector(props: {
       if (
         (event.key === "Delete" || event.key === "Backspace") &&
         !isTextEditingTarget(event.target) &&
-        selectedItem
+        selectedItem &&
+        !selectedGroup
       ) {
         event.preventDefault();
         deleteItem(selectedItem);
@@ -205,7 +357,7 @@ export function CanvasInspector(props: {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [props.canvas, redoStack, selectedItem, undoStack]);
+  }, [props.canvas, redoStack, selectedGroup, selectedItem, undoStack]);
 
   useEffect(() => {
     setUndoStack([]);
@@ -292,6 +444,61 @@ export function CanvasInspector(props: {
     };
   });
 
+  function selectOnly(itemId: string | null) {
+    setSelectedId(itemId);
+    setSelectedIds(itemId ? [itemId] : []);
+    setSelectedGroupId(null);
+  }
+
+  function selectMany(itemIds: string[], primaryId?: string | null) {
+    const uniqueIds = Array.from(new Set(itemIds));
+    setSelectedIds(uniqueIds);
+    setSelectedId(primaryId === undefined ? uniqueIds[0] ?? null : primaryId);
+    setSelectedGroupId(null);
+  }
+
+  function selectGroup(group: CanvasGroup | null) {
+    if (!group) {
+      selectOnly(null);
+      return;
+    }
+    setSelectedGroupId(group.id);
+    setSelectedIds(group.itemIds);
+    setSelectedId(group.itemIds[0] ?? null);
+  }
+
+  function toggleSelection(itemId: string) {
+    const selected = selectedIds.includes(itemId);
+    const next = selected
+      ? selectedIds.filter((candidate) => candidate !== itemId)
+      : [...selectedIds, itemId];
+    selectMany(next, selected ? next[0] ?? null : itemId);
+  }
+
+  function selectCanvasItem(item: CanvasItem, additive: boolean) {
+    const group = groupForItem(item, props.canvas.groups);
+    if (group) {
+      if (!additive) {
+        selectGroup(group);
+        return;
+      }
+      const fullySelected = group.itemIds.every((itemId) =>
+        selectedIds.includes(itemId),
+      );
+      const next = fullySelected
+        ? selectedIds.filter((itemId) => !group.itemIds.includes(itemId))
+        : Array.from(new Set([...selectedIds, ...group.itemIds]));
+      selectMany(next, fullySelected ? next[0] ?? null : group.itemIds[0]);
+      return;
+    }
+
+    if (additive) {
+      toggleSelection(item.id);
+      return;
+    }
+    selectOnly(item.id);
+  }
+
   function commitCanvas(
     patch: Partial<ProjectCanvas>,
     options: { recordHistory?: boolean } = {},
@@ -309,7 +516,8 @@ export function CanvasInspector(props: {
     items: CanvasItem[],
     options: { recordHistory?: boolean } = {},
   ) {
-    commitCanvas({ items }, options);
+    const synced = syncCanvasItemsAndGroups(items, props.canvas.groups);
+    commitCanvas(synced, options);
   }
 
   function updateItem(
@@ -322,6 +530,22 @@ export function CanvasInspector(props: {
       props.canvas.items.map((item) =>
         item.id === itemId ? { ...item, ...patch, updatedAt: now } : item,
       ),
+      options,
+    );
+  }
+
+  function updateGroup(
+    groupId: string,
+    patch: Partial<CanvasGroup>,
+    options: { recordHistory?: boolean } = {},
+  ) {
+    const now = Date.now();
+    commitCanvas(
+      {
+        groups: props.canvas.groups.map((group) =>
+          group.id === groupId ? { ...group, ...patch, updatedAt: now } : group,
+        ),
+      },
       options,
     );
   }
@@ -345,7 +569,7 @@ export function CanvasInspector(props: {
     ]);
     props.onChange({ ...previous, updatedAt: Date.now() });
     if (selectedId && !previous.items.some((item) => item.id === selectedId)) {
-      setSelectedId(previous.items[0]?.id ?? null);
+      selectOnly(previous.items[0]?.id ?? null);
     }
   }
 
@@ -359,7 +583,7 @@ export function CanvasInspector(props: {
     ]);
     props.onChange({ ...next, updatedAt: Date.now() });
     if (selectedId && !next.items.some((item) => item.id === selectedId)) {
-      setSelectedId(next.items[0]?.id ?? null);
+      selectOnly(next.items[0]?.id ?? null);
     }
   }
 
@@ -371,34 +595,126 @@ export function CanvasInspector(props: {
       kind,
       state: "proposed",
       pageId: scope.pageId,
+      subPageId: scope.subPageId,
       device: scope.device,
       x: point?.x,
       y: point?.y,
     });
     commitItems([...props.canvas.items, item]);
-    setSelectedId(item.id);
+    selectOnly(item.id);
   }
 
   function addPage() {
     if (props.readOnly) return;
     const order = pages.length;
-    const page: CanvasPage = {
+    const pageId = crypto.randomUUID();
+    const subPage: CanvasSubPage = {
       id: crypto.randomUUID(),
+      pageId,
+      name: "State 1",
+      order: 0,
+    };
+    const page: CanvasPage = {
+      id: pageId,
       name: `Page ${order + 1}`,
       order,
+      subPages: [subPage],
     };
     commitCanvas({
       pages: [...props.canvas.pages, page],
       activePageId: page.id,
+      activeSubPageId: subPage.id,
       mode: "ui",
     });
-    setSelectedId(null);
+    selectOnly(null);
   }
 
   function switchPage(pageId: string) {
     if (props.canvas.activePageId === pageId) return;
-    commitCanvas({ activePageId: pageId, mode: "ui" });
-    setSelectedId(null);
+    commitCanvas({
+      activePageId: pageId,
+      activeSubPageId: defaultSubPageId(props.canvas.pages, pageId),
+      mode: "ui",
+    });
+    selectOnly(null);
+  }
+
+  function addSubPage() {
+    if (props.readOnly || !activePage) return;
+    const subPages = [...activePage.subPages].sort(
+      (left, right) => left.order - right.order,
+    );
+    const order =
+      subPages.reduce((max, subPage) => Math.max(max, subPage.order), -1) + 1;
+    const subPage: CanvasSubPage = {
+      id: crypto.randomUUID(),
+      pageId: activePage.id,
+      name: `State ${order + 1}`,
+      order,
+    };
+    commitCanvas({
+      pages: props.canvas.pages.map((page) =>
+        page.id === activePage.id
+          ? { ...page, subPages: [...page.subPages, subPage] }
+          : page,
+      ),
+      activePageId: activePage.id,
+      activeSubPageId: subPage.id,
+      mode: "ui",
+    });
+    selectOnly(null);
+  }
+
+  function switchSubPage(subPageId: string) {
+    if (props.canvas.activeSubPageId === subPageId) return;
+    commitCanvas({ activeSubPageId: subPageId, mode: "ui" });
+    selectOnly(null);
+  }
+
+  function deleteSubPage(subPage: CanvasSubPage) {
+    if (props.readOnly || !activePage || activeSubPages.length <= 1) return;
+    const scopedItemIds = new Set(
+      props.canvas.items
+        .filter(
+          (item) =>
+            item.pageId === activePage.id && item.subPageId === subPage.id,
+        )
+        .map((item) => item.id),
+    );
+    if (
+      scopedItemIds.size > 0 &&
+      !window.confirm(
+        `Delete ${subPageLabel(activePageIndex, subPage, activeSubPages)} and ${
+          scopedItemIds.size
+        } item${scopedItemIds.size === 1 ? "" : "s"}?`,
+      )
+    ) {
+      return;
+    }
+    const remainingSubPages = activeSubPages.filter(
+      (candidate) => candidate.id !== subPage.id,
+    );
+    const nextSubPage =
+      remainingSubPages.find((candidate) => candidate.order > subPage.order) ??
+      remainingSubPages[remainingSubPages.length - 1];
+    const items = props.canvas.items.filter((item) => !scopedItemIds.has(item.id));
+    const groups = props.canvas.groups
+      .map((group) => ({
+        ...group,
+        itemIds: group.itemIds.filter((itemId) => !scopedItemIds.has(itemId)),
+      }))
+      .filter((group) => group.subPageId !== subPage.id && group.itemIds.length > 1);
+    const synced = syncCanvasItemsAndGroups(items, groups);
+    commitCanvas({
+      ...synced,
+      pages: props.canvas.pages.map((page) =>
+        page.id === activePage.id
+          ? { ...page, subPages: remainingSubPages }
+          : page,
+      ),
+      activeSubPageId: nextSubPage.id,
+    });
+    selectOnly(null);
   }
 
   function deleteItem(item: CanvasItem) {
@@ -409,7 +725,9 @@ export function CanvasInspector(props: {
       return;
     }
     commitItems(props.canvas.items.filter((candidate) => candidate.id !== item.id));
-    if (selectedId === item.id) setSelectedId(null);
+    if (selectedIds.includes(item.id)) {
+      selectMany(selectedIds.filter((itemId) => itemId !== item.id));
+    }
   }
 
   function duplicateItem(item: CanvasItem) {
@@ -419,6 +737,7 @@ export function CanvasInspector(props: {
       kind: item.kind,
       state: "proposed",
       pageId: item.pageId,
+      subPageId: item.subPageId,
       device: item.device,
       x: item.x + 28,
       y: item.y + 28,
@@ -433,7 +752,7 @@ export function CanvasInspector(props: {
       zIndex: nextZIndex(props.canvas.items),
     };
     commitItems([...props.canvas.items, next]);
-    setSelectedId(next.id);
+    selectOnly(next.id);
   }
 
   function bringItemToFront(item: CanvasItem) {
@@ -446,13 +765,170 @@ export function CanvasInspector(props: {
     updateItem(item.id, { zIndex: previousZIndex(props.canvas.items) });
   }
 
+  function groupSelectedItems() {
+    if (props.readOnly) return;
+    const scopedIds = new Set(scopedItems.map((item) => item.id));
+    const itemIds = selectedIds.filter((itemId) => scopedIds.has(itemId));
+    if (itemIds.length < 2) return;
+    const selected = itemIds
+      .map((itemId) => props.canvas.items.find((item) => item.id === itemId))
+      .filter((item): item is CanvasItem => item !== undefined);
+    if (!canGroupItems(selected)) return;
+
+    const now = Date.now();
+    const scope = itemScope(props.canvas);
+    const numericId = nextGroupNumericId(props.canvas.groups);
+    const groupId = crypto.randomUUID();
+    const cleanedGroups = props.canvas.groups
+      .map((group) => ({
+        ...group,
+        itemIds: group.itemIds.filter((itemId) => !itemIds.includes(itemId)),
+      }))
+      .filter((group) => group.itemIds.length > 1);
+    const items = props.canvas.items.map((item) =>
+      itemIds.includes(item.id)
+        ? { ...item, groupId, updatedAt: now }
+        : item,
+    );
+    const group: CanvasGroup = {
+      id: groupId,
+      numericId,
+      reference: nextGroupReference(props.canvas.groups),
+      title: `Group ${numericId}`,
+      state: selected[0].state,
+      itemIds,
+      bounds: groupBoundsFromCanvasItems(itemIds, items) ?? zeroCanvasBounds(),
+      locked: selected[0].state !== "proposed",
+      pageId: scope.pageId,
+      subPageId: scope.subPageId,
+      device: scope.device,
+      createdAt: now,
+      updatedAt: now,
+    };
+    commitCanvas(syncCanvasItemsAndGroups(items, [...cleanedGroups, group]));
+    selectGroup(group);
+  }
+
+  function changeItemOrGroupState(item: CanvasItem, state: CanvasItemState) {
+    if (props.readOnly) return;
+    if (!item.groupId) {
+      updateItem(item.id, statePatchForItem(item, state));
+      return;
+    }
+    const group = props.canvas.groups.find((candidate) => candidate.id === item.groupId);
+    if (!group) {
+      updateItem(item.id, statePatchForItem(item, state));
+      return;
+    }
+    const groupItemIds = new Set(group.itemIds);
+    const now = Date.now();
+    const items = props.canvas.items.map((candidate) =>
+      groupItemIds.has(candidate.id)
+        ? { ...candidate, ...statePatchForItem(candidate, state), updatedAt: now }
+        : candidate,
+    );
+    const groups = props.canvas.groups.map((candidate) =>
+      candidate.id === group.id
+        ? { ...candidate, state, locked: state !== "proposed", updatedAt: now }
+        : candidate,
+    );
+    commitCanvas(syncCanvasItemsAndGroups(items, groups));
+  }
+
+  function changeGroupState(group: CanvasGroup, state: CanvasItemState) {
+    const firstItem = groupItems(group, props.canvas.items)[0];
+    if (!firstItem) return;
+    changeItemOrGroupState(firstItem, state);
+  }
+
+  function toggleGroupLock(group: CanvasGroup) {
+    if (props.readOnly) return;
+    const now = Date.now();
+    commitCanvas({
+      groups: props.canvas.groups.map((candidate) =>
+        candidate.id === group.id
+          ? { ...candidate, locked: !candidate.locked, updatedAt: now }
+          : candidate,
+      ),
+    });
+  }
+
+  function applyGroupPosition(group: CanvasGroup) {
+    if (props.readOnly || !groupHasOriginalGeometry(group, props.canvas.items)) {
+      return;
+    }
+    const now = Date.now();
+    const groupItemIds = new Set(group.itemIds);
+    const items = props.canvas.items.map((item) =>
+      groupItemIds.has(item.id) && hasOriginalGeometry(item)
+        ? { ...item, ...applyPlacementPatch(item), updatedAt: now }
+        : item,
+    );
+    const groups = props.canvas.groups.map((candidate) =>
+      candidate.id === group.id
+        ? { ...candidate, locked: true, updatedAt: now }
+        : candidate,
+    );
+    commitCanvas(syncCanvasItemsAndGroups(items, groups));
+  }
+
+  function resetGroupPosition(group: CanvasGroup) {
+    if (props.readOnly || !groupHasOriginalGeometry(group, props.canvas.items)) {
+      return;
+    }
+    const now = Date.now();
+    const groupItemIds = new Set(group.itemIds);
+    const items = props.canvas.items.map((item) =>
+      groupItemIds.has(item.id) && hasOriginalGeometry(item)
+        ? { ...item, ...resetPlacementPatch(item), updatedAt: now }
+        : item,
+    );
+    const groups = props.canvas.groups.map((candidate) =>
+      candidate.id === group.id
+        ? { ...candidate, locked: true, updatedAt: now }
+        : candidate,
+    );
+    commitCanvas(syncCanvasItemsAndGroups(items, groups));
+  }
+
+  function ungroupItem(item: CanvasItem) {
+    if (props.readOnly || !item.groupId) return;
+    ungroupById(item.groupId);
+  }
+
+  function ungroupById(groupId: string) {
+    if (props.readOnly) return;
+    const now = Date.now();
+    const group = props.canvas.groups.find((candidate) => candidate.id === groupId);
+    const items = props.canvas.items.map((item) =>
+      item.groupId === groupId ? { ...item, groupId: null, updatedAt: now } : item,
+    );
+    commitCanvas(
+      syncCanvasItemsAndGroups(
+        items,
+        props.canvas.groups.filter((group) => group.id !== groupId),
+      ),
+    );
+    if (selectedGroupId === groupId) {
+      selectMany(group?.itemIds ?? [], group?.itemIds[0] ?? null);
+    }
+  }
+
   function openItemMenu(
     event: ReactMouseEvent<HTMLDivElement>,
     item: CanvasItem,
   ) {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedId(item.id);
+    const group = groupForItem(item, props.canvas.groups);
+    if (group) {
+      selectGroup(group);
+    } else if (selectedIds.includes(item.id)) {
+      setSelectedId(item.id);
+      setSelectedGroupId(null);
+    } else {
+      selectOnly(item.id);
+    }
     setContextMenu({
       type: "item",
       itemId: item.id,
@@ -488,36 +964,74 @@ export function CanvasInspector(props: {
   ) {
     event.preventDefault();
     event.stopPropagation();
-    setSelectedId(item.id);
-    if (props.readOnly || item.locked) return;
-    pushUndoSnapshot();
-    const focusedItem = itemWithFocusedZIndex(item, props.canvas.items);
-    if (focusedItem.zIndex !== item.zIndex) {
-      updateItem(item.id, { zIndex: focusedItem.zIndex }, { recordHistory: false });
+    const additive = event.ctrlKey || event.metaKey;
+    if (additive && mode === "move") {
+      selectCanvasItem(item, true);
+      return;
     }
+    const group = groupForItem(item, props.canvas.groups);
+    if (group) selectGroup(group);
+    else selectOnly(item.id);
+    if (props.readOnly) return;
+    if (group) {
+      if (group.locked || mode !== "move") return;
+    } else if (item.locked) {
+      return;
+    }
+    const dragItems = group && mode === "move" ? groupItems(group, props.canvas.items) : [item];
+    pushUndoSnapshot();
+    const focusedItems =
+      mode === "move"
+        ? itemsWithFocusedZIndexes(dragItems, props.canvas.items)
+        : [itemWithFocusedZIndex(item, props.canvas.items)];
     event.currentTarget.setPointerCapture(event.pointerId);
     setDrag({
       itemId: item.id,
+      itemIds: focusedItems.map((candidate) => candidate.id),
       mode,
       startX: event.clientX,
       startY: event.clientY,
-      original: focusedItem,
+      original:
+        focusedItems.find((candidate) => candidate.id === item.id) ??
+        focusedItems[0],
+      originals: focusedItems,
     });
   }
 
-  function continueDrag(event: PointerEvent<HTMLDivElement>) {
+  function continueDrag(event: PointerEvent<HTMLElement>) {
     if (!drag) return;
-    const dx = (event.clientX - drag.startX) / viewport.scale;
-    const dy = (event.clientY - drag.startY) / viewport.scale;
-    const next =
-      drag.mode === "move"
-        ? {
-            x: Math.max(8, Math.round(drag.original.x + dx)),
-            y: Math.max(8, Math.round(drag.original.y + dy)),
-          }
-        : resizePatch(drag.original, dx, dy);
+    const rawDx = (event.clientX - drag.startX) / viewport.scale;
+    const rawDy = (event.clientY - drag.startY) / viewport.scale;
+    const { dx, dy } =
+      drag.mode === "move" ? constrainedDragDelta(rawDx, rawDy, event.shiftKey) : {
+        dx: rawDx,
+        dy: rawDy,
+      };
+    const now = Date.now();
+    if (drag.mode === "move") {
+      const originalsById = new Map(
+        drag.originals.map((original) => [original.id, original]),
+      );
+      commitItems(
+        props.canvas.items.map((item) => {
+          const original = originalsById.get(item.id);
+          if (!original) return item;
+          return {
+            ...item,
+            x: Math.max(8, Math.round(original.x + dx)),
+            y: Math.max(8, Math.round(original.y + dy)),
+            ...movementPatch(original),
+            zIndex: original.zIndex,
+            updatedAt: now,
+          };
+        }),
+        { recordHistory: false },
+      );
+      return;
+    }
+
     updateItem(drag.itemId, {
-      ...next,
+      ...resizePatch(drag.original, dx, dy),
       ...movementPatch(drag.original),
       zIndex: drag.original.zIndex,
     }, { recordHistory: false });
@@ -546,14 +1060,83 @@ export function CanvasInspector(props: {
     }));
   }
 
-  function endPointer() {
-    setDrag(null);
-    setPan(null);
+  function beginStagePointer(event: PointerEvent<HTMLElement>) {
+    if (event.button === 2) return;
+    if (event.target instanceof HTMLElement && event.target.closest("button")) {
+      return;
+    }
+    if (event.button === 1 || spacePanActive) {
+      beginPan(event, spacePanActive);
+      return;
+    }
+    if (event.button !== 0) return;
+    event.preventDefault();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = stagePointToCanvas(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      viewport,
+    );
+    setContextMenu(null);
+    const additive = event.ctrlKey || event.metaKey;
+    setMarquee({
+      pointerId: event.pointerId,
+      startX: point.x,
+      startY: point.y,
+      currentX: point.x,
+      currentY: point.y,
+      baseSelection: additive ? selectedIds : [],
+      additive,
+      moved: false,
+    });
   }
 
-  function continuePointer(event: PointerEvent<HTMLDivElement>) {
+  function continueMarquee(event: PointerEvent<HTMLElement>) {
+    if (!marquee || marquee.pointerId !== event.pointerId) return;
+    const rect = event.currentTarget.getBoundingClientRect();
+    const point = stagePointToCanvas(
+      event.clientX - rect.left,
+      event.clientY - rect.top,
+      viewport,
+    );
+    const next = {
+      ...marquee,
+      currentX: point.x,
+      currentY: point.y,
+      moved:
+        marquee.moved ||
+        Math.abs(point.x - marquee.startX) > 4 ||
+        Math.abs(point.y - marquee.startY) > 4,
+    };
+    setMarquee(next);
+    if (!next.moved) return;
+
+    const hits = stageItems
+      .filter((item) => item.visible && boundsIntersect(itemBounds(item), marqueeBounds(next)))
+      .map((item) => item.id);
+    const expandedHits = expandGroupedItemIds(hits, props.canvas);
+    const selection = next.additive
+      ? Array.from(new Set([...next.baseSelection, ...expandedHits]))
+      : expandedHits;
+    const selectedGroup = singleSelectedGroup(selection, props.canvas.groups);
+    if (selectedGroup) selectGroup(selectedGroup);
+    else selectMany(selection, selection[selection.length - 1] ?? null);
+  }
+
+  function endPointer(event?: PointerEvent<HTMLElement>) {
+    if (event && marquee && marquee.pointerId === event.pointerId && !marquee.moved) {
+      selectMany(marquee.baseSelection, marquee.baseSelection[0] ?? null);
+    }
+    setDrag(null);
+    setPan(null);
+    setMarquee(null);
+  }
+
+  function continuePointer(event: PointerEvent<HTMLElement>) {
     continueDrag(event);
     continuePan(event);
+    continueMarquee(event);
   }
 
   function handleWheel(event: ReactWheelEvent<HTMLElement>) {
@@ -604,6 +1187,15 @@ export function CanvasInspector(props: {
     }
     setViewport(fitBoundsToStage(bounds, rect));
     setPan(null);
+  }
+
+  function focusCanvasBounds(bounds: CanvasBounds) {
+    window.requestAnimationFrame(() => {
+      const rect = stageRef.current?.getBoundingClientRect();
+      if (!rect) return;
+      setViewport(fitBoundsToStage(canvasBoundsToViewBounds(bounds), rect));
+      setPan(null);
+    });
   }
 
   function beginToolDrag(event: DragEvent<HTMLButtonElement>, kind: CanvasItemKind) {
@@ -658,67 +1250,137 @@ export function CanvasInspector(props: {
         )}
 
         <section className="canvas-main">
-          <div className="canvas-tool-strip" aria-label="Canvas tools">
-            {canvasTools.map((tool) => {
-              const Icon = tool.icon;
-              return (
+          <div className="canvas-top-stack">
+            {props.proposalMode && (
+              <div className="canvas-proposal-context">
+                <div className="canvas-proposal-copyline">
+                  <strong>{props.proposalLabel ?? "Plan proposal"}</strong>
+                  {props.proposalSummary && <span>{props.proposalSummary}</span>}
+                </div>
+              </div>
+            )}
+            {props.canvas.mode === "ui" && activePage && activeSubPage && (
+              <div
+                className={`canvas-subpage-strip ${
+                  activeSubPages.length > 1 ? "expanded" : "single"
+                }`}
+                aria-label="Canvas sub-pages"
+              >
+                {activeSubPages.length > 1 &&
+                  activeSubPages.map((subPage) => {
+                    const active = subPage.id === activeSubPage.id;
+                    return (
+                      <div
+                        className={`canvas-subpage-chip ${active ? "active" : ""}`}
+                        key={subPage.id}
+                      >
+                        <button
+                          onClick={() => switchSubPage(subPage.id)}
+                          title={subPage.name}
+                          type="button"
+                        >
+                          <strong>
+                            {subPageLabel(activePageIndex, subPage, activeSubPages)}
+                          </strong>
+                          <span>{subPage.name}</span>
+                        </button>
+                        {active && activeSubPages.length > 1 && (
+                          <button
+                            aria-label={`Delete ${subPageLabel(
+                              activePageIndex,
+                              subPage,
+                              activeSubPages,
+                            )}`}
+                            className="canvas-subpage-delete"
+                            disabled={props.readOnly}
+                            onClick={() => deleteSubPage(subPage)}
+                            title="Delete sub-page"
+                            type="button"
+                          >
+                            <Trash2 size={12} />
+                          </button>
+                        )}
+                      </div>
+                    );
+                  })}
                 <button
-                  key={tool.kind}
-                  aria-label={tool.label}
+                  className="canvas-subpage-add"
                   disabled={props.readOnly}
-                  draggable={!props.readOnly}
-                  onClick={() => addItem(tool.kind)}
-                  onDragStart={(event) => beginToolDrag(event, tool.kind)}
-                  title={tool.label}
+                  onClick={addSubPage}
+                  title={
+                    activeSubPages.length > 1
+                      ? "Add sub-page"
+                      : "Add another state for this page"
+                  }
                   type="button"
                 >
-                  <Icon size={16} />
+                  <Plus size={14} />
+                  {activeSubPages.length > 1 && <span>State</span>}
                 </button>
-              );
-            })}
-            <span className="canvas-tool-spacer" />
-            <button
-              aria-label="Zoom out"
-              onClick={() => zoomFromCenter(0.85)}
-              title="Zoom out"
-              type="button"
-            >
-              <ZoomOut size={15} />
-            </button>
-            <button
-              aria-label="Reset view"
-              onClick={resetViewport}
-              title="Reset view"
-              type="button"
-            >
-              <Maximize2 size={15} />
-            </button>
-            <button
-              aria-label="Zoom in"
-              onClick={() => zoomFromCenter(1.18)}
-              title="Zoom in"
-              type="button"
-            >
-              <ZoomIn size={15} />
-            </button>
-            <button
-              aria-label="Undo"
-              disabled={props.readOnly || undoStack.length === 0}
-              onClick={undoCanvas}
-              title="Undo"
-              type="button"
-            >
-              <Undo2 size={15} />
-            </button>
-            <button
-              aria-label="Redo"
-              disabled={props.readOnly || redoStack.length === 0}
-              onClick={redoCanvas}
-              title="Redo"
-              type="button"
-            >
-              <Redo2 size={15} />
-            </button>
+              </div>
+            )}
+            <div className="canvas-tool-strip" aria-label="Canvas tools">
+              {canvasTools.map((tool) => {
+                const Icon = tool.icon;
+                return (
+                  <button
+                    key={tool.kind}
+                    aria-label={tool.label}
+                    disabled={props.readOnly}
+                    draggable={!props.readOnly}
+                    onClick={() => addItem(tool.kind)}
+                    onDragStart={(event) => beginToolDrag(event, tool.kind)}
+                    title={tool.label}
+                    type="button"
+                  >
+                    <Icon size={16} />
+                  </button>
+                );
+              })}
+              <span className="canvas-tool-spacer" />
+              <button
+                aria-label="Zoom out"
+                onClick={() => zoomFromCenter(0.85)}
+                title="Zoom out"
+                type="button"
+              >
+                <ZoomOut size={15} />
+              </button>
+              <button
+                aria-label="Reset view"
+                onClick={resetViewport}
+                title="Reset view"
+                type="button"
+              >
+                <Maximize2 size={15} />
+              </button>
+              <button
+                aria-label="Zoom in"
+                onClick={() => zoomFromCenter(1.18)}
+                title="Zoom in"
+                type="button"
+              >
+                <ZoomIn size={15} />
+              </button>
+              <button
+                aria-label="Undo"
+                disabled={props.readOnly || undoStack.length === 0}
+                onClick={undoCanvas}
+                title="Undo"
+                type="button"
+              >
+                <Undo2 size={15} />
+              </button>
+              <button
+                aria-label="Redo"
+                disabled={props.readOnly || redoStack.length === 0}
+                onClick={redoCanvas}
+                title="Redo"
+                type="button"
+              >
+                <Redo2 size={15} />
+              </button>
+            </div>
           </div>
           <section
             className={`canvas-stage ${props.canvas.mode} ${
@@ -727,7 +1389,7 @@ export function CanvasInspector(props: {
             ref={stageRef}
             onDragOver={(event) => event.preventDefault()}
             onDrop={dropTool}
-            onPointerDown={beginPan}
+            onPointerDown={beginStagePointer}
             onPointerMove={continuePointer}
             onPointerUp={endPointer}
             onPointerCancel={endPointer}
@@ -747,7 +1409,7 @@ export function CanvasInspector(props: {
                     ? "Drop a container, text, modal, divider, or button onto the grid."
                     : "Backend mapping stays general, not per page."}
                 </span>
-                {props.canvas.mode === "ui" && (
+                {props.canvas.mode === "ui" && !props.proposalMode && (
                   <button
                     disabled={props.readOnly}
                     onClick={() => props.onRequestGenerateMockup(props.project)}
@@ -767,15 +1429,32 @@ export function CanvasInspector(props: {
               }}
             >
               <div className="canvas-grid" />
+              {marquee?.moved && (
+                <div
+                  aria-hidden="true"
+                  className="canvas-marquee"
+                  style={rectStyle(marqueeBounds(marquee))}
+                />
+              )}
               {stageItems
                 .filter(hasOriginalGeometry)
                 .map((item) => (
                   <CanvasOriginGhost item={item} key={`${item.id}-origin`} />
                 ))}
+              {scopedGroups.map((group) => (
+                <CanvasGroupFrame
+                  group={group}
+                  key={group.id}
+                  selected={selectedGroupId === group.id}
+                />
+              ))}
               {stageItems.map((item) => {
-                const selected = item.id === selectedId;
+                const selected = selectedIds.includes(item.id);
+                const itemGroup = groupForItem(item, props.canvas.groups);
                 return (
                   <CanvasStageItem
+                    grouped={Boolean(itemGroup)}
+                    groupLocked={itemGroup?.locked ?? false}
                     item={item}
                     key={item.id}
                     onBeginDrag={beginDrag}
@@ -812,12 +1491,32 @@ export function CanvasInspector(props: {
               <p className="muted compact">No layers on this view.</p>
             ) : (
               <div className="canvas-layer-list">
-                {layers.map((item) => (
+                {layerGroups.map((group) => (
+                  <LayerGroupRows
+                    group={group}
+                    items={layers.filter((item) => group.itemIds.includes(item.id))}
+                    key={group.id}
+                    onDeleteItem={deleteItem}
+                    onSelectGroup={() => selectGroup(group)}
+                    onToggleGroupLock={() => toggleGroupLock(group)}
+                    onToggleItemVisible={(item) =>
+                      updateItem(item.id, { visible: !item.visible })
+                    }
+                    onUngroup={() => ungroupById(group.id)}
+                    readOnly={props.readOnly}
+                    selectedIds={selectedIds}
+                  />
+                ))}
+                {ungroupedLayers.map((item) => (
                   <LayerRows
                     item={item}
                     key={item.id}
                     onDelete={() => deleteItem(item)}
-                    onSelect={() => setSelectedId(item.id)}
+                    onSelect={(event) =>
+                      event.ctrlKey || event.metaKey
+                        ? selectCanvasItem(item, true)
+                        : selectCanvasItem(item, false)
+                    }
                     onToggleLock={() =>
                       updateItem(item.id, { locked: !item.locked })
                     }
@@ -825,7 +1524,7 @@ export function CanvasInspector(props: {
                       updateItem(item.id, { visible: !item.visible })
                     }
                     readOnly={props.readOnly}
-                    selected={item.id === selectedId}
+                    selected={selectedIds.includes(item.id)}
                   />
                 ))}
               </div>
@@ -840,15 +1539,33 @@ export function CanvasInspector(props: {
               type="button"
             >
               {detailsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              Details
+              <span>Details</span>
+              {detailsSubject && (
+                <span className="canvas-details-subject">{detailsSubject}</span>
+              )}
             </button>
             {detailsOpen &&
-              (selectedItem ? (
+              (selectedGroup ? (
+                <CanvasGroupDetails
+                  group={selectedGroup}
+                  hasMovedItems={groupHasOriginalGeometry(
+                    selectedGroup,
+                    props.canvas.items,
+                  )}
+                  onApplyPosition={() => applyGroupPosition(selectedGroup)}
+                  onChangeState={(state) => changeGroupState(selectedGroup, state)}
+                  onResetPosition={() => resetGroupPosition(selectedGroup)}
+                  onToggleLock={() => toggleGroupLock(selectedGroup)}
+                  onUpdate={(patch) => updateGroup(selectedGroup.id, patch)}
+                  readOnly={props.readOnly}
+                />
+              ) : selectedItem ? (
                 <CanvasDetails
                   item={selectedItem}
                   onApplyPosition={() =>
                     updateItem(selectedItem.id, applyPlacementPatch(selectedItem))
                   }
+                  onChangeState={(state) => changeItemOrGroupState(selectedItem, state)}
                   onUpdate={(patch) => updateItem(selectedItem.id, patch)}
                   readOnly={props.readOnly}
                 />
@@ -862,6 +1579,10 @@ export function CanvasInspector(props: {
       </div>
       {contextMenu && (
         <CanvasContextMenu
+          canGroup={canGroupItems(selectedItems)}
+          groupBlockLabel={groupBlockLabel(selectedItems)}
+          canUngroup={Boolean(contextMenuItem?.groupId)}
+          group={contextMenuGroup}
           item={contextMenuItem}
           menu={contextMenu}
           onAddItem={(kind, point) => runContextAction(() => addItem(kind, point))}
@@ -874,11 +1595,28 @@ export function CanvasInspector(props: {
             runContextAction(() => bringItemToFront(item))
           }
           onChangeState={(item, state) =>
-            runContextAction(() => updateItem(item.id, statePatchForItem(item, state)))
+            runContextAction(() => changeItemOrGroupState(item, state))
           }
           onClose={() => setContextMenu(null)}
           onDelete={(item) => runContextAction(() => deleteItem(item))}
           onDuplicate={(item) => runContextAction(() => duplicateItem(item))}
+          onGroupSelection={() => runContextAction(groupSelectedItems)}
+          onGroupChangeState={(group, state) =>
+            runContextAction(() => changeGroupState(group, state))
+          }
+          onGroupApplyPosition={(group) =>
+            runContextAction(() => applyGroupPosition(group))
+          }
+          onGroupResetPosition={(group) =>
+            runContextAction(() => resetGroupPosition(group))
+          }
+          onGroupToggleLock={(group) =>
+            runContextAction(() => toggleGroupLock(group))
+          }
+          groupMoved={Boolean(
+            contextMenuGroup &&
+              groupHasOriginalGeometry(contextMenuGroup, props.canvas.items),
+          )}
           onResetPosition={(item) =>
             runContextAction(() => updateItem(item.id, resetPlacementPatch(item)))
           }
@@ -886,6 +1624,7 @@ export function CanvasInspector(props: {
           onToggleLock={(item) =>
             runContextAction(() => updateItem(item.id, { locked: !item.locked }))
           }
+          onUngroup={(item) => runContextAction(() => ungroupItem(item))}
           readOnly={props.readOnly}
           ref={contextMenuRef}
         />
@@ -895,6 +1634,8 @@ export function CanvasInspector(props: {
 }
 
 function CanvasStageItem(props: {
+  grouped: boolean;
+  groupLocked: boolean;
   item: CanvasItem;
   selected: boolean;
   spacePanActive: boolean;
@@ -916,9 +1657,17 @@ function CanvasStageItem(props: {
     <div
       className={`canvas-item ${props.item.kind} ${props.item.state} ${
         props.selected ? "selected" : ""
-      } ${props.item.locked ? "locked" : ""} ${
+      } ${
+        props.grouped
+          ? props.groupLocked
+            ? "locked"
+            : ""
+          : props.item.locked
+            ? "locked"
+            : ""
+      } ${
         hasOriginalGeometry(props.item) ? "changed-position" : ""
-      } ${compact ? "compact-label" : ""}`}
+      } ${props.grouped ? "grouped" : ""} ${compact ? "compact-label" : ""}`}
       role="button"
       style={{
         transform: `translate(${props.item.x}px, ${props.item.y}px)`,
@@ -947,7 +1696,7 @@ function CanvasStageItem(props: {
       {props.item.kind !== "divider" && (
         <p>{compact ? compactItemLabel(props.item) : props.item.body || props.item.title}</p>
       )}
-      {!props.item.locked && (
+      {!props.item.locked && !props.grouped && (
         <div
           className="canvas-resize-handle"
           onPointerDown={(event) => props.onBeginDrag(event, props.item, "resize")}
@@ -976,20 +1725,42 @@ function CanvasOriginGhost(props: {
   );
 }
 
+function CanvasGroupFrame(props: { group: CanvasGroup; selected: boolean }) {
+  return (
+    <div
+      aria-hidden="true"
+      className={`canvas-group-frame ${props.group.state} ${
+        props.selected ? "selected" : ""
+      } ${props.group.locked ? "locked" : ""}`}
+      style={{
+        ...rectStyle(expandBounds(props.group.bounds, 10)),
+        zIndex: 0,
+      }}
+    >
+      <span>{props.group.reference}</span>
+    </div>
+  );
+}
+
 function LayerRows(props: {
   item: CanvasItem;
   selected: boolean;
+  grouped?: boolean;
   readOnly: boolean;
-  onSelect: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onToggleVisible: () => void;
   onToggleLock: () => void;
   onDelete: () => void;
 }) {
   const moved = hasOriginalGeometry(props.item);
   return (
-    <div className={`canvas-layer-group ${moved ? "changed-position" : ""}`}>
+    <div
+      className={`canvas-layer-group ${moved ? "changed-position" : ""} ${
+        props.grouped ? "grouped" : ""
+      }`}
+    >
       {moved && (
-        <div className="canvas-layer-row origin">
+        <div className={`canvas-layer-row origin ${props.grouped ? "grouped" : ""}`}>
           <button
             onClick={props.onSelect}
             title={`${props.item.reference} original position`}
@@ -1005,12 +1776,77 @@ function LayerRows(props: {
   );
 }
 
+function LayerGroupRows(props: {
+  group: CanvasGroup;
+  items: CanvasItem[];
+  selectedIds: string[];
+  readOnly: boolean;
+  onDeleteItem: (item: CanvasItem) => void;
+  onSelectGroup: () => void;
+  onToggleGroupLock: () => void;
+  onToggleItemVisible: (item: CanvasItem) => void;
+  onUngroup: () => void;
+}) {
+  const selected = props.group.itemIds.every((itemId) =>
+    props.selectedIds.includes(itemId),
+  );
+  return (
+    <div className="canvas-layer-group-set">
+      <div
+        className={`canvas-layer-row group ${props.group.state} ${selected ? "selected" : ""}`}
+        data-canvas-group-id={props.group.id}
+      >
+        <button
+          onClick={props.onSelectGroup}
+          title={`${props.group.reference} ${props.group.title}`}
+          type="button"
+        >
+          <span className="canvas-layer-reference">{props.group.reference}</span>
+          <span>{props.group.title}</span>
+        </button>
+        <button
+          disabled={props.readOnly}
+          onClick={props.onToggleGroupLock}
+          title={props.group.locked ? "Unlock group" : "Lock group"}
+          type="button"
+        >
+          <LockBadge locked={props.group.locked} compact />
+        </button>
+        <button
+          disabled={props.readOnly}
+          onClick={props.onUngroup}
+          title="Ungroup"
+          type="button"
+        >
+          <Ungroup size={13} />
+        </button>
+      </div>
+      <div className="canvas-layer-children">
+        {props.items.map((item) => (
+          <LayerRows
+            grouped
+            item={item}
+            key={item.id}
+            onDelete={() => props.onDeleteItem(item)}
+            onSelect={props.onSelectGroup}
+            onToggleLock={() => {}}
+            onToggleVisible={() => props.onToggleItemVisible(item)}
+            readOnly={props.readOnly}
+            selected={props.selectedIds.includes(item.id)}
+          />
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function LayerRow(props: {
   item: CanvasItem;
   selected: boolean;
   shifted?: boolean;
+  grouped?: boolean;
   readOnly: boolean;
-  onSelect: () => void;
+  onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onToggleVisible: () => void;
   onToggleLock: () => void;
   onDelete: () => void;
@@ -1019,7 +1855,8 @@ function LayerRow(props: {
     <div
       className={`canvas-layer-row ${props.item.state} ${
         props.selected ? "selected" : ""
-      } ${props.shifted ? "shifted" : ""}`}
+      } ${props.shifted ? "shifted" : ""} ${props.grouped ? "grouped" : ""}`}
+      data-canvas-layer-id={props.item.id}
     >
       <button
         onClick={props.onSelect}
@@ -1029,23 +1866,27 @@ function LayerRow(props: {
         <span className="canvas-layer-reference">{props.item.reference}</span>
         <span>{props.item.title}</span>
       </button>
-      <button
-        disabled={props.readOnly}
-        onClick={props.onToggleVisible}
-        title={props.item.visible ? "Hide layer" : "Show layer"}
-        type="button"
-      >
-        {props.item.visible ? <Eye size={13} /> : <EyeOff size={13} />}
-      </button>
-      <button
-        disabled={props.readOnly}
-        onClick={props.onToggleLock}
-        title={lockActionTitle(props.item)}
-        type="button"
-      >
-        <LockBadge locked={props.item.locked} compact />
-      </button>
-      {props.item.state !== "deleted" && (
+      {!props.grouped && (
+        <button
+          disabled={props.readOnly}
+          onClick={props.onToggleVisible}
+          title={props.item.visible ? "Hide layer" : "Show layer"}
+          type="button"
+        >
+          {props.item.visible ? <Eye size={13} /> : <EyeOff size={13} />}
+        </button>
+      )}
+      {!props.grouped && (
+        <button
+          disabled={props.readOnly}
+          onClick={props.onToggleLock}
+          title={lockActionTitle(props.item)}
+          type="button"
+        >
+          <LockBadge locked={props.item.locked} compact />
+        </button>
+      )}
+      {!props.grouped && props.item.state !== "deleted" && (
         <button
           className={props.item.state === "current" ? "danger" : ""}
           disabled={props.readOnly}
@@ -1090,16 +1931,13 @@ function LockBadge(props: { locked: boolean; compact?: boolean }) {
 function CanvasDetails(props: {
   item: CanvasItem;
   readOnly: boolean;
+  onChangeState: (state: CanvasItemState) => void;
   onApplyPosition: () => void;
   onUpdate: (patch: Partial<CanvasItem>) => void;
 }) {
   const locked = props.item.locked || props.readOnly;
   return (
     <div className="canvas-detail-form">
-      <div className="canvas-detail-reference">
-        <span>{props.item.reference}</span>
-        <strong>{kindLabel(props.item.kind)}</strong>
-      </div>
       <label>
         <span>Name</span>
         <input
@@ -1116,6 +1954,7 @@ function CanvasDetails(props: {
         <textarea
           disabled={locked || props.item.kind === "divider"}
           maxLength={BODY_MAX_LENGTH}
+          rows={1}
           value={props.item.body}
           onChange={(event) =>
             props.onUpdate({ body: limitText(event.target.value, BODY_MAX_LENGTH) })
@@ -1127,6 +1966,7 @@ function CanvasDetails(props: {
         <textarea
           disabled={locked}
           maxLength={COMMENT_MAX_LENGTH}
+          rows={1}
           value={props.item.comment}
           onChange={(event) =>
             props.onUpdate({
@@ -1144,7 +1984,7 @@ function CanvasDetails(props: {
               className={props.item.state === state ? "active" : ""}
               disabled={props.readOnly}
               key={state}
-              onClick={() => props.onUpdate(statePatchForItem(props.item, state))}
+              onClick={() => props.onChangeState(state)}
               title={stateHelp(state)}
               type="button"
             >
@@ -1208,6 +2048,97 @@ function CanvasDetails(props: {
   );
 }
 
+function CanvasGroupDetails(props: {
+  group: CanvasGroup;
+  hasMovedItems: boolean;
+  readOnly: boolean;
+  onApplyPosition: () => void;
+  onChangeState: (state: CanvasItemState) => void;
+  onResetPosition: () => void;
+  onToggleLock: () => void;
+  onUpdate: (patch: Partial<CanvasGroup>) => void;
+}) {
+  return (
+    <div className="canvas-detail-form">
+      <label>
+        <span>Name</span>
+        <input
+          disabled={props.readOnly}
+          maxLength={TITLE_MAX_LENGTH}
+          value={props.group.title}
+          onChange={(event) =>
+            props.onUpdate({ title: limitText(event.target.value, TITLE_MAX_LENGTH) })
+          }
+        />
+      </label>
+      <div className="canvas-state-field">
+        <span>State</span>
+        <div className="canvas-state-picker" aria-label="Group state">
+          {CANVAS_ITEM_STATE_ORDER.map((state) => (
+            <button
+              aria-label={stateLabel(state)}
+              className={props.group.state === state ? "active" : ""}
+              disabled={props.readOnly}
+              key={state}
+              onClick={() => props.onChangeState(state)}
+              title={stateHelp(state)}
+              type="button"
+            >
+              <span className={`canvas-layer-swatch ${state}`} />
+            </button>
+          ))}
+        </div>
+      </div>
+      <button
+        className="canvas-group-lock"
+        disabled={props.readOnly}
+        onClick={props.onToggleLock}
+        type="button"
+      >
+        <LockBadge locked={props.group.locked} compact />
+        {props.group.locked ? "Unlock group" : "Lock group"}
+      </button>
+      {props.hasMovedItems && (
+        <div className="canvas-placement-actions">
+          <button
+            disabled={props.readOnly}
+            onClick={props.onApplyPosition}
+            type="button"
+          >
+            Apply group position
+          </button>
+          <button
+            disabled={props.readOnly}
+            onClick={props.onResetPosition}
+            type="button"
+          >
+            Reset group position
+          </button>
+        </div>
+      )}
+      <div className="canvas-detail-grid">
+        <NumberField disabled label="X" value={props.group.bounds.x} onChange={() => {}} />
+        <NumberField disabled label="Y" value={props.group.bounds.y} onChange={() => {}} />
+        <NumberField
+          disabled
+          label="W"
+          value={props.group.bounds.width}
+          onChange={() => {}}
+        />
+        <NumberField
+          disabled
+          label="H"
+          value={props.group.bounds.height}
+          onChange={() => {}}
+        />
+      </div>
+      <p className="canvas-detail-meta">
+        {stateLabel(props.group.state)} group - {props.group.itemIds.length} items
+      </p>
+    </div>
+  );
+}
+
 function NumberField(props: {
   disabled: boolean;
   label: string;
@@ -1233,6 +2164,10 @@ function NumberField(props: {
 const CanvasContextMenu = forwardRef<
   HTMLDivElement,
   {
+    canGroup: boolean;
+    groupBlockLabel: string | null;
+    canUngroup: boolean;
+    group: CanvasGroup | null;
     item: CanvasItem | null;
     menu: ContextMenuState;
     readOnly: boolean;
@@ -1243,9 +2178,16 @@ const CanvasContextMenu = forwardRef<
     onClose: () => void;
     onDelete: (item: CanvasItem) => void;
     onDuplicate: (item: CanvasItem) => void;
+    groupMoved: boolean;
+    onGroupApplyPosition: (group: CanvasGroup) => void;
+    onGroupChangeState: (group: CanvasGroup, state: CanvasItemState) => void;
+    onGroupResetPosition: (group: CanvasGroup) => void;
+    onGroupSelection: () => void;
+    onGroupToggleLock: (group: CanvasGroup) => void;
     onResetPosition: (item: CanvasItem) => void;
     onSendToBack: (item: CanvasItem) => void;
     onToggleLock: (item: CanvasItem) => void;
+    onUngroup: (item: CanvasItem) => void;
   }
 >(function CanvasContextMenu(props, ref) {
   const style = {
@@ -1293,6 +2235,82 @@ const CanvasContextMenu = forwardRef<
   if (!props.item) return null;
 
   const item = props.item;
+  if (props.group) {
+    const group = props.group;
+    return (
+      <div className="canvas-context-menu" ref={ref} role="menu" style={style}>
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onGroupToggleLock(group)}
+          role="menuitem"
+          type="button"
+        >
+          {group.locked ? "Unlock group" : "Lock group"}
+        </button>
+        {props.groupMoved && (
+          <>
+            <button
+              disabled={props.readOnly}
+              onClick={() => props.onGroupApplyPosition(group)}
+              role="menuitem"
+              type="button"
+            >
+              Apply group position
+            </button>
+            <button
+              disabled={props.readOnly}
+              onClick={() => props.onGroupResetPosition(group)}
+              role="menuitem"
+              type="button"
+            >
+              Reset group position
+            </button>
+          </>
+        )}
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onUngroup(item)}
+          role="menuitem"
+          type="button"
+        >
+          Ungroup
+        </button>
+        <hr />
+        {group.state !== "current" && (
+          <button
+            disabled={props.readOnly}
+            onClick={() => props.onGroupChangeState(group, "current")}
+            role="menuitem"
+            type="button"
+          >
+            Mark current
+          </button>
+        )}
+        {group.state !== "proposed" && (
+          <button
+            disabled={props.readOnly}
+            onClick={() => props.onGroupChangeState(group, "proposed")}
+            role="menuitem"
+            type="button"
+          >
+            Mark temporary
+          </button>
+        )}
+        {group.state !== "deleted" && (
+          <button
+            className={group.state === "current" ? "danger" : ""}
+            disabled={props.readOnly}
+            onClick={() => props.onGroupChangeState(group, "deleted")}
+            role="menuitem"
+            type="button"
+          >
+            Mark as deleted
+          </button>
+        )}
+      </div>
+    );
+  }
+
   const moved = hasOriginalGeometry(item);
   return (
     <div className="canvas-context-menu" ref={ref} role="menu" style={style}>
@@ -1320,14 +2338,41 @@ const CanvasContextMenu = forwardRef<
       >
         Duplicate
       </button>
-      <button
-        disabled={props.readOnly}
-        onClick={() => props.onToggleLock(item)}
-        role="menuitem"
-        type="button"
-      >
-        {item.locked ? "Unlock position" : "Lock position"}
-      </button>
+      {props.canGroup && (
+        <button
+          disabled={props.readOnly}
+          onClick={props.onGroupSelection}
+          role="menuitem"
+          type="button"
+        >
+          Group selection
+        </button>
+      )}
+      {props.groupBlockLabel && (
+        <button disabled role="menuitem" type="button">
+          {props.groupBlockLabel}
+        </button>
+      )}
+      {props.canUngroup && (
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onUngroup(item)}
+          role="menuitem"
+          type="button"
+        >
+          Ungroup
+        </button>
+      )}
+      {!item.groupId && (
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onToggleLock(item)}
+          role="menuitem"
+          type="button"
+        >
+          {item.locked ? "Unlock position" : "Lock position"}
+        </button>
+      )}
       {moved && (
         <>
           <hr />
@@ -1370,7 +2415,7 @@ const CanvasContextMenu = forwardRef<
           Mark temporary
         </button>
       )}
-      {item.state !== "deleted" && (
+      {!item.groupId && item.state !== "deleted" && (
         <button
           className={item.state === "current" ? "danger" : ""}
           disabled={props.readOnly}
@@ -1391,19 +2436,168 @@ function scopeItems(canvas: ProjectCanvas) {
   }
   return canvas.items.filter(
     (item) =>
-      item.pageId === canvas.activePageId && item.device === canvas.activeDevice,
+      item.pageId === canvas.activePageId &&
+      item.subPageId === canvas.activeSubPageId &&
+      item.device === canvas.activeDevice,
   );
 }
 
 function itemScope(canvas: ProjectCanvas): {
   pageId: string | null;
+  subPageId: string | null;
   device: CanvasDevice | null;
 } {
-  if (canvas.mode === "backend") return { pageId: null, device: null };
+  if (canvas.mode === "backend") {
+    return { pageId: null, subPageId: null, device: null };
+  }
   return {
     pageId: canvas.activePageId,
+    subPageId: canvas.activeSubPageId,
     device: canvas.activeDevice,
   };
+}
+
+function scopeGroups(canvas: ProjectCanvas, scopedItems: CanvasItem[]) {
+  const scopedItemIds = new Set(scopedItems.map((item) => item.id));
+  return canvas.groups
+    .map((group) => ({
+      ...group,
+      itemIds: group.itemIds.filter((itemId) => scopedItemIds.has(itemId)),
+    }))
+    .filter((group) => group.itemIds.length > 1);
+}
+
+function syncCanvasItemsAndGroups(
+  items: CanvasItem[],
+  groups: CanvasGroup[],
+): Pick<ProjectCanvas, "items" | "groups"> {
+  const boundedItems = items.map((item) => ({ ...item, bounds: itemBounds(item) }));
+  const syncedGroups = refreshCanvasGroups(groups, boundedItems);
+  const groupIds = new Set(syncedGroups.map((group) => group.id));
+  return {
+    items: boundedItems.map((item) =>
+      item.groupId && !groupIds.has(item.groupId)
+        ? { ...item, groupId: null }
+        : item,
+    ),
+    groups: syncedGroups,
+  };
+}
+
+function refreshCanvasGroups(groups: CanvasGroup[], items: CanvasItem[]) {
+  return groups
+    .map((group) => {
+      const groupItems = group.itemIds
+        .map((itemId) => items.find((item) => item.id === itemId))
+        .filter((item): item is CanvasItem => item !== undefined);
+      const itemIds = groupItems.map((item) => item.id);
+      if (itemIds.length < 2) return null;
+      const state = groupItems[0].state;
+      if (!groupItems.every((item) => item.state === state)) return null;
+      const first = groupItems[0];
+      if (
+        !groupItems.every(
+          (item) =>
+            item.pageId === first.pageId &&
+            item.subPageId === first.subPageId &&
+            item.device === first.device,
+        )
+      ) {
+        return null;
+      }
+      return {
+        ...group,
+        state,
+        itemIds,
+        bounds: groupBoundsFromCanvasItems(itemIds, items) ?? zeroCanvasBounds(),
+      };
+    })
+    .filter((group): group is CanvasGroup => group !== null);
+}
+
+function nextGroupNumericId(groups: CanvasGroup[]) {
+  return groups.reduce((max, group) => Math.max(max, group.numericId), 0) + 1;
+}
+
+function nextGroupReference(groups: CanvasGroup[]) {
+  const references = new Set(groups.map((group) => group.reference));
+  let next = 1;
+  while (references.has(`G${next}`)) next += 1;
+  return `G${next}`;
+}
+
+function compareLayerGroups(
+  left: CanvasGroup,
+  right: CanvasGroup,
+  items: CanvasItem[],
+) {
+  const leftItems = groupItems(left, items);
+  const rightItems = groupItems(right, items);
+  const leftRank = Math.min(...leftItems.map(layerRank));
+  const rightRank = Math.min(...rightItems.map(layerRank));
+  const leftZ = Math.max(...leftItems.map((item) => item.zIndex));
+  const rightZ = Math.max(...rightItems.map((item) => item.zIndex));
+  return leftRank - rightRank || rightZ - leftZ;
+}
+
+function groupItems(group: CanvasGroup, items: CanvasItem[]) {
+  return group.itemIds
+    .map((itemId) => items.find((item) => item.id === itemId))
+    .filter((item): item is CanvasItem => item !== undefined);
+}
+
+function groupHasOriginalGeometry(group: CanvasGroup, items: CanvasItem[]) {
+  return groupItems(group, items).some(hasOriginalGeometry);
+}
+
+function canGroupItems(items: CanvasItem[]) {
+  if (items.length < 2) return false;
+  if (items.some((item) => item.groupId)) return false;
+  const state = items[0].state;
+  return items.every((item) => item.state === state);
+}
+
+function groupBlockLabel(items: CanvasItem[]) {
+  if (items.length < 2 || canGroupItems(items)) return null;
+  if (items.some((item) => item.groupId)) return "Ungroup first";
+  return "Group same-state items";
+}
+
+function subPageLabel(
+  pageIndex: number,
+  subPage: CanvasSubPage,
+  subPages: CanvasSubPage[],
+) {
+  const subPageIndex = subPages.findIndex((candidate) => candidate.id === subPage.id);
+  return `P${Math.max(0, pageIndex) + 1}.${Math.max(0, subPageIndex) + 1}`;
+}
+
+function groupForItem(item: CanvasItem, groups: CanvasGroup[]) {
+  return item.groupId
+    ? groups.find((group) => group.id === item.groupId) ?? null
+    : null;
+}
+
+function expandGroupedItemIds(itemIds: string[], canvas: ProjectCanvas) {
+  const expanded = new Set(itemIds);
+  for (const itemId of itemIds) {
+    const item = canvas.items.find((candidate) => candidate.id === itemId);
+    const group = item ? groupForItem(item, canvas.groups) : null;
+    if (!group) continue;
+    for (const groupItemId of group.itemIds) expanded.add(groupItemId);
+  }
+  return Array.from(expanded);
+}
+
+function singleSelectedGroup(itemIds: string[], groups: CanvasGroup[]) {
+  if (itemIds.length === 0) return null;
+  return (
+    groups.find(
+      (group) =>
+        group.itemIds.length === itemIds.length &&
+        group.itemIds.every((itemId) => itemIds.includes(itemId)),
+    ) ?? null
+  );
 }
 
 function iconForKind(kind: CanvasItemKind) {
@@ -1499,6 +2693,120 @@ function displayDimensions(item: CanvasItem) {
   return { width: size, height: size };
 }
 
+function itemBounds(item: CanvasItem): CanvasBounds {
+  const dimensions = displayDimensions(item);
+  return {
+    x: item.x,
+    y: item.y,
+    width: dimensions.width,
+    height: dimensions.height,
+    left: item.x,
+    top: item.y,
+    right: item.x + dimensions.width,
+    bottom: item.y + dimensions.height,
+  };
+}
+
+function marqueeBounds(marquee: MarqueeState): CanvasBounds {
+  const left = Math.min(marquee.startX, marquee.currentX);
+  const top = Math.min(marquee.startY, marquee.currentY);
+  const right = Math.max(marquee.startX, marquee.currentX);
+  const bottom = Math.max(marquee.startY, marquee.currentY);
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    left,
+    top,
+    right,
+    bottom,
+  };
+}
+
+function rectStyle(bounds: CanvasBounds) {
+  return {
+    transform: `translate(${bounds.left}px, ${bounds.top}px)`,
+    width: bounds.width,
+    height: bounds.height,
+  };
+}
+
+function expandBounds(bounds: CanvasBounds, padding: number): CanvasBounds {
+  return {
+    x: bounds.x - padding,
+    y: bounds.y - padding,
+    width: bounds.width + padding * 2,
+    height: bounds.height + padding * 2,
+    left: bounds.left - padding,
+    top: bounds.top - padding,
+    right: bounds.right + padding,
+    bottom: bounds.bottom + padding,
+  };
+}
+
+function canvasBoundsToViewBounds(bounds: CanvasBounds) {
+  return {
+    minX: bounds.left,
+    minY: bounds.top,
+    maxX: bounds.right,
+    maxY: bounds.bottom,
+  };
+}
+
+function boundsIntersect(left: CanvasBounds, right: CanvasBounds) {
+  return (
+    left.left <= right.right &&
+    left.right >= right.left &&
+    left.top <= right.bottom &&
+    left.bottom >= right.top
+  );
+}
+
+function groupBoundsFromCanvasItems(
+  itemIds: string[],
+  items: CanvasItem[],
+): CanvasBounds | null {
+  const bounds = itemIds
+    .map((itemId) => items.find((item) => item.id === itemId))
+    .filter((item): item is CanvasItem => item !== undefined)
+    .map(itemBounds);
+  if (bounds.length === 0) return null;
+  const containingPrimary = [...bounds]
+    .sort((left, right) => right.width * right.height - left.width * left.height)
+    .find((candidate) =>
+      bounds.every((boundsCandidate) => containsBounds(candidate, boundsCandidate)),
+    );
+  if (containingPrimary) return containingPrimary;
+  const left = Math.min(...bounds.map((box) => box.left));
+  const top = Math.min(...bounds.map((box) => box.top));
+  const right = Math.max(...bounds.map((box) => box.right));
+  const bottom = Math.max(...bounds.map((box) => box.bottom));
+  return {
+    x: left,
+    y: top,
+    width: right - left,
+    height: bottom - top,
+    left,
+    top,
+    right,
+    bottom,
+  };
+}
+
+function containsBounds(outer: CanvasBounds, inner: CanvasBounds) {
+  return (
+    outer.left <= inner.left &&
+    outer.top <= inner.top &&
+    outer.right >= inner.right &&
+    outer.bottom >= inner.bottom
+  );
+}
+
+function zeroCanvasBounds(): CanvasBounds {
+  return { x: 0, y: 0, width: 0, height: 0, left: 0, top: 0, right: 0, bottom: 0 };
+}
+
 function stagePointToCanvas(
   stageX: number,
   stageY: number,
@@ -1581,6 +2889,12 @@ function itemWithFocusedZIndex(item: CanvasItem, items: CanvasItem[]) {
   return { ...item, zIndex: highestZIndex + 1 };
 }
 
+function itemsWithFocusedZIndexes(items: CanvasItem[], allItems: CanvasItem[]) {
+  const sortedItems = [...items].sort((left, right) => left.zIndex - right.zIndex);
+  let nextZ = Math.max(0, ...allItems.map((candidate) => candidate.zIndex));
+  return sortedItems.map((item) => ({ ...item, zIndex: ++nextZ }));
+}
+
 function nextZIndex(items: CanvasItem[]) {
   return items.reduce((highest, item) => Math.max(highest, item.zIndex), 0) + 1;
 }
@@ -1616,6 +2930,11 @@ function fitBoundsToStage(
     panX: (rect.width - width * scale) / 2 - bounds.minX * scale,
     panY: (rect.height - height * scale) / 2 - bounds.minY * scale,
   };
+}
+
+function constrainedDragDelta(dx: number, dy: number, constrained: boolean) {
+  if (!constrained) return { dx, dy };
+  return Math.abs(dx) >= Math.abs(dy) ? { dx, dy: 0 } : { dx: 0, dy };
 }
 
 function gestureScale(event: Event) {
@@ -1671,7 +2990,6 @@ function hasOriginalGeometry(
   item: CanvasItem,
 ): item is CanvasItem & { originalX: number; originalY: number } {
   return (
-    item.state === "current" &&
     typeof item.originalX === "number" &&
     typeof item.originalY === "number"
   );
@@ -1758,4 +3076,9 @@ function kindLabel(kind: CanvasItemKind) {
     case "container":
       return "container";
   }
+}
+
+function displayKindLabel(kind: CanvasItemKind) {
+  const label = kindLabel(kind);
+  return label.charAt(0).toUpperCase() + label.slice(1);
 }
