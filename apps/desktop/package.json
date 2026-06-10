@@ -9,12 +9,14 @@
     "smoke:real-command": "node ../../scripts/p03-real-command-smoke.mjs",
     "dev": "vite --host 127.0.0.1",
     "build": "tsc -b && vite build",
+    "electron:build": "node ../../scripts/stage-desktop-sidecar.mjs && tsc -b && vite build",
+    "electron:dev": "node electron/run.mjs --dev",
+    "electron:run": "node electron/run.mjs",
     "preview": "vite preview --host 127.0.0.1",
     "proof": "node ../../scripts/p03-backend-proof-gate.mjs",
+    "sidecar:stage": "node ../../scripts/stage-desktop-sidecar.mjs",
     "test:compaction-render": "node ../../scripts/p03-compaction-render-test.mjs",
-    "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs",
-    "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build"
+    "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",
@@ -22,10 +24,10 @@
     "react-dom": "^18.3.1"
   },
   "devDependencies": {
-    "@tauri-apps/cli": "2.10.1",
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
+    "electron": "39.8.10",
     "vite": "^5.4.11"
   }
 }

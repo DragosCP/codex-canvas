@@ -63,6 +63,23 @@ export function useAppServerEvents(args: {
         return;
       }
 
+      if (message.method === "error" && threadId && turnId && params?.error) {
+        const error = params.error as Turn["error"];
+        args.patchThread(threadId, (thread) => ({
+          ...thread,
+          turns: thread.turns.map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "failed",
+                  error,
+                }
+              : turn,
+          ),
+        }));
+        return;
+      }
+
       if (
         (message.method === "item/started" ||
           message.method === "item/completed") &&

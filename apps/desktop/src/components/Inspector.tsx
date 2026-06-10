@@ -1,11 +1,13 @@
-import { Check, Database, FileText, Loader2, Square, Undo2, X } from "lucide-react";
+import { Check, FileText, Loader2, Undo2, X } from "lucide-react";
 import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
 import type {
+  ComposerAppPreviewContext,
+  CanvasSuggestion,
   InspectorSelection,
   PendingApproval,
-  CanvasSuggestion,
   PlanProposal,
+  PlanPreviewAreaMark,
   Project,
   ProjectCanvas,
   Thread,
@@ -13,6 +15,10 @@ import type {
   Turn,
 } from "../types";
 import { CanvasInspector } from "./CanvasInspector";
+import {
+  LiveAppPreview,
+  type LiveAppPreviewMarkMeta,
+} from "./LiveAppPreview";
 import { RichText } from "./RichText";
 
 export function Inspector(props: {
@@ -22,7 +28,10 @@ export function Inspector(props: {
   activeThread: Thread | null;
   canvas: ProjectCanvas | null;
   canvasProject: Project | null;
+  canvasLayersOpen: boolean;
   canvasProposal: PlanProposal | null;
+  planPreviewProposal: PlanProposal | null;
+  appPreviewContext: ComposerAppPreviewContext | null;
   canvasSuggestion: CanvasSuggestion | null;
   canvasReadOnly: boolean;
   canvasSaveStatus: "saving" | "saved";
@@ -36,12 +45,24 @@ export function Inspector(props: {
   onReviewChanges: () => void;
   onRollback: () => void;
   onSelect: (selection: InspectorSelection) => void;
+  onSetCanvasLayersOpen: (projectId: string, open: boolean) => void;
+  onEditPlanProposalDraft: (proposal: PlanProposal) => void;
   onUpdateCanvas: (projectId: string, canvas: ProjectCanvas) => void;
   onUpdateCanvasProposal: (proposalTurnId: string, canvas: ProjectCanvas) => void;
   onUpdateCanvasSuggestion: (
     suggestionTurnId: string,
     canvas: ProjectCanvas,
   ) => void;
+  onUpdatePlanPreviewAreaMark: (
+    proposalTurnId: string,
+    areaMark: PlanPreviewAreaMark | null,
+  ) => void;
+  onAttachAppPreviewMark: (
+    project: Project,
+    areaMark: PlanPreviewAreaMark | null,
+    meta: LiveAppPreviewMarkMeta,
+  ) => void;
+  onUpdatePlanPreviewVariant: (proposalTurnId: string, variantId: string) => void;
   selection: InspectorSelection;
 }) {
   const canvasSelected =
@@ -76,24 +97,11 @@ export function Inspector(props: {
         aria-label="Resize inspector"
         onPointerDown={props.onResizePointerDown}
       />
-      <header
-        className={`inspector-header ${
-          canvasSelected ? "canvas-inspector-header" : ""
-        }`}
-      >
-        <h2>{inspectorTitle(props.selection)}</h2>
-        {canvasSelected && (
-          <span className={`canvas-save-status ${props.canvasSaveStatus}`}>
-            {props.canvasSaveStatus === "saving" ? "Saving" : "Saved"}
-          </span>
-        )}
-        {canvasSelected && props.canvas ? (
-          <CanvasModeSwitch
-            canvas={props.canvas}
-            onChange={updateVisibleCanvas}
-          />
-        ) : null}
-      </header>
+      {!canvasSelected && (
+        <header className="inspector-header">
+          <h2>{inspectorTitle(props.selection)}</h2>
+        </header>
+      )}
       {props.selection.type === "empty" && (
         <ActivityPanel
           activeProject={props.activeProject}
@@ -110,9 +118,32 @@ export function Inspector(props: {
           <CanvasInspector
             canvas={props.canvas}
             project={props.canvasProject}
+            layersOpen={props.canvasLayersOpen}
+            statusKind={proposalSelected ? "draft" : props.canvasSaveStatus}
+            statusLabel={
+              proposalSelected
+                ? "Draft"
+                : props.canvasSaveStatus === "saving"
+                  ? "Saving"
+                  : "Saved"
+            }
             readOnly={props.canvasReadOnly}
             onChange={updateVisibleCanvas}
+            onLayersOpenChange={(open) =>
+              props.canvasProject &&
+              props.onSetCanvasLayersOpen(props.canvasProject.id, open)
+            }
             onRequestGenerateMockup={props.onRequestGenerateMockup}
+            onEditProposalDraft={
+              props.selection.type === "canvasProposal" &&
+              props.selection.readOnly &&
+              props.canvasProposal
+                ? () =>
+                    props.onEditPlanProposalDraft(
+                      props.canvasProposal as PlanProposal,
+                    )
+                : undefined
+            }
             focusReference={
               props.selection.type === "canvas" ||
               props.selection.type === "canvasProposal" ||
@@ -128,14 +159,60 @@ export function Inspector(props: {
                 : undefined
             }
             proposalMode={proposalSelected}
+            proposalEdited={
+              props.selection.type === "canvasProposal"
+                ? Boolean(props.canvasProposal?.canvasUserEditedAt)
+                : props.selection.type === "canvasSuggestion"
+                  ? Boolean(props.canvasSuggestion?.canvasUserEditedAt)
+                  : false
+            }
             proposalLabel={
               props.selection.type === "canvasSuggestion"
-                ? "Canvas suggestion"
-                : "Plan proposal"
+                ? isGeneratedCurrentUiDraft(props.canvasSuggestion)
+                  ? "Generated draft"
+                  : "Draft"
+                : props.selection.type === "canvasProposal" &&
+                    props.selection.readOnly
+                  ? props.canvasProposal?.proposalKind === "safer_alternative"
+                    ? "Saved safer draft"
+                    : "Saved draft"
+                  : props.canvasProposal?.proposalKind === "safer_alternative"
+                    ? "Safer draft"
+                    : "Draft"
             }
             proposalSummary={canvasProposalSummary}
           />
         )}
+      {props.selection.type === "planPreview" &&
+        props.canvasProject &&
+        props.planPreviewProposal && (
+          <LiveAppPreview
+            project={props.canvasProject}
+            proposal={props.planPreviewProposal}
+            onAreaMarkChange={(areaMark) =>
+              props.onUpdatePlanPreviewAreaMark(
+                props.planPreviewProposal?.turnId ?? "",
+                areaMark,
+              )
+            }
+            onVariantChange={(variantId) =>
+              props.onUpdatePlanPreviewVariant(
+                props.planPreviewProposal?.turnId ?? "",
+                variantId,
+              )
+            }
+          />
+        )}
+      {props.selection.type === "appPreview" && props.canvasProject && (
+        <LiveAppPreview
+          project={props.canvasProject}
+          areaMark={props.appPreviewContext?.areaMark ?? null}
+          onAreaMarkChange={(areaMark, meta) =>
+            props.canvasProject &&
+            props.onAttachAppPreviewMark(props.canvasProject, areaMark, meta)
+          }
+        />
+      )}
       {props.selection.type === "document" && (
         <div className="document-surface">
           {props.documentError && (
@@ -178,35 +255,6 @@ export function Inspector(props: {
         />
       )}
     </aside>
-  );
-}
-
-function CanvasModeSwitch(props: {
-  canvas: ProjectCanvas;
-  onChange: (canvas: ProjectCanvas) => void;
-}) {
-  function switchMode(mode: ProjectCanvas["mode"]) {
-    if (props.canvas.mode === mode) return;
-    props.onChange({ ...props.canvas, mode, updatedAt: Date.now() });
-  }
-
-  return (
-    <div className="canvas-mode-switch" role="tablist" aria-label="Canvas mode">
-      <button
-        className={props.canvas.mode === "ui" ? "active" : ""}
-        onClick={() => switchMode("ui")}
-        type="button"
-      >
-        <Square size={15} /> UI
-      </button>
-      <button
-        className={props.canvas.mode === "backend" ? "active" : ""}
-        onClick={() => switchMode("backend")}
-        type="button"
-      >
-        <Database size={15} /> Backend
-      </button>
-    </div>
   );
 }
 
@@ -313,13 +361,16 @@ function ActivityPanel(props: {
         {recentChanges.map((item) => (
           <button
             key={item.id}
-            className="activity-row"
+            className="activity-row activity-row-rich"
             onClick={() => props.onSelect({ type: "fileChange", item })}
           >
             <FileText size={15} />
-            <span>
-              {item.changes.length} changed file
-              {item.changes.length === 1 ? "" : "s"}
+            <span className="activity-row-copy">
+              <strong>
+                {item.changes.length} changed file
+                {item.changes.length === 1 ? "" : "s"}
+              </strong>
+              <small>{fileChangePreview(item, props.activeProject)}</small>
             </span>
           </button>
         ))}
@@ -327,6 +378,17 @@ function ActivityPanel(props: {
 
     </div>
   );
+}
+
+function fileChangePreview(
+  item: Extract<ThreadItem, { type: "fileChange" }>,
+  activeProject: Project | null,
+) {
+  const labels = item.changes
+    .slice(0, 4)
+    .map((change) => friendlyPath(change.path, activeProject));
+  const hidden = item.changes.length - labels.length;
+  return hidden > 0 ? `${labels.join(", ")} +${hidden} more` : labels.join(", ");
 }
 
 function ApprovalDetail(props: {
@@ -362,6 +424,10 @@ function inspectorTitle(selection: InspectorSelection) {
       return "Canvas";
     case "canvasSuggestion":
       return "Canvas";
+    case "appPreview":
+      return "App Preview";
+    case "planPreview":
+      return "App Preview";
     case "command":
       return "Command";
     case "fileChange":
@@ -371,6 +437,16 @@ function inspectorTitle(selection: InspectorSelection) {
     default:
       return "Activity";
   }
+}
+
+function isGeneratedCurrentUiDraft(suggestion: CanvasSuggestion | null) {
+  return Boolean(
+    suggestion?.prompt
+      .trimStart()
+      .startsWith(
+        "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
+      ),
+  );
 }
 
 function isMarkdownPath(path: string) {

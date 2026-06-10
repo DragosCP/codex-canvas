@@ -1,4 +1,5 @@
 import type { BackendMode, ConnectionStatus } from "./types";
+import { desktopInvoke, hasDesktopBridge } from "./desktopBridge";
 
 export type RuntimeInfo = {
   appServerUrl: string;
@@ -6,29 +7,45 @@ export type RuntimeInfo = {
   backendMode: BackendMode;
   autoConnect: boolean;
   projectPathHint: string;
+  startupError?: string | null;
 };
 
-const tauriRuntime =
-  typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
+const desktopRuntime = hasDesktopBridge();
 
 export const runtimeInfo: RuntimeInfo = {
   appServerUrl:
     import.meta.env.VITE_CODEX_APP_SERVER_URL ??
-    (tauriRuntime ? "ws://127.0.0.1:48890" : "ws://127.0.0.1:48888"),
+    (desktopRuntime ? "ws://127.0.0.1:48890" : "ws://127.0.0.1:48888"),
   backendLabel:
     import.meta.env.VITE_CODEX_BACKEND_LABEL ??
-    (tauriRuntime
-      ? "Built desktop + real WSL app-server"
+    (desktopRuntime
+      ? "Electron desktop + native Codex app-server"
       : "Mock app-server dev backend"),
   backendMode: (import.meta.env.VITE_CODEX_BACKEND_MODE ??
-    (tauriRuntime ? "real-wsl" : "mock-dev")) as BackendMode,
+    (desktopRuntime ? "real-native" : "mock-dev")) as BackendMode,
   autoConnect: import.meta.env.VITE_CODEX_AUTO_CONNECT !== "false",
   projectPathHint:
     import.meta.env.VITE_CODEX_PROJECT_PATH_HINT ??
-    (tauriRuntime
-      ? "/mnt/c/Users/drago/Desktop/harnesses/codex-main"
+    (desktopRuntime
+      ? "C:\\Users\\drago\\Desktop\\harnesses\\codex-main"
       : "/mnt/c/Users/drago/Desktop/harnesses/codex-main/.cache/p03-desktop-demo-workspace"),
 };
+
+export async function loadRuntimeInfo() {
+  const resolved = desktopInvoke<Omit<RuntimeInfo, "autoConnect">>(
+    "desktop_runtime_info",
+  );
+  if (!resolved) return runtimeInfo;
+  try {
+    return {
+      ...runtimeInfo,
+      ...(await resolved),
+      autoConnect: runtimeInfo.autoConnect,
+    };
+  } catch {
+    return runtimeInfo;
+  }
+}
 
 export function normalizeProjectPathForRuntime(
   path: string,
@@ -43,6 +60,14 @@ export function normalizeProjectPathForRuntime(
     const rest = trimmed.slice(2).replace(/\\/g, "/").replace(/^\/+/, "");
     return `/mnt/${drive}/${rest}`;
   }
+  if (
+    backendMode === "real-native" &&
+    /^\/mnt\/[A-Za-z](?:\/|$)/.test(trimmed)
+  ) {
+    const drive = trimmed[5].toUpperCase();
+    const rest = trimmed.slice(7).replace(/\//g, "\\");
+    return rest ? `${drive}:\\${rest}` : `${drive}:\\`;
+  }
   return trimmed;
 }
 
@@ -55,7 +80,9 @@ export function runtimePathKey(
     /\\/g,
     "/",
   );
-  return backendMode === "real-wsl" ? normalized.toLowerCase() : normalized;
+  return backendMode === "real-wsl" || backendMode === "real-native"
+    ? normalized.toLowerCase()
+    : normalized;
 }
 
 export function sameRuntimePath(

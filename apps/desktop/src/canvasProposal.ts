@@ -4,11 +4,14 @@ import {
   cloneProjectCanvas,
   createCanvasItem,
   defaultSubPageId,
+  applyCanvasInteractionFrame,
+  upsertCanvasInteractionFrame,
 } from "./canvasState";
 import type {
   CanvasBounds,
   CanvasDevice,
   CanvasGroup,
+  CanvasInteractionFrameNumber,
   CanvasItem,
   CanvasItemKind,
   CanvasPage,
@@ -25,6 +28,14 @@ type ParsedLine = {
   raw: string;
 };
 
+type ParsedInteractionLine = {
+  triggerReference: string;
+  targetReference: string;
+  frameNumber: CanvasInteractionFrameNumber;
+  fields: Record<string, string>;
+  raw: string;
+};
+
 export type CanvasProposalParseResult = {
   canvas: ProjectCanvas;
   changeCount: number;
@@ -36,7 +47,7 @@ const PROPOSAL_BLOCK_RE = /```canvas-proposal\s*([\s\S]*?)```/gi;
 const REFERENCE_RE = /^[BCDTM][1-9]\d*$/i;
 const GROUP_RE = /^G[1-9]\d*$/i;
 
-export const CANVAS_PROPOSAL_PARSER_VERSION = 6;
+export const CANVAS_PROPOSAL_PARSER_VERSION = 8;
 
 export function applyCanvasProposalText(
   baseCanvas: ProjectCanvas,
@@ -48,6 +59,17 @@ export function applyCanvasProposalText(
   const changes: string[] = [];
 
   for (const line of lines) {
+    const parsedInteraction = parseInteractionProposalLine(line);
+    if (parsedInteraction) {
+      const result = applyInteractionProposalLine(canvas, parsedInteraction);
+      if (!result.changed) {
+        if (result.error) errors.push(result.error);
+        continue;
+      }
+      canvas = result.canvas;
+      changes.push(result.label);
+      continue;
+    }
     const parsed = parseProposalLine(line);
     if (!parsed) continue;
     const result = applyProposalLine(canvas, parsed);
@@ -70,6 +92,7 @@ export function applyCanvasProposalText(
     })),
     updatedAt: changes.length > 0 ? Date.now() : canvas.updatedAt,
   };
+  canvas = focusFirstPopulatedUiView(canvas);
 
   return {
     canvas,
@@ -86,6 +109,71 @@ export function applyCanvasProposalText(
   };
 }
 
+function focusFirstPopulatedUiView(canvas: ProjectCanvas): ProjectCanvas {
+  const currentViewHasChangedItems = canvas.items.some(
+    (item) =>
+      item.pageId === canvas.activePageId &&
+      item.subPageId === canvas.activeSubPageId &&
+      item.visible &&
+      isProposalChangedItem(item),
+  );
+  if (currentViewHasChangedItems) return canvas;
+
+  const sortedPages = [...canvas.pages].sort((left, right) => left.order - right.order);
+  for (const page of sortedPages) {
+    const sortedSubPages = [...page.subPages].sort(
+      (left, right) => left.order - right.order,
+    );
+    const changedSubPage = sortedSubPages.find((subPage) =>
+      canvas.items.some(
+        (item) =>
+          item.pageId === page.id &&
+          item.subPageId === subPage.id &&
+          item.visible &&
+          isProposalChangedItem(item),
+      ),
+    );
+    if (!changedSubPage) continue;
+    return {
+      ...canvas,
+      activePageId: page.id,
+      activeSubPageId: changedSubPage.id,
+    };
+  }
+
+  const currentViewHasItems = canvas.items.some(
+    (item) =>
+      item.pageId === canvas.activePageId &&
+      item.subPageId === canvas.activeSubPageId &&
+      item.visible,
+  );
+  if (currentViewHasItems) return canvas;
+
+  for (const page of sortedPages) {
+    const sortedSubPages = [...page.subPages].sort(
+      (left, right) => left.order - right.order,
+    );
+    const populatedSubPage = sortedSubPages.find((subPage) =>
+      canvas.items.some(
+        (item) =>
+          item.pageId === page.id && item.subPageId === subPage.id && item.visible,
+      ),
+    );
+    if (!populatedSubPage) continue;
+    return {
+      ...canvas,
+      activePageId: page.id,
+      activeSubPageId: populatedSubPage.id,
+    };
+  }
+
+  return canvas;
+}
+
+function isProposalChangedItem(item: CanvasItem) {
+  return item.state !== "current" || hasOriginalGeometry(item);
+}
+
 export function finalizeAcceptedCanvasProposal(
   proposalCanvas: ProjectCanvas,
   baseCanvas: ProjectCanvas | null,
@@ -95,26 +183,299 @@ export function finalizeAcceptedCanvasProposal(
   const baseByReference = new Map(
     baseCanvas?.items.map((item) => [item.reference.toUpperCase(), item]),
   );
-  const items = proposalCanvas.items.map((item) => {
+  const removedItemIds = new Set<string>();
+  const items = proposalCanvas.items.flatMap((item) => {
     const baseItem =
       baseById.get(item.id) ?? baseByReference.get(item.reference.toUpperCase()) ?? null;
-    if (!shouldClearProposalOriginalGeometry(item, baseItem)) return item;
-    changed = true;
-    return {
-      ...item,
-      originalX: null,
-      originalY: null,
-      originalWidth: null,
-      originalHeight: null,
-    };
+    if (item.state === "deleted") {
+      removedItemIds.add(item.id);
+      changed = true;
+      return [];
+    }
+    let nextItem = item;
+    if (item.state === "proposed") {
+      changed = true;
+      nextItem = {
+        ...nextItem,
+        state: "current",
+        locked: true,
+      };
+    }
+    if (shouldClearProposalOriginalGeometry(nextItem, baseItem)) {
+      changed = true;
+      nextItem = {
+        ...nextItem,
+        originalX: null,
+        originalY: null,
+        originalWidth: null,
+        originalHeight: null,
+      };
+    }
+    return [nextItem];
   });
+  const groups = proposalCanvas.groups.flatMap((group) => {
+    if (group.state === "deleted") {
+      changed = true;
+      return [];
+    }
+    const itemIds = group.itemIds.filter((itemId) => !removedItemIds.has(itemId));
+    if (itemIds.length === 0) {
+      changed = true;
+      return [];
+    }
+    if (group.state !== "proposed" && itemIds.length === group.itemIds.length) {
+      return [group];
+    }
+    changed = true;
+    return [
+      {
+        ...group,
+        itemIds,
+        state: group.state === "proposed" ? "current" : group.state,
+        locked: group.state === "proposed" ? true : group.locked,
+      },
+    ];
+  });
+  const interactionPreviews =
+    removedItemIds.size === 0
+      ? proposalCanvas.interactionPreviews
+      : proposalCanvas.interactionPreviews
+          .filter((preview) => !removedItemIds.has(preview.triggerId))
+          .map((preview) => ({
+            ...preview,
+            frames: preview.frames.map((frame) => ({
+              ...frame,
+              affected: frame.affected.filter(
+                (delta) => !removedItemIds.has(delta.itemId),
+              ),
+            })),
+          }));
   return changed
     ? {
         ...proposalCanvas,
         items,
+        groups,
+        interactionPreviews,
         updatedAt: Date.now(),
       }
     : proposalCanvas;
+}
+
+export function mergeAcceptedCanvasProposal(
+  currentCanvas: ProjectCanvas,
+  proposalCanvas: ProjectCanvas,
+  baseCanvas: ProjectCanvas | null,
+): ProjectCanvas {
+  const baseById = new Map(baseCanvas?.items.map((item) => [item.id, item]));
+  const baseByReference = new Map(
+    baseCanvas?.items.map((item) => [item.reference.toUpperCase(), item]),
+  );
+  const currentById = new Map(currentCanvas.items.map((item) => [item.id, item]));
+  const currentByReference = new Map(
+    currentCanvas.items.map((item) => [item.reference.toUpperCase(), item]),
+  );
+  const pageMap = buildPageMergeMap(currentCanvas, proposalCanvas);
+  const changedProposalItems = proposalCanvas.items.filter((item) =>
+    shouldMergeProposalItem(
+      item,
+      baseById.get(item.id) ??
+        baseByReference.get(item.reference.toUpperCase()) ??
+        null,
+    ),
+  );
+  if (changedProposalItems.length === 0) return currentCanvas;
+
+  const now = Date.now();
+  const changedProposalItemIds = new Set(changedProposalItems.map((item) => item.id));
+  const removedCurrentItemIds = new Set<string>();
+  const proposalToCurrentItemId = new Map<string, string>();
+  const usedItemIds = new Set(currentCanvas.items.map((item) => item.id));
+  const usedItemReferences = new Set(
+    currentCanvas.items.map((item) => item.reference.toUpperCase()),
+  );
+  let items = [...currentCanvas.items];
+
+  for (const proposalItem of changedProposalItems) {
+    const existing =
+      currentById.get(proposalItem.id) ??
+      currentByReference.get(proposalItem.reference.toUpperCase()) ??
+      null;
+
+    if (proposalItem.state === "deleted") {
+      if (existing) {
+        removedCurrentItemIds.add(existing.id);
+        proposalToCurrentItemId.set(proposalItem.id, existing.id);
+        items = items.filter((item) => item.id !== existing.id);
+      }
+      continue;
+    }
+
+    const pageScope = mapProposalScope(proposalItem, pageMap, currentCanvas);
+    if (existing) {
+      proposalToCurrentItemId.set(proposalItem.id, existing.id);
+      items = items.map((item) =>
+        item.id === existing.id
+          ? withMergedItemBounds({
+              ...item,
+              kind: proposalItem.kind,
+              title: proposalItem.title,
+              body: proposalItem.body,
+              x: proposalItem.x,
+              y: proposalItem.y,
+              width: proposalItem.width,
+              height: proposalItem.height,
+              state: "current",
+              locked: true,
+              visible: proposalItem.visible,
+              zIndex: proposalItem.zIndex,
+              pageId: pageScope.pageId,
+              subPageId: pageScope.subPageId,
+              device: proposalItem.device,
+              comment: proposalItem.comment,
+              originalX: null,
+              originalY: null,
+              originalWidth: null,
+              originalHeight: null,
+              updatedAt: now,
+            })
+          : item,
+      );
+      continue;
+    }
+
+    const itemId = uniqueMergeId(proposalItem.id, usedItemIds);
+    usedItemIds.add(itemId);
+    const reference = uniqueMergeReference(
+      proposalItem.reference,
+      proposalItem.kind,
+      usedItemReferences,
+    );
+    usedItemReferences.add(reference.toUpperCase());
+    proposalToCurrentItemId.set(proposalItem.id, itemId);
+    items.push(
+      withMergedItemBounds({
+        ...proposalItem,
+        id: itemId,
+        numericId: numericReferenceValue(reference) ?? nextMergeItemNumericId(items),
+        reference,
+        state: "current",
+        locked: true,
+        pageId: pageScope.pageId,
+        subPageId: pageScope.subPageId,
+        originalX: null,
+        originalY: null,
+        originalWidth: null,
+        originalHeight: null,
+        createdAt: now,
+        updatedAt: now,
+      }),
+    );
+  }
+
+  const baseGroupsById = new Map(baseCanvas?.groups.map((group) => [group.id, group]));
+  const baseGroupsByReference = new Map(
+    baseCanvas?.groups.map((group) => [group.reference.toUpperCase(), group]),
+  );
+  const currentGroupsById = new Map(
+    currentCanvas.groups.map((group) => [group.id, group]),
+  );
+  const currentGroupsByReference = new Map(
+    currentCanvas.groups.map((group) => [group.reference.toUpperCase(), group]),
+  );
+  const usedGroupIds = new Set(currentCanvas.groups.map((group) => group.id));
+  const usedGroupReferences = new Set(
+    currentCanvas.groups.map((group) => group.reference.toUpperCase()),
+  );
+  let groups = currentCanvas.groups
+    .map((group) => ({
+      ...group,
+      itemIds: group.itemIds.filter((itemId) => !removedCurrentItemIds.has(itemId)),
+    }))
+    .filter((group) => group.itemIds.length > 1);
+
+  for (const proposalGroup of proposalCanvas.groups) {
+    const baseGroup =
+      baseGroupsById.get(proposalGroup.id) ??
+      baseGroupsByReference.get(proposalGroup.reference.toUpperCase()) ??
+      null;
+    const groupChanged =
+      proposalGroup.state !== "current" ||
+      proposalGroup.itemIds.some((itemId) => changedProposalItemIds.has(itemId)) ||
+      !baseGroup ||
+      !sameCanvasGroup(proposalGroup, baseGroup);
+    if (!groupChanged) continue;
+
+    const existing =
+      currentGroupsById.get(proposalGroup.id) ??
+      currentGroupsByReference.get(proposalGroup.reference.toUpperCase()) ??
+      null;
+    if (proposalGroup.state === "deleted") {
+      groups = groups.filter((group) => group.id !== existing?.id);
+      continue;
+    }
+
+    const itemIds = proposalGroup.itemIds
+      .map((itemId) => proposalToCurrentItemId.get(itemId) ?? itemId)
+      .filter((itemId) => items.some((item) => item.id === itemId));
+    if (itemIds.length < 2) continue;
+    const pageScope = mapProposalScope(proposalGroup, pageMap, currentCanvas);
+    if (existing) {
+      groups = groups.map((group) =>
+        group.id === existing.id
+          ? {
+              ...group,
+              title: proposalGroup.title,
+              state: "current",
+              itemIds,
+              locked: true,
+              pageId: pageScope.pageId,
+              subPageId: pageScope.subPageId,
+              device: proposalGroup.device,
+              updatedAt: now,
+            }
+          : group,
+      );
+      continue;
+    }
+
+    const groupId = uniqueMergeId(proposalGroup.id, usedGroupIds);
+    usedGroupIds.add(groupId);
+    const reference = uniqueGroupMergeReference(
+      proposalGroup.reference,
+      usedGroupReferences,
+    );
+    usedGroupReferences.add(reference.toUpperCase());
+    groups.push({
+      ...proposalGroup,
+      id: groupId,
+      numericId: numericReferenceValue(reference) ?? nextMergeGroupNumericId(groups),
+      reference,
+      state: "current",
+      itemIds,
+      locked: true,
+      pageId: pageScope.pageId,
+      subPageId: pageScope.subPageId,
+      createdAt: now,
+      updatedAt: now,
+    });
+  }
+
+  items = items.map((item) =>
+    item.groupId && !groups.some((group) => group.id === item.groupId)
+      ? { ...item, groupId: null, updatedAt: now }
+      : item,
+  );
+  groups = refreshMergedGroups(groups, items);
+
+  return focusFirstPopulatedUiView({
+    ...currentCanvas,
+    pages: pageMap.pages,
+    activePageId: pageMap.activePageId,
+    activeSubPageId: pageMap.activeSubPageId,
+    items,
+    groups,
+    updatedAt: now,
+  });
 }
 
 function proposalLines(text: string) {
@@ -139,9 +500,176 @@ function likelyProposalLine(line: string) {
   if (/^(create|new|add|delete|remove|mark\s+deleted)\b/i.test(line)) {
     return true;
   }
+  if (/^(interaction|frame|preview)\b/i.test(line)) return true;
   const first = line.split(/\s|;/, 1)[0]?.replace(/:$/, "");
   if (first && (REFERENCE_RE.test(first) || GROUP_RE.test(first))) return true;
   return /\b(state|xywh|rect|bounds|x|y|w|h|width|height|grid|gxywh|gridxywh|gx|gy|gw|gh|norm|normalized|nxywh|nx|ny|nw|nh)=/i.test(line);
+}
+
+function parseInteractionProposalLine(line: string): ParsedInteractionLine | null {
+  const first = line.split(/\s+/, 1)[0]?.toLowerCase().replace(/:$/, "");
+  if (!first || !["interaction", "frame", "preview"].includes(first)) return null;
+  const fields = parseFields(line);
+  const frameNumber = interactionFrameNumber(fields.frame ?? fields.frameNumber);
+  if (!frameNumber) return null;
+  const words = line.split(/\s+/).filter(Boolean);
+  const references = referencesFromWords(words);
+  const triggerReference =
+    referenceField(fields.trigger ?? fields.triggerRef ?? fields.from) ??
+    references[0] ??
+    null;
+  const targetReference =
+    referenceField(fields.target ?? fields.targetRef ?? fields.affects ?? fields.to) ??
+    references.find((reference) => reference !== triggerReference) ??
+    null;
+  if (!triggerReference || !targetReference) return null;
+  return {
+    triggerReference,
+    targetReference,
+    frameNumber,
+    fields,
+    raw: line,
+  };
+}
+
+function applyInteractionProposalLine(
+  canvas: ProjectCanvas,
+  parsed: ParsedInteractionLine,
+) {
+  const trigger = canvasReferenceTarget(canvas, parsed.triggerReference);
+  if (!trigger) {
+    return {
+      canvas,
+      changed: false,
+      label: parsed.triggerReference,
+      error: `Could not find interaction trigger: ${parsed.raw}`,
+    };
+  }
+  const target = canvasReferenceTarget(canvas, parsed.targetReference);
+  if (!target) {
+    return {
+      canvas,
+      changed: false,
+      label: parsed.targetReference,
+      error: `Could not find interaction target: ${parsed.raw}`,
+    };
+  }
+
+  const existingPreview = canvas.interactionPreviews.find(
+    (preview) =>
+      preview.triggerKind === trigger.kind && preview.triggerId === trigger.value.id,
+  );
+  let draftCanvas =
+    existingPreview?.frames.some((frame) => frame.frame === parsed.frameNumber)
+      ? applyCanvasInteractionFrame(canvas, existingPreview.id, parsed.frameNumber)
+      : canvas;
+  const rect = rectFromFields(parsed.fields);
+  const visible = booleanField(parsed.fields.visible);
+  draftCanvas = applyInteractionTargetPatch(draftCanvas, target, rect, visible);
+  const nextCanvas = upsertCanvasInteractionFrame({
+    canvas,
+    baseCanvas: canvas,
+    draftCanvas,
+    triggerKind: trigger.kind,
+    triggerId: trigger.value.id,
+    frameNumber: parsed.frameNumber,
+  });
+  const nextPreview = nextCanvas.interactionPreviews.find(
+    (preview) =>
+      preview.triggerKind === trigger.kind && preview.triggerId === trigger.value.id,
+  );
+  const nextFrame = nextPreview?.frames.find(
+    (frame) => frame.frame === parsed.frameNumber,
+  );
+  if (!nextPreview || !nextFrame || nextFrame.affected.length === 0) {
+    return {
+      canvas,
+      changed: false,
+      label: `${parsed.triggerReference} frame ${parsed.frameNumber}`,
+      error: `Interaction frame had no target changes: ${parsed.raw}`,
+    };
+  }
+  const sticky = booleanField(parsed.fields.sticky);
+  const holdMs = numberField(
+    parsed.fields.holdMs ?? parsed.fields.hold ?? parsed.fields.duration,
+  );
+  const timedCanvas =
+    sticky != null || holdMs != null
+      ? {
+          ...nextCanvas,
+          interactionPreviews: nextCanvas.interactionPreviews.map((preview) =>
+            preview.id !== nextPreview.id
+              ? preview
+              : {
+                  ...preview,
+                  frames: preview.frames.map((frame) =>
+                    frame.frame === parsed.frameNumber
+                      ? {
+                          ...frame,
+                          sticky: sticky ?? frame.sticky,
+                          holdMs: holdMs != null ? Math.max(150, Math.round(holdMs)) : frame.holdMs,
+                          updatedAt: Date.now(),
+                        }
+                      : frame,
+                  ),
+                  updatedAt: Date.now(),
+                },
+          ),
+          updatedAt: Date.now(),
+        }
+      : nextCanvas;
+  return {
+    canvas: timedCanvas,
+    changed: true,
+    label: `${trigger.value.reference} frame ${parsed.frameNumber}`,
+    error: null,
+  };
+}
+
+function canvasReferenceTarget(
+  canvas: ProjectCanvas,
+  reference: string,
+): { kind: "group"; value: CanvasGroup } | { kind: "item"; value: CanvasItem } | null {
+  const upper = reference.toUpperCase();
+  if (GROUP_RE.test(upper)) {
+    const group = canvas.groups.find(
+      (candidate) => candidate.reference.toUpperCase() === upper,
+    );
+    return group ? { kind: "group", value: group } : null;
+  }
+  const item = canvas.items.find(
+    (candidate) => candidate.reference.toUpperCase() === upper,
+  );
+  return item ? { kind: "item", value: item } : null;
+}
+
+function applyInteractionTargetPatch(
+  canvas: ProjectCanvas,
+  target: NonNullable<ReturnType<typeof canvasReferenceTarget>>,
+  rect: ReturnType<typeof rectFromFields>,
+  visible: boolean | null,
+) {
+  if (target.kind === "item") {
+    return updateCanvasItem(canvas, target.value.id, {
+      ...(rect ? rect : {}),
+      ...(visible != null ? { visible } : {}),
+    });
+  }
+  const dx = rect ? rect.x - target.value.bounds.x : 0;
+  const dy = rect ? rect.y - target.value.bounds.y : 0;
+  const memberIds = new Set(target.value.itemIds);
+  return {
+    ...canvas,
+    items: canvas.items.map((item) => {
+      if (!memberIds.has(item.id)) return item;
+      return withItemBounds({
+        ...item,
+        ...(rect ? { x: item.x + dx, y: item.y + dy } : {}),
+        ...(visible != null ? { visible } : {}),
+        updatedAt: Date.now(),
+      });
+    }),
+  };
 }
 
 function parseProposalLine(line: string): ParsedLine | null {
@@ -301,7 +829,12 @@ function createProposalItem(canvas: ProjectCanvas, parsed: ParsedLine) {
       numericId: referenceNumber(safeReference) ?? item.numericId,
       reference: safeReference,
       title: parsed.title ?? parsed.fields.name ?? item.title,
-      body: parsed.fields.label ?? parsed.fields.body ?? parsed.fields.text ?? item.body,
+      body:
+        parsed.fields.description ??
+        parsed.fields.label ??
+        parsed.fields.body ??
+        parsed.fields.text ??
+        item.body,
       comment:
         parsed.fields.noteForCodex ??
         parsed.fields.comment ??
@@ -329,8 +862,17 @@ function itemPatch(
   if (parsed.title || parsed.fields.name) {
     patch.title = parsed.title ?? parsed.fields.name;
   }
-  if (parsed.fields.label || parsed.fields.body || parsed.fields.text) {
-    patch.body = parsed.fields.label ?? parsed.fields.body ?? parsed.fields.text;
+  if (
+    parsed.fields.description ||
+    parsed.fields.label ||
+    parsed.fields.body ||
+    parsed.fields.text
+  ) {
+    patch.body =
+      parsed.fields.description ??
+      parsed.fields.label ??
+      parsed.fields.body ??
+      parsed.fields.text;
   }
   if (parsed.fields.noteForCodex || parsed.fields.comment || parsed.fields.note) {
     patch.comment =
@@ -399,6 +941,31 @@ function referenceFromWords(words: string[]) {
     const cleaned = word.replace(/[;:,()[\]]/g, "").toUpperCase();
     if (REFERENCE_RE.test(cleaned) || GROUP_RE.test(cleaned)) return cleaned;
   }
+  return null;
+}
+
+function referencesFromWords(words: string[]) {
+  const references: string[] = [];
+  for (const word of words) {
+    const cleaned = word.replace(/[;:,()[\]]/g, "").toUpperCase();
+    if ((REFERENCE_RE.test(cleaned) || GROUP_RE.test(cleaned)) && !references.includes(cleaned)) {
+      references.push(cleaned);
+    }
+  }
+  return references;
+}
+
+function referenceField(value: string | undefined) {
+  if (!value) return null;
+  const cleaned = value.replace(/[;:,()[\]]/g, "").toUpperCase();
+  return REFERENCE_RE.test(cleaned) || GROUP_RE.test(cleaned) ? cleaned : null;
+}
+
+function interactionFrameNumber(
+  value: string | undefined,
+): CanvasInteractionFrameNumber | null {
+  const number = Number(value);
+  if (number === 2 || number === 3) return number;
   return null;
 }
 
@@ -543,9 +1110,6 @@ function pageFromFields(
     ""
   ).trim();
   const pageValue = rawPageValue.toLowerCase();
-  if (pageValue === "backend") {
-    return { canvas, pageId: null, subPageId: null, device: null };
-  }
   if (!pageValue) {
     const subPage = findOrCreateSubPage(
       canvas,
@@ -622,6 +1186,10 @@ function findCanvasSubPage(
   }
   const page = pages.find((candidate) => candidate.id === pageId);
   if (!page) return null;
+  const pageIndex = pages
+    .slice()
+    .sort((left, right) => left.order - right.order)
+    .findIndex((candidate) => candidate.id === pageId);
   const normalized = normalizePageLookupValue(value);
   return page.subPages.find((subPage, index) => {
     const aliases = [
@@ -630,6 +1198,12 @@ function findCanvasSubPage(
       `${index + 1}`,
       `S${index + 1}`,
       `State ${index + 1}`,
+      pageIndex >= 0 ? `P${pageIndex + 1}.${index + 1}` : "",
+      pageIndex >= 0 ? `P${pageIndex + 1}.${index + 1} ${subPage.name}` : "",
+      pageIndex >= 0 ? `Page ${pageIndex + 1}.${index + 1}` : "",
+      pageIndex >= 0
+        ? `Page ${pageIndex + 1}.${index + 1} ${subPage.name}`
+        : "",
     ].map(normalizePageLookupValue);
     return aliases.includes(normalized);
   }) ?? null;
@@ -648,10 +1222,11 @@ function findOrCreateSubPage(
   if (existing) return { canvas, subPageId: existing.id };
   const order =
     page.subPages.reduce((max, subPage) => Math.max(max, subPage.order), -1) + 1;
+  const name = displaySubPageName(value, order + 1);
   const subPage = {
-    id: uniqueSubPageId(page.subPages, page.id, value),
+    id: uniqueSubPageId(page.subPages, page.id, name),
     pageId: page.id,
-    name: displaySubPageName(value, order + 1),
+    name,
     order,
   };
   return {
@@ -705,6 +1280,8 @@ function displayPageName(value: string, fallbackNumber: number) {
 
 function displaySubPageName(value: string, fallbackNumber: number) {
   const trimmed = value.replace(/^["']|["']$/g, "").trim();
+  const prefixed = trimmed.match(/^(?:P|Page\s*)?\d+\.\d+\s+(.+)$/i);
+  if (prefixed) return prefixed[1]?.trim() || `State ${fallbackNumber}`;
   const numeric = trimmed.match(/^(?:s|state)?\s*(\d+)$/i)?.[1];
   if (numeric) return `State ${numeric}`;
   return trimmed || `State ${fallbackNumber}`;
@@ -816,6 +1393,223 @@ function groupBoundsFromItems(items: CanvasItem[]) {
     item.width * item.height > largest.width * largest.height ? item : largest,
   );
   return boundsFromRect(primary.x, primary.y, primary.width, primary.height);
+}
+
+function shouldMergeProposalItem(item: CanvasItem, baseItem: CanvasItem | null) {
+  return (
+    item.state !== "current" ||
+    hasOriginalGeometry(item) ||
+    !baseItem ||
+    !sameCanvasItem(item, baseItem)
+  );
+}
+
+function sameCanvasItem(left: CanvasItem, right: CanvasItem) {
+  return (
+    left.kind === right.kind &&
+    left.title === right.title &&
+    left.body === right.body &&
+    left.x === right.x &&
+    left.y === right.y &&
+    left.width === right.width &&
+    left.height === right.height &&
+    left.state === right.state &&
+    left.visible === right.visible &&
+    left.pageId === right.pageId &&
+    left.subPageId === right.subPageId &&
+    left.device === right.device &&
+    left.comment === right.comment
+  );
+}
+
+function sameCanvasGroup(left: CanvasGroup, right: CanvasGroup) {
+  return (
+    left.title === right.title &&
+    left.state === right.state &&
+    left.pageId === right.pageId &&
+    left.subPageId === right.subPageId &&
+    left.device === right.device &&
+    left.itemIds.length === right.itemIds.length &&
+    left.itemIds.every((itemId, index) => itemId === right.itemIds[index])
+  );
+}
+
+type PageMergeMap = {
+  pages: CanvasPage[];
+  activePageId: string;
+  activeSubPageId: string;
+  pageIds: Map<string, string>;
+  subPageIds: Map<string, string>;
+};
+
+function buildPageMergeMap(
+  currentCanvas: ProjectCanvas,
+  proposalCanvas: ProjectCanvas,
+): PageMergeMap {
+  let pages = [...currentCanvas.pages];
+  const pageIds = new Map<string, string>();
+  const subPageIds = new Map<string, string>();
+  let activePageId = currentCanvas.activePageId;
+  let activeSubPageId = currentCanvas.activeSubPageId;
+
+  for (const proposalPage of proposalCanvas.pages) {
+    const currentPage =
+      pages.find((page) => page.id === proposalPage.id) ??
+      pages.find(
+        (page) => page.name.toLowerCase() === proposalPage.name.toLowerCase(),
+      ) ??
+      null;
+    const pageId = currentPage?.id ?? proposalPage.id;
+    pageIds.set(proposalPage.id, pageId);
+    if (!currentPage) {
+      pages = [
+        ...pages,
+        {
+          ...proposalPage,
+          id: pageId,
+          order:
+            pages.reduce((max, page) => Math.max(max, page.order), -1) + 1,
+          subPages: [],
+        },
+      ];
+    }
+
+    const latestPage = pages.find((page) => page.id === pageId);
+    const existingSubPages = latestPage?.subPages ?? [];
+    for (const proposalSubPage of proposalPage.subPages) {
+      const currentSubPage =
+        existingSubPages.find((subPage) => subPage.id === proposalSubPage.id) ??
+        existingSubPages.find(
+          (subPage) =>
+            subPage.name.toLowerCase() === proposalSubPage.name.toLowerCase(),
+        ) ??
+        null;
+      const subPageId = currentSubPage?.id ?? proposalSubPage.id;
+      subPageIds.set(proposalSubPage.id, subPageId);
+      if (currentSubPage) continue;
+      pages = pages.map((page) =>
+        page.id === pageId
+          ? {
+              ...page,
+              subPages: [
+                ...page.subPages,
+                {
+                  ...proposalSubPage,
+                  id: subPageId,
+                  pageId,
+                  order:
+                    page.subPages.reduce(
+                      (max, subPage) => Math.max(max, subPage.order),
+                      -1,
+                    ) + 1,
+                },
+              ],
+            }
+          : page,
+      );
+    }
+  }
+
+  if (!pages.some((page) => page.id === activePageId)) {
+    activePageId = pages[0]?.id ?? currentCanvas.activePageId;
+  }
+  const activePage = pages.find((page) => page.id === activePageId);
+  if (
+    activePage &&
+    !activePage.subPages.some((subPage) => subPage.id === activeSubPageId)
+  ) {
+    activeSubPageId = activePage.subPages[0]?.id ?? activeSubPageId;
+  }
+
+  return { pages, activePageId, activeSubPageId, pageIds, subPageIds };
+}
+
+function mapProposalScope(
+  target: Pick<CanvasItem | CanvasGroup, "pageId" | "subPageId">,
+  pageMap: PageMergeMap,
+  currentCanvas: ProjectCanvas,
+) {
+  const pageId = target.pageId
+    ? pageMap.pageIds.get(target.pageId) ?? target.pageId
+    : null;
+  return {
+    pageId,
+    subPageId:
+      pageId === null
+        ? null
+        : target.subPageId
+          ? pageMap.subPageIds.get(target.subPageId) ?? target.subPageId
+          : defaultSubPageId(pageMap.pages, pageId) ??
+            defaultSubPageId(currentCanvas.pages, pageId),
+  };
+}
+
+function uniqueMergeId(id: string, usedIds: Set<string>) {
+  if (!usedIds.has(id)) return id;
+  let next = crypto.randomUUID();
+  while (usedIds.has(next)) next = crypto.randomUUID();
+  return next;
+}
+
+function uniqueMergeReference(
+  reference: string,
+  kind: CanvasItemKind,
+  usedReferences: Set<string>,
+) {
+  if (!usedReferences.has(reference.toUpperCase())) return reference;
+  const prefix = referencePrefix(kind);
+  let next = 1;
+  while (usedReferences.has(`${prefix}${next}`)) next += 1;
+  return `${prefix}${next}`;
+}
+
+function uniqueGroupMergeReference(reference: string, usedReferences: Set<string>) {
+  if (!usedReferences.has(reference.toUpperCase())) return reference;
+  let next = 1;
+  while (usedReferences.has(`G${next}`)) next += 1;
+  return `G${next}`;
+}
+
+function referencePrefix(kind: CanvasItemKind) {
+  switch (kind) {
+    case "button":
+      return "B";
+    case "text":
+      return "T";
+    case "modal":
+      return "M";
+    case "divider":
+      return "D";
+    case "container":
+      return "C";
+  }
+}
+
+function numericReferenceValue(reference: string) {
+  const value = Number(reference.replace(/^[A-Za-z]+/, ""));
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function nextMergeItemNumericId(items: CanvasItem[]) {
+  return items.reduce((max, item) => Math.max(max, item.numericId), 0) + 1;
+}
+
+function nextMergeGroupNumericId(groups: CanvasGroup[]) {
+  return groups.reduce((max, group) => Math.max(max, group.numericId), 0) + 1;
+}
+
+function withMergedItemBounds(item: CanvasItem): CanvasItem {
+  return {
+    ...item,
+    bounds: boundsFromRect(item.x, item.y, item.width, item.height),
+  };
+}
+
+function refreshMergedGroups(groups: CanvasGroup[], items: CanvasItem[]) {
+  return resolveCanvasGroups(groups, items).map((group) => ({
+    ...group,
+    locked: group.state === "current" ? true : group.locked,
+  }));
 }
 
 function hasOriginalGeometry(item: CanvasItem) {

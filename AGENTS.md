@@ -34,6 +34,8 @@ These rules describe how this project is managed on top of the upstream Codex re
 - Future plans should include a `Relevant Docs` section and should not restate all durable project facts.
 - Plans should have long, self-contained phases so the owner is not forced to repeatedly say "continue".
 - Every active plan should show enough status that the owner can tell what is done, what is next, and what is blocked.
+- When creating, discussing, or revising a plan, write it as a user workflow first: define the UI/UX contract, the visible user states, the decision points, and the smallest useful interaction before describing product intent or implementation mechanics.
+- If a plan introduces a new surface, card, button, approval path, or Canvas/Plan Mode behavior, make the UI/UX placement explicit enough that another agent should not have to invent it from product direction alone.
 
 ## Latest Implemented Plan Memory
 
@@ -82,6 +84,11 @@ These rules describe how this project is managed on top of the upstream Codex re
 
 - After implementation work, manually run the app locally when feasible.
 - Verify the user workflow, database or persisted state when relevant, console logs, automated tests, and any error surfaces touched by the work.
+- For Codex Copy product features, "manually run the app" means using the real desktop app (`Codex Local`; Electron on the current branch) whenever feasible, not only a browser/dev-server approximation.
+- Choose the fastest honest verification layer before falling back to coordinate screenshots: pure parser/state logic can use unit checks, component behavior can use a browser/component harness, repeated desktop flows should prefer a DOM/state automation gate when available, and screenshots/manual pointer driving are best kept for final visual sanity or when no better hook exists. Keep the tool choice guidance in `docs/UI-UX.md` and any dev-only gate architecture in `docs/Arch.md`.
+- After implementing user-visible Canvas, Plan Mode, composer, or project behavior, dogfood the feature end-to-end in two local projects, preferably one interface-heavy and one backend/workflow-heavy project. Run them in parallel when the app/tooling allows it; otherwise run them in series.
+- It is acceptable to close and reopen the desktop app for rebuilds, debug mode, or stale state. After testing, leave the app open unless the owner asks otherwise.
+- If the E2E path is blocked by project switching, prompting, Canvas, sizing, visibility, loading state, or too many unclear clicks, pause the feature claim, record the barrier, fix the Codex Copy product, and retest instead of shortcutting around the product.
 - If something cannot be verified, say exactly what was not verified and why.
 - For scaffolding-only documentation work, file and content verification is enough.
 

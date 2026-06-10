@@ -58,6 +58,7 @@ export function ProjectSidebar(props: {
   onArchiveThread: (threadId: string, project: Project) => void;
   onConnect: () => void;
   onLogout: () => Promise<void>;
+  onOpenAuth: () => void;
   onPickProjectFolder: () => Promise<boolean>;
   onProjectPathChange: (value: string) => void;
   onRemoveProject: (projectId: string) => void;
@@ -88,7 +89,9 @@ export function ProjectSidebar(props: {
   const [addingProject, setAddingProject] = useState(
     props.projectThreadGroups.length === 0,
   );
-  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(null);
+  const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(
+    null,
+  );
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [projectDraftName, setProjectDraftName] = useState("");
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -102,6 +105,9 @@ export function ProjectSidebar(props: {
   const account = describeAccount(props.snapshot);
   const usageRows = usageSummaryRows(props.snapshot);
   const canLogout = Boolean(props.snapshot.account?.account);
+  const canLogin = Boolean(
+    !canLogout && props.snapshot.account?.requiresOpenaiAuth,
+  );
 
   useEffect(() => {
     function closeSettings(event: MouseEvent) {
@@ -157,6 +163,11 @@ export function ProjectSidebar(props: {
   function confirmRemoveProject(projectId: string) {
     props.onRemoveProject(projectId);
     setConfirming(null);
+    setOpenProjectMenuId(null);
+  }
+
+  function requestProjectConfirmation(confirmation: Confirmation) {
+    setConfirming(confirmation);
     setOpenProjectMenuId(null);
   }
 
@@ -219,10 +230,14 @@ export function ProjectSidebar(props: {
         {connectionVerb(props.connectionStatus)}
       </div>
 
-      {props.actionError && <p className="sidebar-error">{props.actionError}</p>}
+      {props.actionError && (
+        <p className="sidebar-error">{props.actionError}</p>
+      )}
 
       {!props.activeProject && (
-        <p className="sidebar-guidance">Select or add a project to start a chat.</p>
+        <p className="sidebar-guidance">
+          Select or add a project to start a chat.
+        </p>
       )}
 
       <section className="sidebar-section projects-section">
@@ -290,7 +305,9 @@ export function ProjectSidebar(props: {
             <div className="empty-sidebar-state">
               <MessageSquare size={16} />
               <span>
-                {props.threadSearch.trim() ? "No visible matches" : "No projects yet"}
+                {props.threadSearch.trim()
+                  ? "No visible matches"
+                  : "No projects yet"}
               </span>
               <small>
                 {props.threadSearch.trim()
@@ -303,7 +320,10 @@ export function ProjectSidebar(props: {
             const expanded = props.expandedProjectIds.includes(project.id);
             const visibleThreads = threads.slice(0, expanded ? 10 : 5);
             const hasRows = Boolean(draft) || visibleThreads.length > 0;
-            const hiddenThreadCount = Math.max(0, threads.length - visibleThreads.length);
+            const hiddenThreadCount = Math.max(
+              0,
+              threads.length - visibleThreads.length,
+            );
             return (
               <div key={project.id} className="project-block">
                 {editingProjectId === project.id ? (
@@ -317,7 +337,9 @@ export function ProjectSidebar(props: {
                     <input
                       autoFocus
                       value={projectDraftName}
-                      onChange={(event) => setProjectDraftName(event.target.value)}
+                      onChange={(event) =>
+                        setProjectDraftName(event.target.value)
+                      }
                       onKeyDown={(event) => {
                         if (event.key === "Escape") {
                           setEditingProjectId(null);
@@ -325,7 +347,10 @@ export function ProjectSidebar(props: {
                         }
                       }}
                     />
-                    <button className="icon-button mini" title="Save project name">
+                    <button
+                      className="icon-button mini"
+                      title="Save project name"
+                    >
                       <Check size={13} />
                     </button>
                   </form>
@@ -377,7 +402,9 @@ export function ProjectSidebar(props: {
                                   <Pin size={14} />
                                 )}
                                 <span>
-                                  {project.pinned ? "Unpin project" : "Pin project"}
+                                  {project.pinned
+                                    ? "Unpin project"
+                                    : "Pin project"}
                                 </span>
                               </button>
                               <button
@@ -387,13 +414,15 @@ export function ProjectSidebar(props: {
                                 <FolderOpen size={14} />
                                 <span>Open in Explorer</span>
                               </button>
-                              <button onClick={() => beginProjectRename(project)}>
+                              <button
+                                onClick={() => beginProjectRename(project)}
+                              >
                                 <Edit3 size={14} />
                                 <span>Rename project</span>
                               </button>
                               <button
                                 onClick={() =>
-                                  setConfirming({
+                                  requestProjectConfirmation({
                                     type: "archiveProject",
                                     projectId: project.id,
                                   })
@@ -405,7 +434,7 @@ export function ProjectSidebar(props: {
                               </button>
                               <button
                                 onClick={() =>
-                                  setConfirming({
+                                  requestProjectConfirmation({
                                     type: "removeProject",
                                     projectId: project.id,
                                   })
@@ -422,22 +451,43 @@ export function ProjectSidebar(props: {
                     {confirming?.type === "archiveProject" &&
                       confirming.projectId === project.id && (
                         <div className="confirm-popover project-confirm">
-                          <span>Archive the visible chats for this project?</span>
-                          <button onClick={() => confirmArchiveProject(project)}>
-                            Archive
-                          </button>
-                          <button onClick={() => setConfirming(null)}>Cancel</button>
+                          <div className="project-confirm-copy">
+                            <span>Archive chats</span>
+                            <small>
+                              Visible chats move out of this project list.
+                            </small>
+                          </div>
+                          <div className="project-confirm-actions">
+                            <button onClick={() => setConfirming(null)}>
+                              Cancel
+                            </button>
+                            <button
+                              className="danger"
+                              onClick={() => confirmArchiveProject(project)}
+                            >
+                              Archive
+                            </button>
+                          </div>
                         </div>
                       )}
                     {confirming?.type === "removeProject" &&
                       confirming.projectId === project.id && (
                         <div className="confirm-popover project-confirm">
-                          <span>Remove this project from the sidebar?</span>
-                          <small>The folder stays on disk.</small>
-                          <button onClick={() => confirmRemoveProject(project.id)}>
-                            Remove
-                          </button>
-                          <button onClick={() => setConfirming(null)}>Cancel</button>
+                          <div className="project-confirm-copy">
+                            <span>Remove project</span>
+                            <small>Only the sidebar item is removed.</small>
+                          </div>
+                          <div className="project-confirm-actions">
+                            <button onClick={() => setConfirming(null)}>
+                              Cancel
+                            </button>
+                            <button
+                              className="danger"
+                              onClick={() => confirmRemoveProject(project.id)}
+                            >
+                              Remove
+                            </button>
+                          </div>
                         </div>
                       )}
                   </>
@@ -451,12 +501,16 @@ export function ProjectSidebar(props: {
                     <div
                       key={draft.id}
                       className={`thread-stack draft-thread ${
-                        props.activeDraftProjectId === project.id ? "active" : ""
+                        props.activeDraftProjectId === project.id
+                          ? "active"
+                          : ""
                       }`}
                     >
                       <div
                         className={`thread-row-wrap draft-row-wrap ${
-                          props.activeDraftProjectId === project.id ? "active" : ""
+                          props.activeDraftProjectId === project.id
+                            ? "active"
+                            : ""
                         }`}
                       >
                         <span className="thread-draft-gutter" />
@@ -493,7 +547,9 @@ export function ProjectSidebar(props: {
                         >
                           <button
                             className="icon-button mini thread-pin-action"
-                            onClick={() => props.onTogglePinnedThread(thread.id)}
+                            onClick={() =>
+                              props.onTogglePinnedThread(thread.id)
+                            }
                             title={pinned ? "Unpin chat" : "Pin chat"}
                           >
                             {pinned ? <PinOff size={12} /> : <Pin size={12} />}
@@ -519,18 +575,25 @@ export function ProjectSidebar(props: {
                                   }
                                 }}
                               />
-                              <button className="icon-button mini" title="Save name">
+                              <button
+                                className="icon-button mini"
+                                title="Save name"
+                              >
                                 <Check size={13} />
                               </button>
                             </form>
                           ) : (
                             <button
                               className="thread-row"
-                              onClick={() => props.onSelectThread(thread.id, project)}
+                              onClick={() =>
+                                props.onSelectThread(thread.id, project)
+                              }
                               onDoubleClick={() => beginThreadRename(thread)}
                               title={`${threadTitle(thread)}. Double-click to rename.`}
                             >
-                              {running && <Loader2 className="spin" size={12} />}
+                              {running && (
+                                <Loader2 className="spin" size={12} />
+                              )}
                               <span>{threadTitle(thread)}</span>
                             </button>
                           )}
@@ -635,13 +698,31 @@ export function ProjectSidebar(props: {
                 )}
               </>
             )}
+            {canLogin && (
+              <>
+                <div className="settings-menu-divider" />
+                <button
+                  className="settings-popover-row"
+                  onClick={() => {
+                    setSettingsOpen(false);
+                    props.onOpenAuth();
+                  }}
+                  disabled={props.connectionStatus !== "connected"}
+                >
+                  <UserCircle size={15} />
+                  <span>Sign in</span>
+                </button>
+              </>
+            )}
             {canLogout && (
               <>
                 <div className="settings-menu-divider" />
                 <button
                   className="settings-popover-row"
                   onClick={() => void logout()}
-                  disabled={logoutBusy || props.connectionStatus !== "connected"}
+                  disabled={
+                    logoutBusy || props.connectionStatus !== "connected"
+                  }
                 >
                   {logoutBusy ? (
                     <Loader2 className="spin" size={15} />

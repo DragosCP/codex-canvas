@@ -2,115 +2,80 @@
 
 ## Current Focus
 
-The product should help non-senior-engineer builders turn rough ideas into better implementation plans before code is written. The core gap is not only code generation; it is that plans often fail to describe the intended user workflow, UI placement, and code ownership in a way the owner can quickly review.
-The environment is a repository copy (untracked) of the CODEX CLI from OpenAI. The owner took the CLI's backend and now he wants to add a nice UI/UX to it, closer to what Official Codex Desktop is and also adding his bits (the Canvas).
+This repository is a local Codex desktop copy built on top of the upstream Codex runtime. The owner wants a clear local app where users can review interface/workflow plans against the real running app before implementation.
 
 ## Problem To Solve
 
-- Users often have an idea or rough visual direction, but not enough time or patience to specify every UX detail.
-- Agent-written plans tend to become technical too quickly and can miss workflow details such as where a button lives, whether an action opens a pop-up or side panel, and how states change after interaction.
-- Bad plans can create complicated UI, extra end-user steps, unnecessary admin/debug states, or duplicate feature implementations.
-- The owner wants a planning layer that makes current state and proposed changes visible before implementation.
+- Users often have rough product ideas but not enough time to specify every workflow detail.
+- Agent-written plans can become technical too quickly and miss visible placement, state changes, and user decision points.
+- Bad plans can create extra end-user steps, confusing recovery paths, hidden state, duplicate surfaces, or brittle edge-case matrices.
+- The live app should make current interface state, proposed changes, and small interaction consequences visible before implementation.
+- Plan Mode should stay the implementation decision surface: it asks whether to implement, revise, or dismiss a plan. Canvas/live preview is supporting context and visual review, not a separate implementation approval.
 
-## Planned Direction
+## Mode Model
 
-- Add a project-level visual planning canvas that helps a project evolve from rough idea to implementation plan, including projects that start from almost zero.
-- Show Canvas as a project-level surface that is distinct from chats; it should not appear as another chat row in the project chat list.
-- Make the Canvas entry point feel intentional, ideally as a clear project-level control near the project/chat workspace header with a label or tooltip when space allows, not as an unexplained mystery icon.
-- Store canvas state at project level so it can be reused across all chats/threads inside that project.
-- Normal Canvas must follow the active project. When the user adds or switches folders while Canvas is open, the Inspector should retarget to that project's canvas instead of leaving an editable canvas from the previous project on screen.
-- Primary user journey: a non-developer runs this Codex desktop copy locally, adds their local project folder, opens a mostly clear Canvas, asks Codex to generate an existing low-fidelity UI mockup from that project, then rearranges and corrects the canvas before using it as project context for future plans and implementation prompts.
-- The generated current UI mockup is a bootstrap aid, not a source of truth. The user must be able to inspect, adjust, move, delete, lock, and correct the generated containers before trusting it.
-- Generated current UI mockups should feel like reviewable drafts, not raw chat output. The parseable `canvas-proposal` payload belongs to the app/parser layer, while the user sees a compact generated-mockup summary and a fixed review action near the composer until they Apply or Dismiss.
-- Current-state generated items may be blue/current inside the draft because they represent existing UI, but they are not accepted truth until Apply. The review surface should make that distinction explicit.
-- The generator should keep low-fidelity mockups readable: split distinct routes, dialogs, onboarding/auth states, and materially different settings/admin tabs into separate Canvas pages rather than one enormous all-workspace board; avoid giant background shells in the Layers list unless they are treated as quiet page frames.
-- UI pages may have sub-pages when one route/workflow has meaningfully different layouts, such as empty chat, active chat, chat with Inspector, settings tabs, auth OTP, or onboarding steps. Each sub-page has its own local coordinate system. If a page has only one sub-page, hide the sub-page concept from the user and from casual references.
-- Sub-page UX should stay lightweight: when a page has one sub-page, show only a compact add-state icon; when it has multiple, show chips such as `P1.1 Empty`, `P1.2 Active`, plus an add chip. Deleting a sub-page removes the items/groups in that sub-page after confirmation and is disabled for the last remaining sub-page.
-- Generate UI proposal snapshots during planning time when visual placement changes need human review. Connections is different: it is living project truth that Codex should read before code changes and update after code changes, without asking the user to approve routine graph maintenance.
-- Recommended v1: a project-level Canvas action opens the canvas in the Inspector/workspace area, and Plan Mode opens or emphasizes the same canvas in an expanded Canvas Inspector mode with real editing room.
-- Treat normal Inspector as a details surface and expanded Plan Mode Canvas Inspector as the spatial editing surface.
-- Keep Inspector-style details for layers, properties, comments, and plan controls inside the expanded Canvas Inspector.
-- A plan Expand/review flow should show the current accepted low-fidelity UI layout and the proposed canvas snapshot together, so the user can see placement, movement, deletion, and new UI before implementation.
-- Show current UI in one visual language and proposed UI changes in another.
-- Let the user move, edit, delete, group, lock, comment on, and mark plan containers as current.
-- The product-facing Canvas modes should be UI and Connections, and only those two. Existing code may still use older internal UI/Backend names until the Connections rename is implemented.
-- UI is the current visual planning canvas: screens, states, layout intent, workflow, and UX contracts such as alignment, anchoring, and "do not turn this into a centered card."
-- Connections is the code relationship graph: frontend components, hooks, stores, routes, APIs, services, persistence, tools, jobs, integrations, and how they attach to UI nodes.
-- Add a Connections tab after the manual UI Canvas and Canvas-to-prompt loop feel useful. Connections is a project-level code relationship graph, not a per-page backend architecture diagram for end users and not a draft/proposal canvas.
-- Connections should make "this feature attaches here" visually obvious by linking UI/product anchors to existing files, classes, functions, stores, APIs, tools, persistence, and integrations.
-- The visible Connections surface should be zoomable truth: zoomed out shows product/feature areas, medium zoom shows components/routes/stores/services/APIs, and close zoom reveals files, classes, functions, methods, calls, and data flow.
-- Connections graph data should be nodes, edges, clusters, UI anchors, relationship labels, confidence, source evidence, and zoom/detail levels. Coordinates or pinned positions are presentation data, not the source of truth.
-- Connections should index the project once when needed, using deterministic scans plus low-reasoning model summaries for feature ownership. After that, Codex updates the affected graph neighborhoods from explicit file reads/searches/edits/tool activity and static analysis. Do not depend on hidden model thinking as durable graph evidence.
-- Connections should be the first place agents look before planning or implementation and the last place they update after changing the codebase.
-- Use the canvas to help agents understand move/delete/new/reuse intent before writing code.
-- Let any plan or normal message reference the current project canvas state at the moment it is submitted, but make that relationship explicit. Canvas is project context, not something that should silently dump every canvas detail into every prompt.
-- Once attached, the canvas should be usable as living project context across the work: the user and Codex can CRUD canvas items as the product evolves, and future prompts can reference the latest accepted canvas snapshot.
-- The composer includes a desktop-owned Canvas project-context picker. `@Canvas` should mean Canvas All or open the picker, not blindly dump every detail; selecting it shows a removable chip such as `Canvas: All`, `Canvas: UI`, or later `Canvas: Connections`.
-- `@Canvas-UI` should attach only the UI canvas state: pages, sub-pages, items, groups, layout, states, coordinates, notes, and UX contracts. If the model proposes UI canvas changes, it should return `canvas-proposal` lines.
-- `@Canvas-Connections` should attach only the current Connections graph once implemented: nodes, edges, clusters, code ownership, reuse warnings, and evidence. Connections updates are normally automatic after scans or code changes, not user-approved proposal blocks. Alias `@Canvas-Conn` can resolve to it later, but the visible product label should be Connections.
-- The picker can scope UI snapshots to the whole UI canvas, a page, a group, or a single item such as `C6`; later it can scope Connections to a cluster, node, or relationship. Serialized UI geometry includes raw `xywh`, resolved bounds, grid coordinates, and normalized coordinates. For v1, do not fake this as an app/plugin mention; keep it desktop-owned until a first-class canvas input/protocol exists.
-- Plan Mode should use one unified Proposal Review flow for plan text and UI canvas changes. The plan text is the verbal proposal; the UI canvas proposal snapshot is the spatial proposal. Accept, Modify, and Decline apply to both rather than creating separate chat and canvas approval systems. Connections is read as current truth and updated automatically after accepted code changes.
-- As UI and Connections mature, plans should become lighter and more decision-oriented. The durable detail should live in the two Canvas modes, so chat does not need to carry long technical plans as the main source of truth.
-- Accepting a plan proposal promotes its canvas proposal snapshot to the project canvas, strips proposal-only original-position review metadata from changed items, switches any open proposal Canvas back to the accepted project Canvas, then proceeds with implementation. Declining discards the plan proposal and its canvas snapshot and exits any stale proposal Canvas view. Modifying can happen by text feedback or by editing the canvas proposal directly before re-submitting for analysis.
-- Plan Mode does not require Canvas. If the user has not attached Canvas, the Plan Mode prompt should explicitly say the canvas is not attached and the plan should not invent exact canvas changes. If Canvas is attached but empty or sparse, the prompt should say it is sparse and ask Codex to treat any visual plan as a bootstrap/proposal rather than established truth.
-- Plan Mode should never ask Codex to mutate accepted files or the accepted project canvas before approval. It may ask Codex to return plan text plus optional canvas proposal data, which the desktop app stores separately until the user accepts the proposal.
-- Explore extra canvas entry points near the project/chat header or as a main workspace tab later, while keeping Canvas visually separate from the chat list.
-- Canvas hierarchy should stay clear: UI and Connections are top-level modes. UI has simple P1/P2/P3 side pages; Connections is a general project graph and does not need pages, sub-pages, Desktop/Mobile variants, or UI-style coordinate planning.
-- Canvas references should be able to address sub-pages when needed, such as `P1.2 C6` for item `C6` on the second sub-page of page `P1`. Agents should reason from the item's local sub-page coordinates, not from where a sub-page happens to sit in any future overview layout.
+- Plan Mode is the permission mode: Codex thinks, previews, and asks before writing code.
+- Canvas/live preview is the visual surface: the user looks at and interacts with the proposed change.
+- Do not add a top-level `UI mode` or `Canvas mode` beside Plan Mode unless the owner explicitly changes this direction later.
+- Normal chat can use visual context through explicit `@Canvas`/`@Preview` mentions, but it should not require them. If the user draws a marked area in the live app preview, the app automatically attaches that visual context to the composer as a removable chip.
+- Plan Mode plus a UI-relevant request should automatically offer the live app visual surface; the user should not have to choose a separate mode first.
 
-## Product Principles
+## Live App Plan Preview Direction
 
-- Fewer clicks is better.
-- Plans must be understandable as user workflows, not only technical tasks.
-- The UI should avoid unnecessary debugging/admin surfaces.
-- The canvas should stay simple: containers, text, modal/divider/button primitives, layers, comments, and three user-facing states: current, proposed, and deleted.
-- The first manual Canvas must feel good before automation: clear empty state, obvious add/edit/delete, comfortable move/resize, strong selected-item styling, clear lock/read-only states, and lightweight zoom/pan with mouse-wheel zoom, trackpad pinch zoom, two-finger scroll pan, middle-mouse drag, Space+drag, and toolbar view controls.
-- Prefer icon-driven, draggable canvas tools over text-heavy toolbar buttons. Container, Text, Modal, Divider, and Button can live as small palette icons with tooltips.
-- Canvas coordinates are product data, not just drawing pixels. Zoom and pan are viewport-only camera state; item `x/y/w/h` are stable canvas units. Plans should be able to read page/device, x/y position, width/height, original geometry for moved current items, layer order, state/color, lock/visibility, and parent/group relationships from a compact serialized canvas snapshot, with normalized/grid coordinates added later for easier agent reasoning.
-- Agent-readable geometry should include both the item origin/size and the resolved rectangle bounds: `x`, `y`, `w`, `h`, plus `left`, `top`, `right`, and `bottom` in canvas units. Rounded items still use their bounding rectangle for coordinates, because that is what layout and hit testing need.
-- Canvas state should be user-readable without exposing machinery. Users see names, color/state, placement, and short reference codes such as `C1` or `B1`; stable database IDs stay internal for persistence and agent references.
-- Groups should become real canvas entities with stable references such as `G1`, not just visual selection. A group can be referenced by the user and by `@Canvas`, and should store child item references plus group geometry.
-- Groups are relationships, not loose selections or extra shapes with their own full lifecycle. V1 groups should only contain items with the same state; changing state while grouped changes every child, and changing one child separately requires ungrouping first.
-- Selecting any grouped child should select the whole group. Grouped children should not be independently editable from the canvas or Layers until the group is ungrouped.
-- Groups have one group-level position lock. A locked group cannot move; an unlocked group moves as one unit while preserving child spacing. Groups do not need delete controls; ungroup is the escape hatch.
-- If an unlocked current group is moved, keep each moved child's grey original-position ghost and expose group-level Apply position and Reset position. Applying accepts all child coordinates as the new current baseline; resetting returns moved children to their original coordinates. Either action should lock the group again.
-- Ungrouping a moved current group is allowed and should preserve each child's moved/original-position metadata, so the user can still apply or reset the children one by one after ungrouping.
-- Canvas persistence should autosave the latest project snapshot instead of bloating storage with every tiny edit. Add deliberate snapshots/checkpoints later only if users need to preserve alternatives.
-- Plan proposal snapshots are separate from the accepted project canvas. They can be edited, re-analysed, accepted, or discarded without mutating the current canvas until accept.
-- Direct canvas edits inside a proposal should be summarized only when the user submits Modify/Re-analyse, not on every drag. The generated summary should mention changed references and before/after coordinates or states from the latest proposal snapshot so Codex can revise the written plan to match the visual truth.
-- Delete semantics should match the visual state: proposed gold items can be removed directly, while current blue items are marked deleted/red so the user and LLM can review the planned removal before code changes.
-- A moved existing item should be represented explicitly without becoming a fourth user-facing state: show the original item geometry as a grey ghost and the moved item at the latest position in its normal state color. For proposal snapshots, keep only the accepted baseline ghost plus the latest proposed position; intermediate edits belong to undo/history, not the main canvas. Plan review should preserve the item's state color unless the proposal explicitly changes state, so a gold proposed item remains gold while the user reviews its moved proposal.
-- Grey original-position ghosts are mainly for LLM-to-user proposed changes against accepted truth. Human edits inside an unapplied generated current-UI draft should be direct edits to the draft, without adding extra grey diff noise for every drag.
-- Keep broader history simple in v1: movement gets visible parent/child tracking, while accidental state or text changes are handled through recent undo/redo instead of showing a full provenance/history UI in Layers.
-- Group geometry should be simple and useful for UI planning: when one larger container clearly contains smaller children, the group uses the largest/outer container as its primary coordinates. Child items should normally remain within or touch the outer boundary rather than crossing outside it; unusual overflow can still be modeled by explicit item bounds when needed.
-- The canvas can be viewed anytime, but should only be editable when no thread in the project is running.
-- Connections work should reuse existing code relationships and reduce duplicate feature paths before implementation starts.
-- Connections mapping should make existing reusable frontend components, state, routes, services, APIs, persistence, jobs/tools, and integrations visible before new code is added.
-- Connections does not use UI Canvas current/proposed/deleted colors as truth states. Use transient emphasis instead: active path, recently changed path, selected neighborhood, possible duplicate, or high-confidence conflict.
-- For WSL-backed local projects, the product should let users work with familiar Windows paths while reliably sending normalized WSL runtime paths to Codex. Path conversion is product behavior, not an incidental implementation detail.
+- Current product direction: the live running app becomes the visual planning surface.
+- The project-level `Canvas` entry can remain the way users open visual planning, but the future experience should be a live app preview, not a separate grid of editable containers.
+- In Plan Mode, visible proposals should be temporarily injected into the real app so the user can click through the proposed feature before approving implementation.
+- When the user has not specified a precise design, Plan Mode should prefer offering up to three visual preview options before asking the user to manually mark a location.
+- The app does not build three code implementations for those options. It loads one live app preview and swaps temporary preview variants.
+- Proposed UI should look and behave like app UI, with a clear temporary/proposed treatment. It should not appear as DOM tags, CSS boxes, or coordinate overlays.
+- Location feedback should be lightweight: the user can mark an area on a snapshot/live preview and describe what should happen there. The mark is temporary communication context, not durable Canvas geometry.
+- Area marking must work outside Plan Mode. A normal chat user can draw a rectangle in the app preview; the composer immediately gains a compact chip such as `App mark`, and the next message sends that mark context without requiring `@Canvas`.
+- Plan acceptance turns the approved preview and plan into real implementation work. It must not silently save visual planning artifacts.
+- If injection into the live app is unavailable, Codex should fall back to a screenshot/marked-area plan or text plan instead of pretending it has precise UI control.
+- The existing coordinate-based Project Canvas can remain as implemented legacy/project-memory infrastructure while existing flows depend on it, but it is not the desired future UX for visual planning.
+- If no live preview is available, fresh projects may fall back to screenshot marking, a text plan, or the existing generated mockup flow.
+- Existing generated mockups are reviewable drafts. They should not be expanded into the main future UX unless explicitly revived.
+- Existing interaction preview frames remain part of the legacy coordinate Canvas implementation, not the target model for live app planning.
+
+## Plan Mode Direction
+
+- Plan Mode activation, including `Shift+Tab`, must not open Canvas by itself.
+- A plan can expose visual review only through explicit actions such as `Show app preview`, `Compare options`, opening the project visual surface, or attaching marked-area context.
+- `Yes, implement this plan` proceeds with the real project/code work. It may use the selected preview option or marked-area context as guidance, but it must not silently save visual planning artifacts.
+- `No, and tell Codex what to do differently` sends typed feedback plus any active preview option/marked-area context.
+- `Dismiss Esc` drops the current plan decision and removes temporary injected preview UI.
+- After successful implementation, prefer reloading the live app preview and comparing it to the accepted plan preview. Show `View Canvas` or `Update Canvas` only when the legacy Canvas flow is explicitly involved.
+
+## Legacy Canvas Review Rules
+
+These rules describe the existing coordinate-based Project Canvas while it remains implemented. They are not the target UX for Live App Plan Preview.
+
+- Project Canvas is durable project memory. Draft overlays are temporary proposal data.
+- Normal Canvas-only `Apply` commits a draft into saved project Canvas memory.
+- Plan acceptance does not commit Canvas. The explicit post-implementation `Update Canvas` action does.
+- Visible item states stay simple: current/blue, proposed/gold, deleted/red.
+- Moved current items show a grey original-position ghost with Apply position and Reset position.
+- Groups behave as one selectable/movable unit until ungrouped. A locked group cannot move; an unlocked group moves children together.
+- Deleting proposed items can remove them; deleting current items marks them deleted for review.
 
 ## Implementation State
 
 - Implemented: project operating docs and plan lifecycle.
-- WIP: P03 desktop Codex UI, focused first on the core app loop before the planning canvas.
-- P03 now has a React/TypeScript desktop shell under `apps/desktop/`, a passing backend proof gate, automatic app-server connection states, a real WSL app-server path, account/auth visibility from app-server, and a Tauri release exe. Live UI prompting is proven for streamed assistant responses, command cards, and cancellation; installer packaging, native Windows runtime behavior, and live file-change/review cards are still unproven.
-- Implemented in P03 foundation: desktop-owned project canvas state and a basic Canvas Inspector with current/proposed/deleted containers, editing controls, and local persistence.
-- Implemented in P02 Phase 2 start: the desktop canvas model now has an internal UI/Backend mode that should become product-facing UI/Connections, plus default UI pages, hidden Desktop/Mobile metadata, container/text/modal/divider/button item kinds, layer metadata, comments, coordinates/dimensions, internal stable IDs, and a compact icon/layers/details editing surface. The visible surface is intentionally trimmed: no duplicated project title, no page rename control, no Desktop/Mobile switch, no Current/Proposed add toggle, no per-layer type icon, and no visible internal IDs.
-- Implemented owner review refinement: the first canvas surface now keeps only blue/gold/red as user-facing states, treats moved-current as a derived condition with a grey original-position ghost, uses human reference codes such as `C1/B1`, removes duplicated lock/delete controls from Details, makes layer rows carry state color, keeps lock icons neutral, includes compact undo/redo for recent canvas edits, and supports lightweight zoom/pan.
-- Implemented desktop shell support for Canvas pinch investigation: the Tauri/WebView2 window enables pinch/zoom gesture delivery, while the Canvas layer prevents browser page zoom so gestures can be interpreted as canvas zoom instead.
-- Implemented canvas visual refinement: current/proposed/deleted fills are more translucent, temporary/original dashed borders use longer dash spacing, dragged editable items come forward in z-order, and native pinch gesture zoom uses the same faster feel as wheel zoom.
-- Implemented moved-current acceptance: moved blue/current items expose Apply position and Reset position, where Apply removes the original-position ghost and makes the new coordinates the current baseline.
-- Implemented first canvas context menu: right-click opens canvas actions instead of the WebView browser menu, with item actions such as bring front/back, duplicate, lock, state changes, apply/reset position, and delete/mark deleted; blank canvas right-click can add simple items.
-- Implemented first grouping slice: locked items remain selectable, selected Layers rows scroll into view, drag marquee and Ctrl+click multi-select items or groups, right-click can group same-state selections, groups persist as `G1` entities with child references, grouped child clicks select the group, group-level locks control group movement, moved current groups can apply/reset all child positions, and items/groups carry resolved `left/top/right/bottom` bounds for `@Canvas` snapshots.
-- Implemented explicit `@Canvas` handoff: typing `@canvas` in the composer opens the project-context picker, attaches a removable Canvas chip, and sends a compact UI snapshot with project, mode, pages, groups, items, states, raw coordinates, bounds, grid coordinates, normalized coordinates, visibility, locks, labels, and notes. The picker can now narrow to pages, groups, or individual items. Planned next context scopes are `@Canvas-UI`/`Canvas: UI` and later `@Canvas-Connections`/`Canvas: Connections`.
-- Implemented the first coordinate contract for Canvas proposals: `canvas-proposal` lines may use exact `xywh=...`, grid `grid=...`, or normalized `norm=...` rectangles, all resolved back into canvas units before proposal review.
-- Implemented first Plan Mode proposal shell: Plan Mode now builds a canvas-aware planning prompt, records a pending plan proposal for the turn, and shows compact Accept, Modify, and Decline actions below the plan response. Accept starts an implementation turn without the Plan Mode prefix; Modify returns focus to the composer with Plan Mode on; Decline marks the proposal dismissed.
-- Implemented first canvas proposal snapshot review: when Canvas is attached to a Plan Mode turn, the app stores a copy of the accepted canvas as a proposal snapshot, parses compact `canvas-proposal` lines from the plan response into that snapshot, and keeps the accepted project canvas untouched until Accept promotes the snapshot. The plan review strip can open that proposal in Canvas, edits made there write only to the proposal snapshot, Accept cleans proposal-only original-position ghosts from changed items before saving the accepted canvas, Modify drafts a compact current-proposal change summary, and Accept/Decline exit stale proposal Canvas views.
-- Implemented first normal-chat Canvas suggestion review: when the user explicitly attaches `@Canvas` outside Plan Mode, the response can return parseable `canvas-proposal` lines that become a lightweight Canvas suggestion card with clickable references, proposal Canvas viewing, and Apply/Dismiss actions.
-- Implemented first generated current-UI mockup ingestion: the empty Canvas bootstrap action now prepares a normal chat with an explicit `@Canvas` chip, asks Codex for current-state `canvas-proposal` create lines, and reviews the generated mockup as a Canvas suggestion rather than as an implementation plan.
-- Implemented first sub-page slice: UI pages now own ordered sub-pages, items/groups carry `subPageId`, the canvas shows one sub-page at a time, single-state pages collapse to a compact add-state control, multi-state pages show chips such as `P1.1` and `P1.2`, and deleting a non-last sub-page removes only that sub-page's local items/groups.
-- Implemented generated current-UI mockup polish: Generate renders as compact chat text, parseable proposal blocks/lines are hidden from normal assistant rendering after a suggestion snapshot is captured, the active generated-draft review stays above the composer with its actions below the summary, the generator uses a fresh draft canvas base instead of mixing unrelated old experiments, generated drafts are prompted into compact per-screen sub-page grids, oversized generated shell/background items are post-cleaned, active thread/Inspector retargeting and the collapsed Thinking row stay stable during a running turn, and Canvas shows small Saving/Saved feedback.
-- Implemented project-scoped normal Canvas safety: adding or switching active projects while the Canvas Inspector is open retargets the Inspector to the active project's canvas, so edits cannot accidentally write into another project's canvas.
-- Planned next: verify the anti-flash behavior during a fresh real generated mockup run, tune generated sub-page output against more real projects, and decide whether screen frames need a quiet non-layer visual treatment later.
-- Planned later: automatic Connections indexing/maintenance, richer layers/comments, and lightweight proposal/history recovery if users need it.
-- Not implemented: automatic rich plan-to-canvas synchronization beyond compact parser lines, ordinary-prose Canvas reference auto-linking, Connections graph API/model/indexing/maintenance, and full design-tool behavior.
+- Implemented: React/TypeScript desktop shell with sidebar, chat/composer, inspector, app-server connection states, Electron shell, native app-server sidecar bridge, optional WSL app-server bridge, account/model visibility, streamed assistant responses, command cards, and cancellation.
+- Implemented: in-app Codex account recovery with ChatGPT browser login, device-code fallback, API-key fallback, login completion refresh, and signed-out send blocking for OpenAI-hosted models.
+- Implemented: project Canvas state with pages, sub-pages, item/group references, current/proposed/deleted states, editing controls, local persistence, undo/redo, zoom/pan, grouping, context menu actions, moved-position ghosts, and generated current-interface draft ingestion.
+- Implemented: explicit `@Canvas` handoff in the composer. It attaches compact project Canvas context and can produce normal Canvas suggestions with Apply/Dismiss.
+- Implemented: Plan Mode proposal shell with pending plan review, Accept/Modify/Decline, editable Canvas draft overlays, historical read-only drafts, and post-implementation `Update Canvas`.
+- Implemented: interaction preview frames for selected items/groups with frame 2/frame 3 playback and explicit frame edit mode.
+- Implemented: Windows Electron run/build lane with a staged native Codex app-server sidecar and Electron-owned local bridge. Installer packaging is still pending for the Electron shell.
+- Current direction: keep visual planning as one focused live-app surface and avoid rebuilding separate graph/proof/design-editor surfaces unless the owner explicitly asks later.
+- Current direction: replace the old Live Canvas overlay idea with Live App Plan Preview. The live app is the planning surface; proposed UI is temporarily injected into it for review.
+- Current direction: Electron is the desktop shell for this branch. The next preview work should use Electron's browser control surface rather than reviving Tauri.
+- Current direction: a shareable demo package should use the native sidecar lane or a polished viewer/demo mode, not the WSL/Node dev bridge.
+
+## Verification Direction
+
+- User-visible work is not done until it is honestly verified.
+- Prefer the real Electron desktop app for Canvas/live preview, Plan Mode, composer, and project workflow checks whenever feasible.
+- Dogfood meaningful Canvas/Plan Mode changes in two local projects when possible: one interface-heavy project and one backend/workflow-heavy project.
+- If a blocker prevents honest end-to-end testing, record the blocker, fix the product issue, and retest instead of bypassing the workflow.

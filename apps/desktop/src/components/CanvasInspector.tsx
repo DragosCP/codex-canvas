@@ -1,4 +1,5 @@
 import {
+  AlertCircle,
   ChevronDown,
   ChevronRight,
   Eye,
@@ -9,17 +10,24 @@ import {
   LockKeyhole,
   LockKeyholeOpen,
   Maximize2,
+  MessageSquarePlus,
   Minus,
   MousePointer2,
   Move,
+  Pencil,
+  Play,
   Plus,
   RectangleHorizontal,
   Redo2,
+  RotateCcw,
+  Save,
   Sparkles,
   Square,
+  StopCircle,
   Trash2,
   Undo2,
   Ungroup,
+  X,
   ZoomIn,
   ZoomOut,
   Type as TypeIcon,
@@ -41,13 +49,20 @@ import {
   CANVAS_ITEM_STATE_ORDER,
   CANVAS_WORLD_HEIGHT,
   CANVAS_WORLD_WIDTH,
+  applyCanvasInteractionFrame,
+  cloneProjectCanvas,
   createCanvasItem,
   defaultSubPageId,
+  deleteCanvasInteractionFrame,
+  updateCanvasInteractionFrame,
+  upsertCanvasInteractionFrame,
 } from "../canvasState";
 import type {
   CanvasBounds,
   CanvasDevice,
   CanvasGroup,
+  CanvasInteractionFrameNumber,
+  CanvasInteractionPreview,
   CanvasItem,
   CanvasItemKind,
   CanvasItemState,
@@ -86,6 +101,20 @@ type MarqueeState = {
   moved: boolean;
 };
 
+type InteractionFrameEditState = {
+  triggerKind: "item" | "group";
+  triggerId: string;
+  previewId: string | null;
+  frameNumber: CanvasInteractionFrameNumber;
+  baseCanvas: ProjectCanvas;
+  draftCanvas: ProjectCanvas;
+};
+
+type InteractionPlaybackState = {
+  previewId: string;
+  frameNumber: CanvasInteractionFrameNumber;
+};
+
 type ViewportState = {
   scale: number;
   panX: number;
@@ -106,6 +135,13 @@ type ContextMenuState =
       x: number;
       y: number;
     };
+
+type CanvasClipboard = {
+  operation: "copy" | "cut";
+  items: CanvasItem[];
+  groups: CanvasGroup[];
+  createdAt: number;
+};
 
 const MAX_UNDO_STEPS = 40;
 const TITLE_MAX_LENGTH = 36;
@@ -145,11 +181,35 @@ export function CanvasInspector(props: {
   proposalMode?: boolean;
   proposalLabel?: string;
   proposalSummary?: string | null;
+  layersOpen: boolean;
+  statusKind: "draft" | "saved" | "saving";
+  statusLabel: string;
   readOnly: boolean;
   onChange: (canvas: ProjectCanvas) => void;
+  onLayersOpenChange: (open: boolean) => void;
   onRequestGenerateMockup: (project: Project) => void;
+  onEditProposalDraft?: () => void;
+  proposalEdited?: boolean;
 }) {
-  const initialSelectedId = props.canvas.items[0]?.id ?? null;
+  const baseCanvas = props.canvas;
+  const [frameEdit, setFrameEdit] = useState<InteractionFrameEditState | null>(
+    null,
+  );
+  const [playback, setPlayback] = useState<InteractionPlaybackState | null>(null);
+  const playbackCanvas = useMemo(
+    () =>
+      playback
+        ? applyCanvasInteractionFrame(
+            baseCanvas,
+            playback.previewId,
+            playback.frameNumber,
+          )
+        : null,
+    [baseCanvas, playback],
+  );
+  const canvas = frameEdit?.draftCanvas ?? playbackCanvas ?? baseCanvas;
+  const readOnly = props.readOnly || Boolean(playback && !frameEdit);
+  const initialSelectedId = null;
   const [selectedId, setSelectedId] = useState<string | null>(initialSelectedId);
   const [selectedIds, setSelectedIds] = useState<string[]>(
     initialSelectedId ? [initialSelectedId] : [],
@@ -163,6 +223,7 @@ export function CanvasInspector(props: {
   const [legendOpen, setLegendOpen] = useState(false);
   const [detailsOpen, setDetailsOpen] = useState(true);
   const [contextMenu, setContextMenu] = useState<ContextMenuState | null>(null);
+  const [clipboard, setClipboard] = useState<CanvasClipboard | null>(null);
   const [undoStack, setUndoStack] = useState<ProjectCanvas[]>([]);
   const [redoStack, setRedoStack] = useState<ProjectCanvas[]>([]);
   const stageRef = useRef<HTMLElement | null>(null);
@@ -170,15 +231,15 @@ export function CanvasInspector(props: {
   const lastFocusRequestIdRef = useRef<number | null>(null);
 
   const pages = useMemo(
-    () => [...props.canvas.pages].sort((left, right) => left.order - right.order),
-    [props.canvas.pages],
+    () => [...canvas.pages].sort((left, right) => left.order - right.order),
+    [canvas.pages],
   );
   const activePage = useMemo(
     () =>
-      pages.find((page) => page.id === props.canvas.activePageId) ??
+      pages.find((page) => page.id === canvas.activePageId) ??
       pages[0] ??
       null,
-    [pages, props.canvas.activePageId],
+    [pages, canvas.activePageId],
   );
   const activePageIndex = activePage
     ? pages.findIndex((page) => page.id === activePage.id)
@@ -188,28 +249,28 @@ export function CanvasInspector(props: {
     : [];
   const activeSubPage =
     activeSubPages.find(
-      (subPage) => subPage.id === props.canvas.activeSubPageId,
+      (subPage) => subPage.id === canvas.activeSubPageId,
     ) ??
     activeSubPages[0] ??
     null;
   const selectedItem = useMemo(
-    () => props.canvas.items.find((item) => item.id === selectedId) ?? null,
-    [props.canvas.items, selectedId],
+    () => canvas.items.find((item) => item.id === selectedId) ?? null,
+    [canvas.items, selectedId],
   );
   const selectedItems = useMemo(
     () =>
       selectedIds
-        .map((itemId) => props.canvas.items.find((item) => item.id === itemId))
+        .map((itemId) => canvas.items.find((item) => item.id === itemId))
         .filter((item): item is CanvasItem => item !== undefined),
-    [props.canvas.items, selectedIds],
+    [canvas.items, selectedIds],
   );
   const scopedItems = useMemo(
-    () => scopeItems(props.canvas),
-    [props.canvas],
+    () => scopeItems(canvas),
+    [canvas],
   );
   const scopedGroups = useMemo(
-    () => scopeGroups(props.canvas, scopedItems),
-    [props.canvas, scopedItems],
+    () => scopeGroups(canvas, scopedItems),
+    [canvas, scopedItems],
   );
   const stageItems = scopedItems
     .filter((item) => item.visible)
@@ -219,12 +280,12 @@ export function CanvasInspector(props: {
     scopedGroups.flatMap((group) => group.itemIds),
   );
   const layerGroups = [...scopedGroups].sort((left, right) =>
-    compareLayerGroups(left, right, props.canvas.items),
+    compareLayerGroups(left, right, canvas.items),
   );
   const ungroupedLayers = layers.filter((item) => !groupedLayerIds.has(item.id));
   const contextMenuItem =
     contextMenu?.type === "item"
-      ? props.canvas.items.find((item) => item.id === contextMenu.itemId) ?? null
+      ? canvas.items.find((item) => item.id === contextMenu.itemId) ?? null
       : null;
   const selectedGroup = selectedGroupId
     ? scopedGroups.find((group) => group.id === selectedGroupId) ?? null
@@ -236,9 +297,50 @@ export function CanvasInspector(props: {
       : null;
   const contextMenuGroup =
     contextMenuItem?.groupId
-      ? props.canvas.groups.find((group) => group.id === contextMenuItem.groupId) ??
+      ? canvas.groups.find((group) => group.id === contextMenuItem.groupId) ??
         null
       : null;
+  const selectedInteractionSubject = selectedGroup
+    ? ({
+        kind: "group" as const,
+        id: selectedGroup.id,
+        reference: selectedGroup.reference,
+        label: selectedGroup.title,
+      })
+    : selectedItem
+      ? ({
+          kind: "item" as const,
+          id: selectedItem.id,
+          reference: selectedItem.reference,
+          label: selectedItem.title,
+        })
+      : null;
+  const selectedInteractionPreview = selectedInteractionSubject
+    ? canvas.interactionPreviews.find(
+        (preview) =>
+          preview.triggerKind === selectedInteractionSubject.kind &&
+          preview.triggerId === selectedInteractionSubject.id,
+      ) ?? null
+    : null;
+  const activePlaybackFrame =
+    playback && selectedInteractionPreview?.id === playback.previewId
+      ? playback.frameNumber
+      : null;
+  const hasDetailsSelection = Boolean(selectedGroup || selectedItem);
+  const sidePanelOpen = props.layersOpen || hasDetailsSelection;
+
+  useEffect(() => {
+    if (!playback) return;
+    const preview = baseCanvas.interactionPreviews.find(
+      (candidate) => candidate.id === playback.previewId,
+    );
+    const frame = preview?.frames.find(
+      (candidate) => candidate.frame === playback.frameNumber,
+    );
+    if (!frame || frame.sticky || !frame.holdMs) return;
+    const timeout = window.setTimeout(() => setPlayback(null), frame.holdMs);
+    return () => window.clearTimeout(timeout);
+  }, [baseCanvas.interactionPreviews, playback]);
 
   useEffect(() => {
     const scopedIds = new Set(scopedItems.map((item) => item.id));
@@ -258,6 +360,7 @@ export function CanvasInspector(props: {
   }, [scopedGroups, scopedItems, selectedGroupId, selectedId, selectedIds]);
 
   useEffect(() => {
+    if (!sidePanelOpen) return;
     if (selectedGroupId) {
       document
         .querySelector(`[data-canvas-group-id="${selectedGroupId}"]`)
@@ -268,7 +371,11 @@ export function CanvasInspector(props: {
     document
       .querySelector(`[data-canvas-layer-id="${selectedId}"]`)
       ?.scrollIntoView({ block: "nearest" });
-  }, [selectedGroupId, selectedId]);
+  }, [sidePanelOpen, selectedGroupId, selectedId]);
+
+  useEffect(() => {
+    if (hasDetailsSelection) setDetailsOpen(true);
+  }, [hasDetailsSelection]);
 
   useEffect(() => {
     if (!props.focusReference) return;
@@ -276,25 +383,24 @@ export function CanvasInspector(props: {
     if (lastFocusRequestIdRef.current === requestId) return;
     const reference = props.focusReference.toUpperCase();
     const group =
-      props.canvas.groups.find(
+      canvas.groups.find(
         (candidate) => candidate.reference.toUpperCase() === reference,
       ) ?? null;
     const item =
-      props.canvas.items.find(
+      canvas.items.find(
         (candidate) => candidate.reference.toUpperCase() === reference,
       ) ?? null;
     const target = group ?? item;
     if (!target) return;
-    const targetPageId = target.pageId ?? props.canvas.activePageId;
-    const targetSubPageId = target.subPageId ?? props.canvas.activeSubPageId;
+    const targetPageId = target.pageId ?? canvas.activePageId;
+    const targetSubPageId = target.subPageId ?? canvas.activeSubPageId;
     if (
-      props.canvas.mode === "ui" &&
       targetPageId &&
-      (targetPageId !== props.canvas.activePageId ||
-        targetSubPageId !== props.canvas.activeSubPageId)
+      (targetPageId !== canvas.activePageId ||
+        targetSubPageId !== canvas.activeSubPageId)
     ) {
       props.onChange({
-        ...props.canvas,
+        ...canvas,
         activePageId: targetPageId,
         activeSubPageId: targetSubPageId,
         updatedAt: Date.now(),
@@ -308,7 +414,7 @@ export function CanvasInspector(props: {
       return;
     }
     if (item) {
-      const itemGroup = groupForItem(item, props.canvas.groups);
+      const itemGroup = groupForItem(item, canvas.groups);
       if (itemGroup) {
         selectGroup(itemGroup);
         focusCanvasBounds(expandBounds(itemGroup.bounds, 72));
@@ -317,7 +423,11 @@ export function CanvasInspector(props: {
       selectOnly(item.id);
       focusCanvasBounds(expandBounds(itemBounds(item), 72));
     }
-  }, [props.focusReference, props.focusRequestId, props.canvas]);
+  }, [
+    props.focusReference,
+    props.focusRequestId,
+    canvas,
+  ]);
 
   useEffect(() => {
     function handleKeyDown(event: KeyboardEvent) {
@@ -338,6 +448,30 @@ export function CanvasInspector(props: {
         event.preventDefault();
         deleteItem(selectedItem);
       }
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "c" &&
+        !isTextEditingTarget(event.target)
+      ) {
+        event.preventDefault();
+        copySelected("copy");
+      }
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "x" &&
+        !isTextEditingTarget(event.target)
+      ) {
+        event.preventDefault();
+        copySelected("cut");
+      }
+      if (
+        (event.ctrlKey || event.metaKey) &&
+        event.key.toLowerCase() === "v" &&
+        !isTextEditingTarget(event.target)
+      ) {
+        event.preventDefault();
+        pasteClipboard();
+      }
       if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "z") {
         event.preventDefault();
         if (event.shiftKey) redoCanvas();
@@ -357,7 +491,7 @@ export function CanvasInspector(props: {
       window.removeEventListener("keydown", handleKeyDown);
       window.removeEventListener("keyup", handleKeyUp);
     };
-  }, [props.canvas, redoStack, selectedGroup, selectedItem, undoStack]);
+  }, [canvas, clipboard, redoStack, selectedGroup, selectedIds, selectedItem, undoStack]);
 
   useEffect(() => {
     setUndoStack([]);
@@ -365,7 +499,8 @@ export function CanvasInspector(props: {
     setViewport(DEFAULT_VIEWPORT);
     setPan(null);
     setContextMenu(null);
-  }, [props.canvas.projectId]);
+    setClipboard(null);
+  }, [canvas.projectId]);
 
   useEffect(() => {
     if (!contextMenu) return;
@@ -448,6 +583,7 @@ export function CanvasInspector(props: {
     setSelectedId(itemId);
     setSelectedIds(itemId ? [itemId] : []);
     setSelectedGroupId(null);
+    props.onLayersOpenChange(Boolean(itemId));
   }
 
   function selectMany(itemIds: string[], primaryId?: string | null) {
@@ -455,6 +591,7 @@ export function CanvasInspector(props: {
     setSelectedIds(uniqueIds);
     setSelectedId(primaryId === undefined ? uniqueIds[0] ?? null : primaryId);
     setSelectedGroupId(null);
+    props.onLayersOpenChange(uniqueIds.length > 0);
   }
 
   function selectGroup(group: CanvasGroup | null) {
@@ -465,6 +602,7 @@ export function CanvasInspector(props: {
     setSelectedGroupId(group.id);
     setSelectedIds(group.itemIds);
     setSelectedId(group.itemIds[0] ?? null);
+    props.onLayersOpenChange(true);
   }
 
   function toggleSelection(itemId: string) {
@@ -476,7 +614,7 @@ export function CanvasInspector(props: {
   }
 
   function selectCanvasItem(item: CanvasItem, additive: boolean) {
-    const group = groupForItem(item, props.canvas.groups);
+    const group = groupForItem(item, canvas.groups);
     if (group) {
       if (!additive) {
         selectGroup(group);
@@ -505,18 +643,23 @@ export function CanvasInspector(props: {
   ) {
     const recordHistory = options.recordHistory ?? true;
     if (recordHistory) pushUndoSnapshot();
-    props.onChange({
-      ...props.canvas,
+    const nextCanvas = {
+      ...canvas,
       ...patch,
       updatedAt: Date.now(),
-    });
+    };
+    if (frameEdit) {
+      setFrameEdit({ ...frameEdit, draftCanvas: nextCanvas });
+      return;
+    }
+    props.onChange(nextCanvas);
   }
 
   function commitItems(
     items: CanvasItem[],
     options: { recordHistory?: boolean } = {},
   ) {
-    const synced = syncCanvasItemsAndGroups(items, props.canvas.groups);
+    const synced = syncCanvasItemsAndGroups(items, canvas.groups);
     commitCanvas(synced, options);
   }
 
@@ -527,7 +670,7 @@ export function CanvasInspector(props: {
   ) {
     const now = Date.now();
     commitItems(
-      props.canvas.items.map((item) =>
+      canvas.items.map((item) =>
         item.id === itemId ? { ...item, ...patch, updatedAt: now } : item,
       ),
       options,
@@ -542,7 +685,7 @@ export function CanvasInspector(props: {
     const now = Date.now();
     commitCanvas(
       {
-        groups: props.canvas.groups.map((group) =>
+        groups: canvas.groups.map((group) =>
           group.id === groupId ? { ...group, ...patch, updatedAt: now } : group,
         ),
       },
@@ -550,48 +693,159 @@ export function CanvasInspector(props: {
     );
   }
 
+  function addOrEditInteractionFrame(frameNumber?: CanvasInteractionFrameNumber) {
+    if (props.readOnly || !selectedInteractionSubject || frameEdit) return;
+    const preview = selectedInteractionPreview;
+    const nextFrame =
+      frameNumber ??
+      (preview?.frames.some((frame) => frame.frame === 2) ? 3 : 2);
+    if (nextFrame !== 2 && nextFrame !== 3) return;
+    const frameBaseCanvas = cloneProjectCanvas(baseCanvas);
+    const draftCanvas =
+      preview?.frames.some((frame) => frame.frame === nextFrame)
+        ? applyCanvasInteractionFrame(frameBaseCanvas, preview.id, nextFrame)
+        : cloneProjectCanvas(frameBaseCanvas);
+    setPlayback(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    setFrameEdit({
+      triggerKind: selectedInteractionSubject.kind,
+      triggerId: selectedInteractionSubject.id,
+      previewId: preview?.id ?? null,
+      frameNumber: nextFrame,
+      baseCanvas: frameBaseCanvas,
+      draftCanvas,
+    });
+  }
+
+  function saveInteractionFrame() {
+    if (!frameEdit) return;
+    const nextCanvas = upsertCanvasInteractionFrame({
+      canvas: baseCanvas,
+      baseCanvas: frameEdit.baseCanvas,
+      draftCanvas: frameEdit.draftCanvas,
+      triggerKind: frameEdit.triggerKind,
+      triggerId: frameEdit.triggerId,
+      frameNumber: frameEdit.frameNumber,
+    });
+    setFrameEdit(null);
+    setUndoStack([]);
+    setRedoStack([]);
+    props.onChange(nextCanvas);
+  }
+
+  function cancelInteractionFrameEdit() {
+    setFrameEdit(null);
+    setUndoStack([]);
+    setRedoStack([]);
+  }
+
+  function returnInteractionFrameToBase() {
+    if (!frameEdit) return;
+    setFrameEdit({
+      ...frameEdit,
+      draftCanvas: cloneProjectCanvas(frameEdit.baseCanvas),
+    });
+    selectOnly(frameEdit.triggerKind === "item" ? frameEdit.triggerId : null);
+    if (frameEdit.triggerKind === "group") {
+      const group = frameEdit.baseCanvas.groups.find(
+        (candidate) => candidate.id === frameEdit.triggerId,
+      );
+      if (group) selectGroup(group);
+    }
+  }
+
+  function deleteInteractionFrame(
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+  ) {
+    if (props.readOnly || frameEdit) return;
+    const nextCanvas = deleteCanvasInteractionFrame(
+      baseCanvas,
+      preview.id,
+      frameNumber,
+    );
+    if (playback?.previewId === preview.id && playback.frameNumber === frameNumber) {
+      setPlayback(null);
+    }
+    props.onChange(nextCanvas);
+  }
+
+  function playInteractionFrame(
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+  ) {
+    if (frameEdit) return;
+    setPlayback({ previewId: preview.id, frameNumber });
+  }
+
+  function stopInteractionFrame() {
+    setPlayback(null);
+  }
+
+  function updateInteractionFrameTiming(
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+    patch: Parameters<typeof updateCanvasInteractionFrame>[3],
+  ) {
+    if (props.readOnly || frameEdit) return;
+    props.onChange(
+      updateCanvasInteractionFrame(baseCanvas, preview.id, frameNumber, patch),
+    );
+  }
+
   function pushUndoSnapshot() {
-    if (props.readOnly) return;
+    if (readOnly) return;
     setUndoStack((current) => [
       ...current.slice(Math.max(0, current.length - MAX_UNDO_STEPS + 1)),
-      props.canvas,
+      canvas,
     ]);
     setRedoStack([]);
   }
 
   function undoCanvas() {
-    if (props.readOnly || undoStack.length === 0) return;
+    if (readOnly || undoStack.length === 0) return;
     const previous = undoStack[undoStack.length - 1];
     setUndoStack((current) => current.slice(0, -1));
     setRedoStack((current) => [
       ...current.slice(Math.max(0, current.length - MAX_UNDO_STEPS + 1)),
-      props.canvas,
+      canvas,
     ]);
-    props.onChange({ ...previous, updatedAt: Date.now() });
+    const nextCanvas = { ...previous, updatedAt: Date.now() };
+    if (frameEdit) {
+      setFrameEdit({ ...frameEdit, draftCanvas: nextCanvas });
+    } else {
+      props.onChange(nextCanvas);
+    }
     if (selectedId && !previous.items.some((item) => item.id === selectedId)) {
       selectOnly(previous.items[0]?.id ?? null);
     }
   }
 
   function redoCanvas() {
-    if (props.readOnly || redoStack.length === 0) return;
+    if (readOnly || redoStack.length === 0) return;
     const next = redoStack[redoStack.length - 1];
     setRedoStack((current) => current.slice(0, -1));
     setUndoStack((current) => [
       ...current.slice(Math.max(0, current.length - MAX_UNDO_STEPS + 1)),
-      props.canvas,
+      canvas,
     ]);
-    props.onChange({ ...next, updatedAt: Date.now() });
+    const nextCanvas = { ...next, updatedAt: Date.now() };
+    if (frameEdit) {
+      setFrameEdit({ ...frameEdit, draftCanvas: nextCanvas });
+    } else {
+      props.onChange(nextCanvas);
+    }
     if (selectedId && !next.items.some((item) => item.id === selectedId)) {
       selectOnly(next.items[0]?.id ?? null);
     }
   }
 
   function addItem(kind: CanvasItemKind, point?: { x: number; y: number }) {
-    if (props.readOnly) return;
-    const scope = itemScope(props.canvas);
+    if (readOnly) return;
+    const scope = itemScope(canvas);
     const item = createCanvasItem({
-      canvas: props.canvas,
+      canvas: canvas,
       kind,
       state: "proposed",
       pageId: scope.pageId,
@@ -600,12 +854,12 @@ export function CanvasInspector(props: {
       x: point?.x,
       y: point?.y,
     });
-    commitItems([...props.canvas.items, item]);
+    commitItems([...canvas.items, item]);
     selectOnly(item.id);
   }
 
   function addPage() {
-    if (props.readOnly) return;
+    if (readOnly || frameEdit) return;
     const order = pages.length;
     const pageId = crypto.randomUUID();
     const subPage: CanvasSubPage = {
@@ -621,26 +875,25 @@ export function CanvasInspector(props: {
       subPages: [subPage],
     };
     commitCanvas({
-      pages: [...props.canvas.pages, page],
+      pages: [...canvas.pages, page],
       activePageId: page.id,
       activeSubPageId: subPage.id,
-      mode: "ui",
     });
     selectOnly(null);
   }
 
   function switchPage(pageId: string) {
-    if (props.canvas.activePageId === pageId) return;
+    if (frameEdit) return;
+    if (canvas.activePageId === pageId) return;
     commitCanvas({
       activePageId: pageId,
-      activeSubPageId: defaultSubPageId(props.canvas.pages, pageId),
-      mode: "ui",
+      activeSubPageId: defaultSubPageId(canvas.pages, pageId),
     });
     selectOnly(null);
   }
 
   function addSubPage() {
-    if (props.readOnly || !activePage) return;
+    if (readOnly || frameEdit || !activePage) return;
     const subPages = [...activePage.subPages].sort(
       (left, right) => left.order - right.order,
     );
@@ -653,28 +906,28 @@ export function CanvasInspector(props: {
       order,
     };
     commitCanvas({
-      pages: props.canvas.pages.map((page) =>
+      pages: canvas.pages.map((page) =>
         page.id === activePage.id
           ? { ...page, subPages: [...page.subPages, subPage] }
           : page,
       ),
       activePageId: activePage.id,
       activeSubPageId: subPage.id,
-      mode: "ui",
     });
     selectOnly(null);
   }
 
   function switchSubPage(subPageId: string) {
-    if (props.canvas.activeSubPageId === subPageId) return;
-    commitCanvas({ activeSubPageId: subPageId, mode: "ui" });
+    if (frameEdit) return;
+    if (canvas.activeSubPageId === subPageId) return;
+    commitCanvas({ activeSubPageId: subPageId });
     selectOnly(null);
   }
 
   function deleteSubPage(subPage: CanvasSubPage) {
-    if (props.readOnly || !activePage || activeSubPages.length <= 1) return;
+    if (readOnly || frameEdit || !activePage || activeSubPages.length <= 1) return;
     const scopedItemIds = new Set(
-      props.canvas.items
+      canvas.items
         .filter(
           (item) =>
             item.pageId === activePage.id && item.subPageId === subPage.id,
@@ -697,8 +950,8 @@ export function CanvasInspector(props: {
     const nextSubPage =
       remainingSubPages.find((candidate) => candidate.order > subPage.order) ??
       remainingSubPages[remainingSubPages.length - 1];
-    const items = props.canvas.items.filter((item) => !scopedItemIds.has(item.id));
-    const groups = props.canvas.groups
+    const items = canvas.items.filter((item) => !scopedItemIds.has(item.id));
+    const groups = canvas.groups
       .map((group) => ({
         ...group,
         itemIds: group.itemIds.filter((itemId) => !scopedItemIds.has(itemId)),
@@ -707,7 +960,7 @@ export function CanvasInspector(props: {
     const synced = syncCanvasItemsAndGroups(items, groups);
     commitCanvas({
       ...synced,
-      pages: props.canvas.pages.map((page) =>
+      pages: canvas.pages.map((page) =>
         page.id === activePage.id
           ? { ...page, subPages: remainingSubPages }
           : page,
@@ -718,22 +971,33 @@ export function CanvasInspector(props: {
   }
 
   function deleteItem(item: CanvasItem) {
-    if (props.readOnly) return;
+    if (readOnly) return;
+    if (frameEdit) {
+      const existsInBase = frameEdit.baseCanvas.items.some(
+        (candidate) => candidate.id === item.id,
+      );
+      if (existsInBase) {
+        updateItem(item.id, { visible: false });
+      } else {
+        commitItems(canvas.items.filter((candidate) => candidate.id !== item.id));
+      }
+      return;
+    }
     if (item.state === "deleted") return;
     if (!CANVAS_ITEM_STATE_CONFIG[item.state].canDeleteDirectly) {
       updateItem(item.id, { state: "deleted", locked: true, visible: true });
       return;
     }
-    commitItems(props.canvas.items.filter((candidate) => candidate.id !== item.id));
+    commitItems(canvas.items.filter((candidate) => candidate.id !== item.id));
     if (selectedIds.includes(item.id)) {
       selectMany(selectedIds.filter((itemId) => itemId !== item.id));
     }
   }
 
   function duplicateItem(item: CanvasItem) {
-    if (props.readOnly) return;
+    if (readOnly) return;
     const duplicate = createCanvasItem({
-      canvas: props.canvas,
+      canvas: canvas,
       kind: item.kind,
       state: "proposed",
       pageId: item.pageId,
@@ -749,43 +1013,180 @@ export function CanvasInspector(props: {
       width: item.width,
       height: item.height,
       comment: item.comment,
-      zIndex: nextZIndex(props.canvas.items),
+      zIndex: nextZIndex(canvas.items),
     };
-    commitItems([...props.canvas.items, next]);
+    commitItems([...canvas.items, next]);
     selectOnly(next.id);
   }
 
+  function copySelected(operation: CanvasClipboard["operation"]) {
+    if (operation === "cut" && readOnly) return;
+    const sourceIds = selectedGroup
+      ? selectedGroup.itemIds
+      : selectedIds.length > 0
+        ? selectedIds
+        : selectedItem
+          ? [selectedItem.id]
+          : [];
+    copyItemIds(sourceIds, operation);
+  }
+
+  function copyItemIds(
+    itemIds: string[],
+    operation: CanvasClipboard["operation"],
+  ) {
+    if (operation === "cut" && readOnly) return;
+    const expandedIds = expandGroupedItemIds(itemIds, canvas);
+    const expandedSet = new Set(expandedIds);
+    const items = canvas.items.filter(
+      (item) => expandedSet.has(item.id) && item.state !== "deleted",
+    );
+    if (items.length === 0) return;
+    const groups = canvas.groups.filter((group) =>
+      group.itemIds.every((itemId) => expandedSet.has(itemId)),
+    );
+    setClipboard({
+      operation,
+      items: items.map((item) => ({ ...item })),
+      groups: groups.map((group) => ({ ...group, itemIds: [...group.itemIds] })),
+      createdAt: Date.now(),
+    });
+    if (operation !== "cut") return;
+    const cutIds = new Set(items.map((item) => item.id));
+    const nextItems = canvas.items.filter((item) => !cutIds.has(item.id));
+    const nextGroups = canvas.groups
+      .map((group) => ({
+        ...group,
+        itemIds: group.itemIds.filter((itemId) => !cutIds.has(itemId)),
+      }))
+      .filter((group) => group.itemIds.length > 1);
+    commitCanvas(syncCanvasItemsAndGroups(nextItems, nextGroups));
+    selectOnly(null);
+  }
+
+  function pasteClipboard() {
+    if (readOnly || frameEdit || !clipboard || clipboard.items.length === 0) return;
+    const scope = itemScope(canvas);
+    const now = Date.now();
+    const itemIdMap = new Map<string, string>();
+    let nextItems = [...canvas.items];
+    let nextGroups = [...canvas.groups];
+
+    for (const sourceItem of clipboard.items) {
+      const workingCanvas = { ...canvas, items: nextItems, groups: nextGroups };
+      const state =
+        clipboard.operation === "copy" && sourceItem.state === "current"
+          ? "proposed"
+          : sourceItem.state;
+      const created = createCanvasItem({
+        canvas: workingCanvas,
+        kind: sourceItem.kind,
+        state,
+        pageId: scope.pageId,
+        subPageId: scope.subPageId,
+        device: scope.device,
+        x: sourceItem.x,
+        y: sourceItem.y,
+      });
+      const pasted = {
+        ...created,
+        title: sourceItem.title,
+        body: sourceItem.body,
+        width: sourceItem.width,
+        height: sourceItem.height,
+        bounds: itemBounds({
+          ...created,
+          width: sourceItem.width,
+          height: sourceItem.height,
+        }),
+        visible: sourceItem.visible,
+        locked: state === "current" ? sourceItem.locked : false,
+        zIndex: nextZIndex(nextItems),
+        comment: sourceItem.comment,
+        originalX: null,
+        originalY: null,
+        originalWidth: null,
+        originalHeight: null,
+        createdAt: now,
+        updatedAt: now,
+      };
+      itemIdMap.set(sourceItem.id, pasted.id);
+      nextItems = [...nextItems, pasted];
+    }
+
+    for (const sourceGroup of clipboard.groups) {
+      const itemIds = sourceGroup.itemIds
+        .map((itemId) => itemIdMap.get(itemId))
+        .filter((itemId): itemId is string => Boolean(itemId));
+      if (itemIds.length < 2) continue;
+      const state =
+        clipboard.operation === "copy" && sourceGroup.state === "current"
+          ? "proposed"
+          : sourceGroup.state;
+      const groupId = crypto.randomUUID();
+      nextItems = nextItems.map((item) =>
+        itemIds.includes(item.id)
+          ? { ...item, groupId, state, updatedAt: now }
+          : item,
+      );
+      nextGroups = [
+        ...nextGroups,
+        {
+          ...sourceGroup,
+          id: groupId,
+          numericId: nextGroupNumericId(nextGroups),
+          reference: nextGroupReference(nextGroups),
+          state,
+          itemIds,
+          locked: state === "current" ? sourceGroup.locked : false,
+          pageId: scope.pageId,
+          subPageId: scope.subPageId,
+          device: scope.device,
+          createdAt: now,
+          updatedAt: now,
+          bounds:
+            groupBoundsFromCanvasItems(itemIds, nextItems) ?? zeroCanvasBounds(),
+        },
+      ];
+    }
+
+    commitCanvas(syncCanvasItemsAndGroups(nextItems, nextGroups));
+    const pastedIds = Array.from(itemIdMap.values());
+    selectMany(pastedIds, pastedIds[0] ?? null);
+    if (clipboard.operation === "cut") setClipboard(null);
+  }
+
   function bringItemToFront(item: CanvasItem) {
-    if (props.readOnly) return;
-    updateItem(item.id, { zIndex: nextZIndex(props.canvas.items) });
+    if (readOnly) return;
+    updateItem(item.id, { zIndex: nextZIndex(canvas.items) });
   }
 
   function sendItemToBack(item: CanvasItem) {
-    if (props.readOnly) return;
-    updateItem(item.id, { zIndex: previousZIndex(props.canvas.items) });
+    if (readOnly) return;
+    updateItem(item.id, { zIndex: previousZIndex(canvas.items) });
   }
 
   function groupSelectedItems() {
-    if (props.readOnly) return;
+    if (readOnly || frameEdit) return;
     const scopedIds = new Set(scopedItems.map((item) => item.id));
     const itemIds = selectedIds.filter((itemId) => scopedIds.has(itemId));
     if (itemIds.length < 2) return;
     const selected = itemIds
-      .map((itemId) => props.canvas.items.find((item) => item.id === itemId))
+      .map((itemId) => canvas.items.find((item) => item.id === itemId))
       .filter((item): item is CanvasItem => item !== undefined);
     if (!canGroupItems(selected)) return;
 
     const now = Date.now();
-    const scope = itemScope(props.canvas);
-    const numericId = nextGroupNumericId(props.canvas.groups);
+    const scope = itemScope(canvas);
+    const numericId = nextGroupNumericId(canvas.groups);
     const groupId = crypto.randomUUID();
-    const cleanedGroups = props.canvas.groups
+    const cleanedGroups = canvas.groups
       .map((group) => ({
         ...group,
         itemIds: group.itemIds.filter((itemId) => !itemIds.includes(itemId)),
       }))
       .filter((group) => group.itemIds.length > 1);
-    const items = props.canvas.items.map((item) =>
+    const items = canvas.items.map((item) =>
       itemIds.includes(item.id)
         ? { ...item, groupId, updatedAt: now }
         : item,
@@ -793,7 +1194,7 @@ export function CanvasInspector(props: {
     const group: CanvasGroup = {
       id: groupId,
       numericId,
-      reference: nextGroupReference(props.canvas.groups),
+      reference: nextGroupReference(canvas.groups),
       title: `Group ${numericId}`,
       state: selected[0].state,
       itemIds,
@@ -810,24 +1211,24 @@ export function CanvasInspector(props: {
   }
 
   function changeItemOrGroupState(item: CanvasItem, state: CanvasItemState) {
-    if (props.readOnly) return;
+    if (readOnly || frameEdit) return;
     if (!item.groupId) {
       updateItem(item.id, statePatchForItem(item, state));
       return;
     }
-    const group = props.canvas.groups.find((candidate) => candidate.id === item.groupId);
+    const group = canvas.groups.find((candidate) => candidate.id === item.groupId);
     if (!group) {
       updateItem(item.id, statePatchForItem(item, state));
       return;
     }
     const groupItemIds = new Set(group.itemIds);
     const now = Date.now();
-    const items = props.canvas.items.map((candidate) =>
+    const items = canvas.items.map((candidate) =>
       groupItemIds.has(candidate.id)
         ? { ...candidate, ...statePatchForItem(candidate, state), updatedAt: now }
         : candidate,
     );
-    const groups = props.canvas.groups.map((candidate) =>
+    const groups = canvas.groups.map((candidate) =>
       candidate.id === group.id
         ? { ...candidate, state, locked: state !== "proposed", updatedAt: now }
         : candidate,
@@ -836,16 +1237,16 @@ export function CanvasInspector(props: {
   }
 
   function changeGroupState(group: CanvasGroup, state: CanvasItemState) {
-    const firstItem = groupItems(group, props.canvas.items)[0];
+    const firstItem = groupItems(group, canvas.items)[0];
     if (!firstItem) return;
     changeItemOrGroupState(firstItem, state);
   }
 
   function toggleGroupLock(group: CanvasGroup) {
-    if (props.readOnly) return;
+    if (readOnly || frameEdit) return;
     const now = Date.now();
     commitCanvas({
-      groups: props.canvas.groups.map((candidate) =>
+      groups: canvas.groups.map((candidate) =>
         candidate.id === group.id
           ? { ...candidate, locked: !candidate.locked, updatedAt: now }
           : candidate,
@@ -854,17 +1255,17 @@ export function CanvasInspector(props: {
   }
 
   function applyGroupPosition(group: CanvasGroup) {
-    if (props.readOnly || !groupHasOriginalGeometry(group, props.canvas.items)) {
+    if (readOnly || !groupHasOriginalGeometry(group, canvas.items)) {
       return;
     }
     const now = Date.now();
     const groupItemIds = new Set(group.itemIds);
-    const items = props.canvas.items.map((item) =>
+    const items = canvas.items.map((item) =>
       groupItemIds.has(item.id) && hasOriginalGeometry(item)
         ? { ...item, ...applyPlacementPatch(item), updatedAt: now }
         : item,
     );
-    const groups = props.canvas.groups.map((candidate) =>
+    const groups = canvas.groups.map((candidate) =>
       candidate.id === group.id
         ? { ...candidate, locked: true, updatedAt: now }
         : candidate,
@@ -873,17 +1274,17 @@ export function CanvasInspector(props: {
   }
 
   function resetGroupPosition(group: CanvasGroup) {
-    if (props.readOnly || !groupHasOriginalGeometry(group, props.canvas.items)) {
+    if (readOnly || !groupHasOriginalGeometry(group, canvas.items)) {
       return;
     }
     const now = Date.now();
     const groupItemIds = new Set(group.itemIds);
-    const items = props.canvas.items.map((item) =>
+    const items = canvas.items.map((item) =>
       groupItemIds.has(item.id) && hasOriginalGeometry(item)
         ? { ...item, ...resetPlacementPatch(item), updatedAt: now }
         : item,
     );
-    const groups = props.canvas.groups.map((candidate) =>
+    const groups = canvas.groups.map((candidate) =>
       candidate.id === group.id
         ? { ...candidate, locked: true, updatedAt: now }
         : candidate,
@@ -892,21 +1293,21 @@ export function CanvasInspector(props: {
   }
 
   function ungroupItem(item: CanvasItem) {
-    if (props.readOnly || !item.groupId) return;
+    if (readOnly || frameEdit || !item.groupId) return;
     ungroupById(item.groupId);
   }
 
   function ungroupById(groupId: string) {
-    if (props.readOnly) return;
+    if (readOnly || frameEdit) return;
     const now = Date.now();
-    const group = props.canvas.groups.find((candidate) => candidate.id === groupId);
-    const items = props.canvas.items.map((item) =>
+    const group = canvas.groups.find((candidate) => candidate.id === groupId);
+    const items = canvas.items.map((item) =>
       item.groupId === groupId ? { ...item, groupId: null, updatedAt: now } : item,
     );
     commitCanvas(
       syncCanvasItemsAndGroups(
         items,
-        props.canvas.groups.filter((group) => group.id !== groupId),
+        canvas.groups.filter((group) => group.id !== groupId),
       ),
     );
     if (selectedGroupId === groupId) {
@@ -920,7 +1321,7 @@ export function CanvasInspector(props: {
   ) {
     event.preventDefault();
     event.stopPropagation();
-    const group = groupForItem(item, props.canvas.groups);
+    const group = groupForItem(item, canvas.groups);
     if (group) {
       selectGroup(group);
     } else if (selectedIds.includes(item.id)) {
@@ -969,21 +1370,21 @@ export function CanvasInspector(props: {
       selectCanvasItem(item, true);
       return;
     }
-    const group = groupForItem(item, props.canvas.groups);
+    const group = groupForItem(item, canvas.groups);
     if (group) selectGroup(group);
     else selectOnly(item.id);
-    if (props.readOnly) return;
+    if (readOnly) return;
     if (group) {
-      if (group.locked || mode !== "move") return;
+      if ((!frameEdit && group.locked) || mode !== "move") return;
     } else if (item.locked) {
-      return;
+      if (!frameEdit) return;
     }
-    const dragItems = group && mode === "move" ? groupItems(group, props.canvas.items) : [item];
+    const dragItems = group && mode === "move" ? groupItems(group, canvas.items) : [item];
     pushUndoSnapshot();
     const focusedItems =
       mode === "move"
-        ? itemsWithFocusedZIndexes(dragItems, props.canvas.items)
-        : [itemWithFocusedZIndex(item, props.canvas.items)];
+        ? itemsWithFocusedZIndexes(dragItems, canvas.items)
+        : [itemWithFocusedZIndex(item, canvas.items)];
     event.currentTarget.setPointerCapture(event.pointerId);
     setDrag({
       itemId: item.id,
@@ -1013,14 +1414,14 @@ export function CanvasInspector(props: {
         drag.originals.map((original) => [original.id, original]),
       );
       commitItems(
-        props.canvas.items.map((item) => {
+        canvas.items.map((item) => {
           const original = originalsById.get(item.id);
           if (!original) return item;
           return {
             ...item,
             x: Math.max(8, Math.round(original.x + dx)),
             y: Math.max(8, Math.round(original.y + dy)),
-            ...movementPatch(original),
+            ...(frameEdit ? {} : movementPatch(original)),
             zIndex: original.zIndex,
             updatedAt: now,
           };
@@ -1032,7 +1433,7 @@ export function CanvasInspector(props: {
 
     updateItem(drag.itemId, {
       ...resizePatch(drag.original, dx, dy),
-      ...movementPatch(drag.original),
+      ...(frameEdit ? {} : movementPatch(drag.original)),
       zIndex: drag.original.zIndex,
     }, { recordHistory: false });
   }
@@ -1115,11 +1516,11 @@ export function CanvasInspector(props: {
     const hits = stageItems
       .filter((item) => item.visible && boundsIntersect(itemBounds(item), marqueeBounds(next)))
       .map((item) => item.id);
-    const expandedHits = expandGroupedItemIds(hits, props.canvas);
+    const expandedHits = expandGroupedItemIds(hits, canvas);
     const selection = next.additive
       ? Array.from(new Set([...next.baseSelection, ...expandedHits]))
       : expandedHits;
-    const selectedGroup = singleSelectedGroup(selection, props.canvas.groups);
+    const selectedGroup = singleSelectedGroup(selection, canvas.groups);
     if (selectedGroup) selectGroup(selectedGroup);
     else selectMany(selection, selection[selection.length - 1] ?? null);
   }
@@ -1221,102 +1622,213 @@ export function CanvasInspector(props: {
     });
   }
 
-  return (
-    <div className="canvas-inspector phase-two">
-      <div className={`canvas-workspace ${props.canvas.mode}`}>
-        {props.canvas.mode === "ui" && (
-          <nav className="canvas-page-rail" aria-label="Canvas pages">
-            {pages.map((page, index) => (
-              <button
-                key={page.id}
-                className={page.id === props.canvas.activePageId ? "active" : ""}
-                onClick={() => switchPage(page.id)}
-                title={page.name}
-                type="button"
-              >
-                <span>P{index + 1}</span>
-              </button>
-            ))}
-            <button
-              className="canvas-page-add"
-              disabled={props.readOnly}
-              onClick={addPage}
-              title="Add page"
-              type="button"
-            >
-              <Plus size={15} />
-            </button>
-          </nav>
-        )}
+  function toggleLayerPanel() {
+    if (hasDetailsSelection) {
+      props.onLayersOpenChange(true);
+      return;
+    }
+    props.onLayersOpenChange(!props.layersOpen);
+  }
 
+  function renderLayerPanelButton() {
+    return (
+      <button
+        aria-label={
+          hasDetailsSelection
+            ? "Layers visible"
+            : sidePanelOpen
+              ? "Hide layers"
+              : "Show layers"
+        }
+        aria-pressed={sidePanelOpen}
+        className={`canvas-layer-toggle ${sidePanelOpen ? "active" : ""}`}
+        onClick={toggleLayerPanel}
+        title={
+          hasDetailsSelection
+            ? "Layers stay visible while an item is selected"
+            : sidePanelOpen
+              ? "Hide layers"
+              : "Show layers"
+        }
+        type="button"
+      >
+        <Layers size={14} />
+        <span>Layers</span>
+      </button>
+    );
+  }
+
+  return (
+    <div
+      className={`canvas-inspector phase-two ${
+        props.proposalMode ? "proposal-mode" : ""
+      }`.trim()}
+    >
+      <header className="canvas-header-row">
+        <h2>Canvas</h2>
+        <nav className="canvas-page-state-nav" aria-label="Canvas pages and states">
+          {pages.map((page, index) => {
+            const active = page.id === canvas.activePageId;
+            return (
+              <div
+                className={`canvas-page-cluster ${active ? "active" : ""}`}
+                key={page.id}
+              >
+                <button
+                  className="canvas-page-button"
+                  disabled={Boolean(frameEdit)}
+                  onClick={() => switchPage(page.id)}
+                  title={page.name}
+                  type="button"
+                >
+                  <span>P{index + 1}</span>
+                </button>
+                {active && (
+                  <div className="canvas-state-pills">
+                    {activeSubPages.map((subPage, subPageIndex) => {
+                      const subPageActive = subPage.id === activeSubPage?.id;
+                      const label = subPage.name || `State ${subPageIndex + 1}`;
+                      return (
+                        <span
+                          className={`canvas-state-pill ${
+                            subPageActive ? "active" : ""
+                          }`}
+                          key={subPage.id}
+                        >
+                          <button
+                            disabled={Boolean(frameEdit)}
+                            onClick={() => switchSubPage(subPage.id)}
+                            title={label}
+                            type="button"
+                          >
+                            {label}
+                          </button>
+                          {subPageActive && activeSubPages.length > 1 && (
+                            <button
+                              aria-label={`Delete ${label}`}
+                              className="canvas-state-delete"
+                              disabled={readOnly || Boolean(frameEdit)}
+                              onClick={() => deleteSubPage(subPage)}
+                              title="Delete state"
+                              type="button"
+                            >
+                              <Trash2 size={11} />
+                            </button>
+                          )}
+                        </span>
+                      );
+                    })}
+                    <button
+                      className="canvas-state-add"
+                      disabled={readOnly || Boolean(frameEdit)}
+                      onClick={addSubPage}
+                      title="Add state"
+                      type="button"
+                    >
+                      <Plus size={12} />
+                    </button>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+          <button
+            className="canvas-page-add"
+            disabled={readOnly || Boolean(frameEdit)}
+            onClick={addPage}
+            title="Add page"
+            type="button"
+          >
+            <Plus size={13} />
+          </button>
+        </nav>
+        <div className="canvas-header-actions">
+          {renderLayerPanelButton()}
+          <span className={`canvas-save-status ${props.statusKind}`}>
+            {props.statusLabel}
+          </span>
+        </div>
+      </header>
+      <div
+        className={`canvas-workspace ${
+          sidePanelOpen ? "side-panel-open" : "side-panel-closed"
+        } ${props.layersOpen ? "layers-open" : "layers-closed"}`}
+      >
         <section className="canvas-main">
           <div className="canvas-top-stack">
-            {props.proposalMode && (
-              <div className="canvas-proposal-context">
-                <div className="canvas-proposal-copyline">
-                  <strong>{props.proposalLabel ?? "Plan proposal"}</strong>
-                  {props.proposalSummary && <span>{props.proposalSummary}</span>}
+            {frameEdit && (
+              <div className="canvas-frame-edit-banner">
+                <div>
+                  <strong>Editing interaction frame {frameEdit.frameNumber}</strong>
+                  <span>Changes stay in this preview until you save.</span>
+                </div>
+                <div className="canvas-frame-edit-actions">
+                  <button
+                    data-testid="canvas-frame-save"
+                    type="button"
+                    onClick={saveInteractionFrame}
+                  >
+                    <Save size={14} />
+                    Save frame
+                  </button>
+                  <button
+                    data-testid="canvas-frame-return-base"
+                    type="button"
+                    onClick={returnInteractionFrameToBase}
+                  >
+                    <RotateCcw size={14} />
+                    Return to base
+                  </button>
+                  <button
+                    data-testid="canvas-frame-cancel"
+                    type="button"
+                    onClick={cancelInteractionFrameEdit}
+                  >
+                    <X size={14} />
+                    Cancel
+                  </button>
                 </div>
               </div>
             )}
-            {props.canvas.mode === "ui" && activePage && activeSubPage && (
-              <div
-                className={`canvas-subpage-strip ${
-                  activeSubPages.length > 1 ? "expanded" : "single"
-                }`}
-                aria-label="Canvas sub-pages"
-              >
-                {activeSubPages.length > 1 &&
-                  activeSubPages.map((subPage) => {
-                    const active = subPage.id === activeSubPage.id;
-                    return (
-                      <div
-                        className={`canvas-subpage-chip ${active ? "active" : ""}`}
-                        key={subPage.id}
-                      >
-                        <button
-                          onClick={() => switchSubPage(subPage.id)}
-                          title={subPage.name}
-                          type="button"
-                        >
-                          <strong>
-                            {subPageLabel(activePageIndex, subPage, activeSubPages)}
-                          </strong>
-                          <span>{subPage.name}</span>
-                        </button>
-                        {active && activeSubPages.length > 1 && (
-                          <button
-                            aria-label={`Delete ${subPageLabel(
-                              activePageIndex,
-                              subPage,
-                              activeSubPages,
-                            )}`}
-                            className="canvas-subpage-delete"
-                            disabled={props.readOnly}
-                            onClick={() => deleteSubPage(subPage)}
-                            title="Delete sub-page"
-                            type="button"
-                          >
-                            <Trash2 size={12} />
-                          </button>
-                        )}
-                      </div>
-                    );
-                  })}
+            {playback && !frameEdit && (
+              <div className="canvas-frame-play-banner">
+                <span>Playing interaction frame {playback.frameNumber}</span>
                 <button
-                  className="canvas-subpage-add"
-                  disabled={props.readOnly}
-                  onClick={addSubPage}
-                  title={
-                    activeSubPages.length > 1
-                      ? "Add sub-page"
-                      : "Add another state for this page"
-                  }
+                  data-testid="canvas-frame-stop"
                   type="button"
+                  onClick={stopInteractionFrame}
                 >
-                  <Plus size={14} />
-                  {activeSubPages.length > 1 && <span>State</span>}
+                  <StopCircle size={14} />
+                  Stop
                 </button>
+              </div>
+            )}
+            {props.proposalMode && (
+              <div className="canvas-proposal-context">
+                <div className="canvas-proposal-copyline">
+                  <strong>{props.proposalLabel ?? "Draft"}</strong>
+                  {props.proposalSummary && <span>{props.proposalSummary}</span>}
+                </div>
+                <div className="canvas-proposal-actions">
+                  {props.readOnly && props.onEditProposalDraft && (
+                    <button
+                      className="canvas-proposal-reply"
+                      data-testid="plan-edit-draft"
+                      onClick={props.onEditProposalDraft}
+                      type="button"
+                    >
+                      Edit draft
+                    </button>
+                  )}
+                  {props.proposalEdited && (
+                    <span
+                      className="canvas-proposal-attached"
+                      data-testid="canvas-edits-attached"
+                    >
+                      Canvas edits attached
+                    </span>
+                  )}
+                </div>
               </div>
             )}
             <div className="canvas-tool-strip" aria-label="Canvas tools">
@@ -1326,8 +1838,8 @@ export function CanvasInspector(props: {
                   <button
                     key={tool.kind}
                     aria-label={tool.label}
-                    disabled={props.readOnly}
-                    draggable={!props.readOnly}
+                    disabled={readOnly}
+                    draggable={!readOnly}
                     onClick={() => addItem(tool.kind)}
                     onDragStart={(event) => beginToolDrag(event, tool.kind)}
                     title={tool.label}
@@ -1338,6 +1850,17 @@ export function CanvasInspector(props: {
                 );
               })}
               <span className="canvas-tool-spacer" />
+              {!props.proposalMode && (
+                <button
+                  aria-label="Generate current interface mockup"
+                  disabled={readOnly}
+                  onClick={() => props.onRequestGenerateMockup(props.project)}
+                  title="Generate current interface mockup"
+                  type="button"
+                >
+                  <Sparkles size={15} />
+                </button>
+              )}
               <button
                 aria-label="Zoom out"
                 onClick={() => zoomFromCenter(0.85)}
@@ -1364,7 +1887,7 @@ export function CanvasInspector(props: {
               </button>
               <button
                 aria-label="Undo"
-                disabled={props.readOnly || undoStack.length === 0}
+                disabled={readOnly || undoStack.length === 0}
                 onClick={undoCanvas}
                 title="Undo"
                 type="button"
@@ -1373,7 +1896,7 @@ export function CanvasInspector(props: {
               </button>
               <button
                 aria-label="Redo"
-                disabled={props.readOnly || redoStack.length === 0}
+                disabled={readOnly || redoStack.length === 0}
                 onClick={redoCanvas}
                 title="Redo"
                 type="button"
@@ -1383,7 +1906,7 @@ export function CanvasInspector(props: {
             </div>
           </div>
           <section
-            className={`canvas-stage ${props.canvas.mode} ${
+            className={`canvas-stage ${
               pan ? "panning" : spacePanActive ? "pan-ready" : ""
             }`}
             ref={stageRef}
@@ -1399,23 +1922,17 @@ export function CanvasInspector(props: {
             {scopedItems.length === 0 && (
               <div className="canvas-empty">
                 <MousePointer2 size={18} />
-                <strong>
-                  {props.canvas.mode === "ui"
-                    ? "Map this page"
-                    : "Map project ownership"}
-                </strong>
+                <strong>Map this page</strong>
                 <span>
-                  {props.canvas.mode === "ui"
-                    ? "Drop a container, text, modal, divider, or button onto the grid."
-                    : "Backend mapping stays general, not per page."}
+                  Drop a container, text, modal, divider, or button onto the grid.
                 </span>
-                {props.canvas.mode === "ui" && !props.proposalMode && (
+                {!props.proposalMode && (
                   <button
-                    disabled={props.readOnly}
+                    disabled={readOnly}
                     onClick={() => props.onRequestGenerateMockup(props.project)}
                     type="button"
                   >
-                    <Sparkles size={15} /> Generate current UI mockup
+                    <Sparkles size={15} /> Generate current interface mockup
                   </button>
                 )}
               </div>
@@ -1436,7 +1953,7 @@ export function CanvasInspector(props: {
                   style={rectStyle(marqueeBounds(marquee))}
                 />
               )}
-              {stageItems
+              {!frameEdit && stageItems
                 .filter(hasOriginalGeometry)
                 .map((item) => (
                   <CanvasOriginGhost item={item} key={`${item.id}-origin`} />
@@ -1450,11 +1967,12 @@ export function CanvasInspector(props: {
               ))}
               {stageItems.map((item) => {
                 const selected = selectedIds.includes(item.id);
-                const itemGroup = groupForItem(item, props.canvas.groups);
+                const itemGroup = groupForItem(item, canvas.groups);
                 return (
                   <CanvasStageItem
                     grouped={Boolean(itemGroup)}
                     groupLocked={itemGroup?.locked ?? false}
+                    frameEditing={Boolean(frameEdit)}
                     item={item}
                     key={item.id}
                     onBeginDrag={beginDrag}
@@ -1469,117 +1987,159 @@ export function CanvasInspector(props: {
           </section>
         </section>
 
-        <aside className="canvas-side-panel">
-          <section className="canvas-layers">
-            <div className="canvas-panel-heading">
-              <span>
-                <Layers size={14} />
-                Layers
-              </span>
-              <button
-                aria-expanded={legendOpen}
-                className="canvas-info-button"
-                onClick={() => setLegendOpen((open) => !open)}
-                title="Layer color guide"
-                type="button"
-              >
-                <Info size={13} />
-              </button>
-            </div>
-            {legendOpen && <LayerLegend />}
-            {layers.length === 0 ? (
-              <p className="muted compact">No layers on this view.</p>
-            ) : (
-              <div className="canvas-layer-list">
-                {layerGroups.map((group) => (
-                  <LayerGroupRows
-                    group={group}
-                    items={layers.filter((item) => group.itemIds.includes(item.id))}
-                    key={group.id}
-                    onDeleteItem={deleteItem}
-                    onSelectGroup={() => selectGroup(group)}
-                    onToggleGroupLock={() => toggleGroupLock(group)}
-                    onToggleItemVisible={(item) =>
-                      updateItem(item.id, { visible: !item.visible })
-                    }
-                    onUngroup={() => ungroupById(group.id)}
-                    readOnly={props.readOnly}
-                    selectedIds={selectedIds}
-                  />
-                ))}
-                {ungroupedLayers.map((item) => (
-                  <LayerRows
-                    item={item}
-                    key={item.id}
-                    onDelete={() => deleteItem(item)}
-                    onSelect={(event) =>
-                      event.ctrlKey || event.metaKey
-                        ? selectCanvasItem(item, true)
-                        : selectCanvasItem(item, false)
-                    }
-                    onToggleLock={() =>
-                      updateItem(item.id, { locked: !item.locked })
-                    }
-                    onToggleVisible={() =>
-                      updateItem(item.id, { visible: !item.visible })
-                    }
-                    readOnly={props.readOnly}
-                    selected={selectedIds.includes(item.id)}
-                  />
-                ))}
+        {sidePanelOpen && (
+          <aside
+            className={`canvas-side-panel ${
+              hasDetailsSelection ? "with-details" : "layers-only"
+            }`}
+          >
+            <section className="canvas-layers">
+              <div className="canvas-panel-heading">
+                <span>
+                  <Layers size={14} />
+                  Layers
+                </span>
+                <button
+                  aria-expanded={legendOpen}
+                  className="canvas-info-button"
+                  onClick={() => setLegendOpen((open) => !open)}
+                  title="Layer color guide"
+                  type="button"
+                >
+                  <Info size={13} />
+                </button>
               </div>
-            )}
-          </section>
-
-          <section className={`canvas-details ${detailsOpen ? "open" : ""}`}>
-            <button
-              aria-expanded={detailsOpen}
-              className="canvas-details-toggle"
-              onClick={() => setDetailsOpen((open) => !open)}
-              type="button"
-            >
-              {detailsOpen ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-              <span>Details</span>
-              {detailsSubject && (
-                <span className="canvas-details-subject">{detailsSubject}</span>
-              )}
-            </button>
-            {detailsOpen &&
-              (selectedGroup ? (
-                <CanvasGroupDetails
-                  group={selectedGroup}
-                  hasMovedItems={groupHasOriginalGeometry(
-                    selectedGroup,
-                    props.canvas.items,
-                  )}
-                  onApplyPosition={() => applyGroupPosition(selectedGroup)}
-                  onChangeState={(state) => changeGroupState(selectedGroup, state)}
-                  onResetPosition={() => resetGroupPosition(selectedGroup)}
-                  onToggleLock={() => toggleGroupLock(selectedGroup)}
-                  onUpdate={(patch) => updateGroup(selectedGroup.id, patch)}
-                  readOnly={props.readOnly}
-                />
-              ) : selectedItem ? (
-                <CanvasDetails
-                  item={selectedItem}
-                  onApplyPosition={() =>
-                    updateItem(selectedItem.id, applyPlacementPatch(selectedItem))
-                  }
-                  onChangeState={(state) => changeItemOrGroupState(selectedItem, state)}
-                  onUpdate={(patch) => updateItem(selectedItem.id, patch)}
-                  readOnly={props.readOnly}
-                />
+              {legendOpen && <LayerLegend />}
+              {layers.length === 0 ? (
+                <p className="muted compact">No layers on this view.</p>
               ) : (
-                <p className="muted compact">
-                  Select a layer or item to edit the name, note, and position.
-                </p>
-              ))}
-          </section>
-        </aside>
+                <div className="canvas-layer-list">
+                  {layerGroups.map((group) => (
+                    <LayerGroupRows
+                      group={group}
+                      items={layers.filter((item) =>
+                        group.itemIds.includes(item.id),
+                      )}
+                      key={group.id}
+                      onDeleteItem={deleteItem}
+                      onSelectGroup={() => selectGroup(group)}
+                      onToggleGroupLock={() => toggleGroupLock(group)}
+                      onToggleItemVisible={(item) =>
+                        updateItem(item.id, { visible: !item.visible })
+                      }
+                      onUngroup={() => ungroupById(group.id)}
+                      readOnly={readOnly}
+                      selectedIds={selectedIds}
+                      showOriginalGeometry={!frameEdit}
+                    />
+                  ))}
+                  {ungroupedLayers.map((item) => (
+                    <LayerRows
+                      item={item}
+                      key={item.id}
+                      onDelete={() => deleteItem(item)}
+                      onSelect={(event) =>
+                        event.ctrlKey || event.metaKey
+                          ? selectCanvasItem(item, true)
+                          : selectCanvasItem(item, false)
+                      }
+                      onToggleLock={() =>
+                        updateItem(item.id, { locked: !item.locked })
+                      }
+                      onToggleVisible={() =>
+                        updateItem(item.id, { visible: !item.visible })
+                      }
+                      readOnly={readOnly}
+                      selected={selectedIds.includes(item.id)}
+                      showOriginalGeometry={!frameEdit}
+                    />
+                  ))}
+                </div>
+              )}
+            </section>
+
+            {hasDetailsSelection && (
+              <section className={`canvas-details ${detailsOpen ? "open" : ""}`}>
+                <button
+                  aria-expanded={detailsOpen}
+                  className="canvas-details-toggle"
+                  onClick={() => setDetailsOpen((open) => !open)}
+                  type="button"
+                >
+                  {detailsOpen ? (
+                    <ChevronDown size={14} />
+                  ) : (
+                    <ChevronRight size={14} />
+                  )}
+                  <span>Details</span>
+                  {detailsSubject && (
+                    <span className="canvas-details-subject">
+                      {detailsSubject}
+                    </span>
+                  )}
+                </button>
+                {detailsOpen && selectedInteractionSubject && (
+                  <div className="canvas-detail-stack">
+                    <InteractionPreviewPanel
+                      activeFrame={activePlaybackFrame}
+                      editingFrame={frameEdit?.frameNumber ?? null}
+                      onAddFrame={() => addOrEditInteractionFrame()}
+                      onDeleteFrame={deleteInteractionFrame}
+                      onEditFrame={(frameNumber) =>
+                        addOrEditInteractionFrame(frameNumber)
+                      }
+                      onPlayFrame={playInteractionFrame}
+                      onStopFrame={stopInteractionFrame}
+                      onUpdateFrame={updateInteractionFrameTiming}
+                      preview={selectedInteractionPreview}
+                      readOnly={props.readOnly}
+                      subject={selectedInteractionSubject}
+                    />
+                    {selectedGroup ? (
+                      <CanvasGroupDetails
+                        frameEditing={Boolean(frameEdit)}
+                        group={selectedGroup}
+                        hasMovedItems={groupHasOriginalGeometry(
+                          selectedGroup,
+                          canvas.items,
+                        )}
+                        onApplyPosition={() => applyGroupPosition(selectedGroup)}
+                        onChangeState={(state) =>
+                          changeGroupState(selectedGroup, state)
+                        }
+                        onResetPosition={() => resetGroupPosition(selectedGroup)}
+                        onToggleLock={() => toggleGroupLock(selectedGroup)}
+                        onUpdate={(patch) => updateGroup(selectedGroup.id, patch)}
+                        readOnly={readOnly}
+                      />
+                    ) : selectedItem ? (
+                      <CanvasDetails
+                        frameEditing={Boolean(frameEdit)}
+                        item={selectedItem}
+                        onApplyPosition={() =>
+                          updateItem(
+                            selectedItem.id,
+                            applyPlacementPatch(selectedItem),
+                          )
+                        }
+                        onChangeState={(state) =>
+                          changeItemOrGroupState(selectedItem, state)
+                        }
+                        onUpdate={(patch) => updateItem(selectedItem.id, patch)}
+                        readOnly={readOnly}
+                      />
+                    ) : null}
+                  </div>
+                )}
+              </section>
+            )}
+          </aside>
+        )}
       </div>
       {contextMenu && (
         <CanvasContextMenu
           canGroup={canGroupItems(selectedItems)}
+          canPaste={Boolean(clipboard)}
           groupBlockLabel={groupBlockLabel(selectedItems)}
           canUngroup={Boolean(contextMenuItem?.groupId)}
           group={contextMenuGroup}
@@ -1598,6 +2158,10 @@ export function CanvasInspector(props: {
             runContextAction(() => changeItemOrGroupState(item, state))
           }
           onClose={() => setContextMenu(null)}
+          onCopy={(item) =>
+            runContextAction(() => copyItemIds([item.id], "copy"))
+          }
+          onCut={(item) => runContextAction(() => copyItemIds([item.id], "cut"))}
           onDelete={(item) => runContextAction(() => deleteItem(item))}
           onDuplicate={(item) => runContextAction(() => duplicateItem(item))}
           onGroupSelection={() => runContextAction(groupSelectedItems)}
@@ -1613,9 +2177,10 @@ export function CanvasInspector(props: {
           onGroupToggleLock={(group) =>
             runContextAction(() => toggleGroupLock(group))
           }
+          onPaste={() => runContextAction(pasteClipboard)}
           groupMoved={Boolean(
             contextMenuGroup &&
-              groupHasOriginalGeometry(contextMenuGroup, props.canvas.items),
+              groupHasOriginalGeometry(contextMenuGroup, canvas.items),
           )}
           onResetPosition={(item) =>
             runContextAction(() => updateItem(item.id, resetPlacementPatch(item)))
@@ -1625,7 +2190,7 @@ export function CanvasInspector(props: {
             runContextAction(() => updateItem(item.id, { locked: !item.locked }))
           }
           onUngroup={(item) => runContextAction(() => ungroupItem(item))}
-          readOnly={props.readOnly}
+          readOnly={readOnly}
           ref={contextMenuRef}
         />
       )}
@@ -1634,6 +2199,7 @@ export function CanvasInspector(props: {
 }
 
 function CanvasStageItem(props: {
+  frameEditing: boolean;
   grouped: boolean;
   groupLocked: boolean;
   item: CanvasItem;
@@ -1653,6 +2219,8 @@ function CanvasStageItem(props: {
   const Icon = iconForKind(props.item.kind);
   const compact = isCompactItem(props.item);
   const dimensions = displayDimensions(props.item);
+  const bodyText = compact ? compactItemLabel(props.item) : props.item.body.trim();
+  const showBody = props.item.kind !== "divider" && props.item.kind !== "container" && bodyText;
   return (
     <div
       className={`canvas-item ${props.item.kind} ${props.item.state} ${
@@ -1693,10 +2261,8 @@ function CanvasStageItem(props: {
           {props.item.title}
         </strong>
       </div>
-      {props.item.kind !== "divider" && (
-        <p>{compact ? compactItemLabel(props.item) : props.item.body || props.item.title}</p>
-      )}
-      {!props.item.locked && !props.grouped && (
+      {showBody ? <p>{bodyText}</p> : null}
+      {(!props.item.locked || props.frameEditing) && !props.grouped && (
         <div
           className="canvas-resize-handle"
           onPointerDown={(event) => props.onBeginDrag(event, props.item, "resize")}
@@ -1747,12 +2313,13 @@ function LayerRows(props: {
   selected: boolean;
   grouped?: boolean;
   readOnly: boolean;
+  showOriginalGeometry: boolean;
   onSelect: (event: ReactMouseEvent<HTMLButtonElement>) => void;
   onToggleVisible: () => void;
   onToggleLock: () => void;
   onDelete: () => void;
 }) {
-  const moved = hasOriginalGeometry(props.item);
+  const moved = props.showOriginalGeometry && hasOriginalGeometry(props.item);
   return (
     <div
       className={`canvas-layer-group ${moved ? "changed-position" : ""} ${
@@ -1781,6 +2348,7 @@ function LayerGroupRows(props: {
   items: CanvasItem[];
   selectedIds: string[];
   readOnly: boolean;
+  showOriginalGeometry: boolean;
   onDeleteItem: (item: CanvasItem) => void;
   onSelectGroup: () => void;
   onToggleGroupLock: () => void;
@@ -1833,6 +2401,7 @@ function LayerGroupRows(props: {
             onToggleVisible={() => props.onToggleItemVisible(item)}
             readOnly={props.readOnly}
             selected={props.selectedIds.includes(item.id)}
+            showOriginalGeometry={props.showOriginalGeometry}
           />
         ))}
       </div>
@@ -1928,20 +2497,198 @@ function LockBadge(props: { locked: boolean; compact?: boolean }) {
   );
 }
 
+function InteractionPreviewPanel(props: {
+  activeFrame: CanvasInteractionFrameNumber | null;
+  editingFrame: CanvasInteractionFrameNumber | null;
+  preview: CanvasInteractionPreview | null;
+  readOnly: boolean;
+  subject: {
+    kind: "item" | "group";
+    id: string;
+    reference: string;
+    label: string;
+  };
+  onAddFrame: () => void;
+  onDeleteFrame: (
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+  ) => void;
+  onEditFrame: (frameNumber: CanvasInteractionFrameNumber) => void;
+  onPlayFrame: (
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+  ) => void;
+  onStopFrame: () => void;
+  onUpdateFrame: (
+    preview: CanvasInteractionPreview,
+    frameNumber: CanvasInteractionFrameNumber,
+    patch: Parameters<typeof updateCanvasInteractionFrame>[3],
+  ) => void;
+}) {
+  const frames = props.preview
+    ? [...props.preview.frames].sort((left, right) => left.frame - right.frame)
+    : [];
+  const canAddFrame =
+    !props.readOnly && !props.editingFrame && (!props.preview || frames.length < 2);
+  const nextFrameNumber: CanvasInteractionFrameNumber = frames.some(
+    (frame) => frame.frame === 2,
+  )
+    ? 3
+    : 2;
+
+  return (
+    <section className="canvas-interaction-panel">
+      <div className="canvas-panel-heading">
+        <span>
+          <Play size={14} />
+          Interaction Preview
+        </span>
+      </div>
+      <div className="canvas-interaction-trigger">
+        <span>Trigger</span>
+        <strong>
+          {props.subject.reference} {props.subject.kind === "group" ? "Group" : ""}
+        </strong>
+      </div>
+      {frames.length === 0 ? (
+        <p className="muted compact">
+          Preview a local click, expansion, panel, or menu without changing the base
+          layout.
+        </p>
+      ) : (
+        <div className="canvas-interaction-frame-list">
+          {frames.map((frame) => {
+            const active = props.activeFrame === frame.frame;
+            const editing = props.editingFrame === frame.frame;
+            const holdMs = frame.holdMs ?? 900;
+            return (
+              <article
+                className={`canvas-interaction-frame-row ${
+                  active || editing ? "active" : ""
+                }`}
+                key={frame.id}
+              >
+                <div className="canvas-interaction-frame-title">
+                  <strong>Frame {frame.frame}</strong>
+                  <span>
+                    {frame.affected.length} affected item
+                    {frame.affected.length === 1 ? "" : "s"}
+                  </span>
+                </div>
+                <div className="canvas-interaction-frame-actions">
+                  {active ? (
+                    <button
+                      data-testid="canvas-frame-stop"
+                      onClick={props.onStopFrame}
+                      type="button"
+                    >
+                      <StopCircle size={13} />
+                      Stop
+                    </button>
+                  ) : (
+                    <button
+                      disabled={props.readOnly || Boolean(props.editingFrame)}
+                      data-testid="canvas-frame-play"
+                      onClick={() =>
+                        props.preview &&
+                        props.onPlayFrame(props.preview, frame.frame)
+                      }
+                      type="button"
+                    >
+                      <Play size={13} />
+                      Play
+                    </button>
+                  )}
+                  <button
+                    disabled={props.readOnly || Boolean(props.editingFrame)}
+                    data-testid="canvas-frame-edit"
+                    onClick={() => props.onEditFrame(frame.frame)}
+                    type="button"
+                  >
+                    <Pencil size={13} />
+                    Edit
+                  </button>
+                  <button
+                    disabled={props.readOnly || Boolean(props.editingFrame)}
+                    onClick={() =>
+                      props.preview &&
+                      props.onDeleteFrame(props.preview, frame.frame)
+                    }
+                    type="button"
+                  >
+                    <Trash2 size={13} />
+                  </button>
+                </div>
+                <label className="canvas-interaction-toggle">
+                  <input
+                    checked={frame.sticky}
+                    disabled={props.readOnly || Boolean(props.editingFrame)}
+                    onChange={(event) =>
+                      props.preview &&
+                      props.onUpdateFrame(props.preview, frame.frame, {
+                        sticky: event.target.checked,
+                        holdMs: event.target.checked ? null : holdMs,
+                      })
+                    }
+                    type="checkbox"
+                  />
+                  <span>Sticky until Stop</span>
+                </label>
+                {!frame.sticky && (
+                  <label className="canvas-interaction-hold">
+                    <span>Hold ms</span>
+                    <input
+                      disabled={props.readOnly || Boolean(props.editingFrame)}
+                      min={150}
+                      step={50}
+                      type="number"
+                      value={holdMs}
+                      onChange={(event) => {
+                        const value = Number(event.target.value);
+                        if (!Number.isFinite(value) || !props.preview) return;
+                        props.onUpdateFrame(props.preview, frame.frame, {
+                          holdMs: Math.max(150, Math.round(value)),
+                        });
+                      }}
+                    />
+                  </label>
+                )}
+              </article>
+            );
+          })}
+        </div>
+      )}
+      {canAddFrame && (
+        <button
+          className="canvas-interaction-add"
+          data-testid="canvas-frame-add"
+          onClick={props.onAddFrame}
+          type="button"
+        >
+          <Plus size={13} />
+          Add frame {nextFrameNumber}
+        </button>
+      )}
+    </section>
+  );
+}
+
 function CanvasDetails(props: {
+  frameEditing: boolean;
   item: CanvasItem;
   readOnly: boolean;
   onChangeState: (state: CanvasItemState) => void;
   onApplyPosition: () => void;
   onUpdate: (patch: Partial<CanvasItem>) => void;
 }) {
-  const locked = props.item.locked || props.readOnly;
+  const locked = (props.item.locked && !props.frameEditing) || props.readOnly;
+  const metadataLocked = locked || props.frameEditing;
   return (
     <div className="canvas-detail-form">
       <label>
         <span>Name</span>
         <input
-          disabled={locked}
+          disabled={metadataLocked}
           maxLength={TITLE_MAX_LENGTH}
           value={props.item.title}
           onChange={(event) =>
@@ -1952,7 +2699,7 @@ function CanvasDetails(props: {
       <label>
         <span>{detailBodyLabel(props.item.kind)}</span>
         <textarea
-          disabled={locked || props.item.kind === "divider"}
+          disabled={metadataLocked || props.item.kind === "divider"}
           maxLength={BODY_MAX_LENGTH}
           rows={1}
           value={props.item.body}
@@ -1964,7 +2711,7 @@ function CanvasDetails(props: {
       <label>
         <span>Note for Codex</span>
         <textarea
-          disabled={locked}
+          disabled={metadataLocked}
           maxLength={COMMENT_MAX_LENGTH}
           rows={1}
           value={props.item.comment}
@@ -1982,7 +2729,7 @@ function CanvasDetails(props: {
             <button
               aria-label={stateLabel(state)}
               className={props.item.state === state ? "active" : ""}
-              disabled={props.readOnly}
+              disabled={props.readOnly || props.frameEditing}
               key={state}
               onClick={() => props.onChangeState(state)}
               title={stateHelp(state)}
@@ -2023,7 +2770,12 @@ function CanvasDetails(props: {
           }
         />
       </div>
-      {hasOriginalGeometry(props.item) && (
+      {props.frameEditing && (
+        <p className="canvas-detail-meta">
+          Frame draft - position and visibility edits save to this interaction only.
+        </p>
+      )}
+      {hasOriginalGeometry(props.item) && !props.frameEditing && (
         <div className="canvas-placement-actions">
           <button
             disabled={props.readOnly}
@@ -2049,6 +2801,7 @@ function CanvasDetails(props: {
 }
 
 function CanvasGroupDetails(props: {
+  frameEditing: boolean;
   group: CanvasGroup;
   hasMovedItems: boolean;
   readOnly: boolean;
@@ -2063,7 +2816,7 @@ function CanvasGroupDetails(props: {
       <label>
         <span>Name</span>
         <input
-          disabled={props.readOnly}
+          disabled={props.readOnly || props.frameEditing}
           maxLength={TITLE_MAX_LENGTH}
           value={props.group.title}
           onChange={(event) =>
@@ -2078,7 +2831,7 @@ function CanvasGroupDetails(props: {
             <button
               aria-label={stateLabel(state)}
               className={props.group.state === state ? "active" : ""}
-              disabled={props.readOnly}
+              disabled={props.readOnly || props.frameEditing}
               key={state}
               onClick={() => props.onChangeState(state)}
               title={stateHelp(state)}
@@ -2091,14 +2844,19 @@ function CanvasGroupDetails(props: {
       </div>
       <button
         className="canvas-group-lock"
-        disabled={props.readOnly}
+        disabled={props.readOnly || props.frameEditing}
         onClick={props.onToggleLock}
         type="button"
       >
         <LockBadge locked={props.group.locked} compact />
         {props.group.locked ? "Unlock group" : "Lock group"}
       </button>
-      {props.hasMovedItems && (
+      {props.frameEditing && (
+        <p className="canvas-detail-meta">
+          Frame draft - group moves are saved as child item deltas.
+        </p>
+      )}
+      {props.hasMovedItems && !props.frameEditing && (
         <div className="canvas-placement-actions">
           <button
             disabled={props.readOnly}
@@ -2165,6 +2923,7 @@ const CanvasContextMenu = forwardRef<
   HTMLDivElement,
   {
     canGroup: boolean;
+    canPaste: boolean;
     groupBlockLabel: string | null;
     canUngroup: boolean;
     group: CanvasGroup | null;
@@ -2176,6 +2935,8 @@ const CanvasContextMenu = forwardRef<
     onBringToFront: (item: CanvasItem) => void;
     onChangeState: (item: CanvasItem, state: CanvasItemState) => void;
     onClose: () => void;
+    onCopy: (item: CanvasItem) => void;
+    onCut: (item: CanvasItem) => void;
     onDelete: (item: CanvasItem) => void;
     onDuplicate: (item: CanvasItem) => void;
     groupMoved: boolean;
@@ -2184,6 +2945,7 @@ const CanvasContextMenu = forwardRef<
     onGroupResetPosition: (group: CanvasGroup) => void;
     onGroupSelection: () => void;
     onGroupToggleLock: (group: CanvasGroup) => void;
+    onPaste: () => void;
     onResetPosition: (item: CanvasItem) => void;
     onSendToBack: (item: CanvasItem) => void;
     onToggleLock: (item: CanvasItem) => void;
@@ -2228,6 +2990,19 @@ const CanvasContextMenu = forwardRef<
         >
           Add text
         </button>
+        {props.canPaste && (
+          <>
+            <hr />
+            <button
+              disabled={props.readOnly}
+              onClick={props.onPaste}
+              role="menuitem"
+              type="button"
+            >
+              Paste
+            </button>
+          </>
+        )}
       </div>
     );
   }
@@ -2239,6 +3014,22 @@ const CanvasContextMenu = forwardRef<
     const group = props.group;
     return (
       <div className="canvas-context-menu" ref={ref} role="menu" style={style}>
+        <button
+          onClick={() => props.onCopy(item)}
+          role="menuitem"
+          type="button"
+        >
+          Copy
+        </button>
+        <button
+          disabled={props.readOnly}
+          onClick={() => props.onCut(item)}
+          role="menuitem"
+          type="button"
+        >
+          Cut
+        </button>
+        <hr />
         <button
           disabled={props.readOnly}
           onClick={() => props.onGroupToggleLock(group)}
@@ -2338,6 +3129,21 @@ const CanvasContextMenu = forwardRef<
       >
         Duplicate
       </button>
+      <button
+        onClick={() => props.onCopy(item)}
+        role="menuitem"
+        type="button"
+      >
+        Copy
+      </button>
+      <button
+        disabled={props.readOnly}
+        onClick={() => props.onCut(item)}
+        role="menuitem"
+        type="button"
+      >
+        Cut
+      </button>
       {props.canGroup && (
         <button
           disabled={props.readOnly}
@@ -2431,9 +3237,6 @@ const CanvasContextMenu = forwardRef<
 });
 
 function scopeItems(canvas: ProjectCanvas) {
-  if (canvas.mode === "backend") {
-    return canvas.items.filter((item) => item.pageId === null);
-  }
   return canvas.items.filter(
     (item) =>
       item.pageId === canvas.activePageId &&
@@ -2447,9 +3250,6 @@ function itemScope(canvas: ProjectCanvas): {
   subPageId: string | null;
   device: CanvasDevice | null;
 } {
-  if (canvas.mode === "backend") {
-    return { pageId: null, subPageId: null, device: null };
-  }
   return {
     pageId: canvas.activePageId,
     subPageId: canvas.activeSubPageId,
@@ -2905,7 +3705,7 @@ function previousZIndex(items: CanvasItem[]) {
 
 function contextMenuPosition(clientX: number, clientY: number) {
   const width = 190;
-  const height = 310;
+  const height = 350;
   return {
     x: Math.max(8, Math.min(clientX, window.innerWidth - width)),
     y: Math.max(8, Math.min(clientY, window.innerHeight - height)),
@@ -3007,7 +3807,10 @@ function layerRank(item: CanvasItem) {
 }
 
 function isCompactItem(item: CanvasItem) {
-  return item.kind === "button" || item.width < 120 || item.height < 56;
+  return (
+    item.kind === "button" ||
+    (item.kind !== "container" && (item.width < 120 || item.height < 56))
+  );
 }
 
 function compactItemLabel(item: CanvasItem) {

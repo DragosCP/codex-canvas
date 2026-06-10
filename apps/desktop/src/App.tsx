@@ -8,6 +8,11 @@ import {
   useRef,
   useState,
 } from "react";
+import {
+  AuthDialog,
+  closedAuthDialogState,
+  type AuthDialogState,
+} from "./components/AuthDialog";
 import { CanvasSuggestionReview, ChatThread } from "./components/ChatThread";
 import { Composer } from "./components/Composer";
 import { Inspector } from "./components/Inspector";
@@ -33,6 +38,7 @@ import {
   CANVAS_PROPOSAL_PARSER_VERSION,
   applyCanvasProposalText,
   finalizeAcceptedCanvasProposal,
+  mergeAcceptedCanvasProposal,
 } from "./canvasProposal";
 import { useAppServerConnection } from "./hooks/useAppServerConnection";
 import { useAppServerEvents } from "./hooks/useAppServerEvents";
@@ -50,15 +56,28 @@ import {
   loadDesktopState,
   saveDesktopState,
 } from "./localState";
-import { runtimeInfo, sameRuntimePath } from "./runtime";
+import {
+  loadRuntimeInfo,
+  normalizeProjectPathForRuntime,
+  runtimeInfo,
+  sameRuntimePath,
+} from "./runtime";
+import { desktopInvoke } from "./desktopBridge";
+import {
+  createPlanPreviewSpec,
+  planPreviewDecisionSummary,
+  shouldOfferPlanPreview,
+} from "./planPreview";
 import type {
   AppServerSnapshot,
+  BackendMode,
   CanvasBounds,
   CanvasGroup,
   CanvasItem,
   CanvasPage,
   CanvasSuggestion,
   ComposerAttachment,
+  ComposerAppPreviewContext,
   ComposerCanvasContext,
   ComposerCanvasContextOption,
   ComposerContextReference,
@@ -67,6 +86,7 @@ import type {
   LocalChatDraft,
   PendingApproval,
   PlanCanvasStatus,
+  PlanPreviewAreaMark,
   PlanProposal,
   Project,
   ProjectCanvas,
@@ -78,6 +98,8 @@ import type {
   ThreadTokenUsageMap,
   Turn,
 } from "./types";
+import type { AccountLoginCompletedNotification } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/AccountLoginCompletedNotification";
+import type { LoginAccountResponse } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/LoginAccountResponse";
 
 type SubmissionDraft = {
   prompt: string;
@@ -96,30 +118,28 @@ type ProjectThreadGroup = {
   draft: LocalChatDraft | null;
 };
 
-type TauriWindow = Window & {
-  __TAURI__?: {
-    core?: {
-      invoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-    };
-  };
-};
-
 const SIDEBAR_DRAWER_WIDTH = 700;
 const INSPECTOR_AUTO_COLLAPSE_WIDTH = 660;
 const INSPECTOR_MIN_WIDTH = 320;
-const CHAT_MIN_WIDTH = 360;
+const CHAT_COMFORT_WIDTH = 520;
 const CHAT_PHONE_LAYOUT_WIDTH = 460;
 const INSPECTOR_AUTO_COLLAPSE_QUERY = `(max-width: ${INSPECTOR_AUTO_COLLAPSE_WIDTH}px)`;
+const TURN_SETTLE_POLL_INTERVAL_MS = 1500;
+const TURN_SETTLE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
 export function App() {
   const [desktop, setDesktop] = useState<DesktopState>(() =>
     loadDesktopState(),
   );
+  const [runtime, setRuntime] = useState(runtimeInfo);
   const [threads, setThreads] = useState<ThreadMap>({});
   const [tokenUsageByThread, setTokenUsageByThread] =
     useState<ThreadTokenUsageMap>({});
   const [pendingApprovals, setPendingApprovals] = useState<PendingApproval[]>(
     [],
+  );
+  const [authDialog, setAuthDialog] = useState<AuthDialogState>(() =>
+    closedAuthDialogState(),
   );
   const [inspector, setInspector] = useState<InspectorSelection>({
     type: "empty",
@@ -131,6 +151,9 @@ export function App() {
     null,
   );
   const [composerText, setComposerText] = useState("");
+  const [planProposalFeedbackDrafts, setPlanProposalFeedbackDrafts] = useState<
+    Record<string, string>
+  >({});
   const [attachments, setAttachments] = useState<ComposerAttachment[]>([]);
   const [composerContexts, setComposerContexts] = useState<
     ComposerContextReference[]
@@ -138,6 +161,7 @@ export function App() {
   const [projectPath, setProjectPath] = useState("");
   const [threadSearch, setThreadSearch] = useState("");
   const [runningTurnId, setRunningTurnId] = useState<string | null>(null);
+  const [sendStarting, setSendStarting] = useState(false);
   const [sendError, setSendError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<SubmissionDraft | null>(null);
@@ -155,14 +179,44 @@ export function App() {
   );
   const threadsRef = useRef<ThreadMap>({});
   const runningTurnIdRef = useRef<string | null>(null);
+  const sendStartingRef = useRef(false);
   const activeThreadIdRef = useRef<string | null>(null);
   const threadSelectionVersionRef = useRef(0);
   const justStartedThreadIdRef = useRef<string | null>(null);
   const turnPollsRef = useRef<Set<string>>(new Set());
   const inFlightDraftsRef = useRef<Map<string, SubmissionDraft>>(new Map());
   const inspectorRetargetThreadIdRef = useRef<string | null>(null);
-  const planModeOpenedCanvasProjectIdRef = useRef<string | null>(null);
   const desktopRef = useRef(desktop);
+
+  useEffect(() => {
+    let cancelled = false;
+    void loadRuntimeInfo().then((resolved) => {
+      if (cancelled) return;
+      setRuntime(resolved);
+      setDesktop((current) => {
+        let changed = current.appServerUrl !== resolved.appServerUrl;
+        const projects = current.projects.map((project) => {
+          const path = normalizeProjectPathForRuntime(
+            project.path,
+            resolved.backendMode,
+          );
+          if (path === project.path) return project;
+          changed = true;
+          return { ...project, path };
+        });
+        if (!changed) return current;
+        return {
+          ...current,
+          appServerUrl: resolved.appServerUrl,
+          projects,
+          activeThreadId: null,
+        };
+      });
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, []);
 
   const activeProject = useMemo(
     () =>
@@ -173,21 +227,26 @@ export function App() {
   );
   const activeCanvasProjectId =
     inspector.type === "canvas" ||
+    inspector.type === "appPreview" ||
     inspector.type === "canvasProposal" ||
-    inspector.type === "canvasSuggestion"
+    inspector.type === "canvasSuggestion" ||
+    inspector.type === "planPreview"
       ? inspector.projectId
       : null;
   const sidebarDockedWidth = sidebarWidthForShell(shellWidth);
+  const inspectorWidth = desktop.layout.inspectorOpen
+    ? desktop.layout.inspectorWidth
+    : 0;
+  const dockedChatWidth = Math.max(
+    0,
+    shellWidth - sidebarDockedWidth - inspectorWidth,
+  );
   const sidebarDrawerMode =
     shellWidth <= SIDEBAR_DRAWER_WIDTH ||
-    (desktop.layout.inspectorOpen &&
-      shellWidth - sidebarDockedWidth - desktop.layout.inspectorWidth <
-        CHAT_MIN_WIDTH);
+    dockedChatWidth <= CHAT_COMFORT_WIDTH;
   const availableChatWidth = Math.max(
     0,
-    shellWidth -
-      (sidebarDrawerMode ? 0 : sidebarDockedWidth) -
-      (desktop.layout.inspectorOpen ? desktop.layout.inspectorWidth : 0),
+    shellWidth - (sidebarDrawerMode ? 0 : sidebarDockedWidth) - inspectorWidth,
   );
   const chatPhoneLayout = availableChatWidth <= CHAT_PHONE_LAYOUT_WIDTH;
   const visibleProjects = useMemo(
@@ -206,7 +265,9 @@ export function App() {
     ? [...activeThread.turns]
         .reverse()
         .map((turn) => desktop.canvasSuggestions[turn.id])
-        .find((suggestion) => suggestion?.status === "pending") ?? null
+        .find((suggestion) =>
+          suggestion ? shouldSurfaceCanvasDraft(suggestion) : false,
+        ) ?? null
     : null;
   const activeDraft = activeDraftProjectId
     ? (chatDrafts[activeDraftProjectId] ?? null)
@@ -230,7 +291,9 @@ export function App() {
   function sortThreadsForProject(project: Project) {
     const pinned = new Set(desktop.pinnedThreadIds);
     return Object.values(threads)
-      .filter((thread) => sameRuntimePath(thread.cwd, project.path))
+      .filter((thread) =>
+        sameRuntimePath(thread.cwd, project.path, runtime.backendMode),
+      )
       .sort(
         (a, b) =>
           Number(pinned.has(b.id)) - Number(pinned.has(a.id)) ||
@@ -339,17 +402,69 @@ export function App() {
   } = useAppServerConnection({
     appServerUrl: desktop.appServerUrl,
     activeProjectPath: activeProject?.path ?? null,
-    autoConnect: runtimeInfo.autoConnect,
+    autoConnect: runtime.autoConnect,
     onNotification: handleNotification,
     onServerRequest: handleServerRequest,
   });
+
+  useEffect(() => {
+    const offNotification = client.onNotification((message) => {
+      if (message.method === "account/updated") {
+        void refreshSettings(activeProject?.path ?? null);
+        return;
+      }
+
+      if (message.method !== "account/login/completed") return;
+      const params =
+        message.params as AccountLoginCompletedNotification | undefined;
+      if (!params) return;
+      void refreshSettings(activeProject?.path ?? null);
+      setAuthDialog((current) => {
+        if (!current.open) return current;
+        if (params.loginId && current.loginId !== params.loginId) {
+          return current;
+        }
+        if (params.success) {
+          return {
+            ...current,
+            phase: "success",
+            loginId: null,
+            authUrl: null,
+            verificationUrl: null,
+            userCode: null,
+            apiKey: "",
+            error: null,
+          };
+        }
+        return {
+          ...current,
+          phase: "choose",
+          loginId: null,
+          authUrl: null,
+          verificationUrl: null,
+          userCode: null,
+          apiKey: "",
+          error: params.error ?? "Codex login did not complete.",
+        };
+      });
+    });
+    return () => {
+      offNotification();
+    };
+  }, [activeProject?.path, client, refreshSettings]);
+
   const { documentText, documentError } = useDocumentPreview(client, inspector);
+  const missingOpenAiAuth = Boolean(
+    snapshot.account?.requiresOpenaiAuth && !snapshot.account.account,
+  );
   const sendDisabledReason = sendBlockReason({
     activeProject,
     connectionStatus,
+    missingOpenAiAuth,
     hasUnsupportedAttachments: unsupportedAttachments(attachments).length > 0,
     pendingApprovals,
     promptReady,
+    sendStarting,
     runningTurnId,
   });
 
@@ -374,7 +489,10 @@ export function App() {
       }
       setThreads((current) => ({
         ...current,
-        [response.thread.id]: response.thread,
+        [response.thread.id]: mergeThreadWithLocalFailureState(
+          response.thread,
+          current[response.thread.id],
+        ),
       }));
       return response.thread;
     },
@@ -401,7 +519,7 @@ export function App() {
           if (cwd) {
             for (const [threadId, thread] of Object.entries(next)) {
               if (
-                sameRuntimePath(thread.cwd, cwd) &&
+                sameRuntimePath(thread.cwd, cwd, runtime.backendMode) &&
                 !listedIds.has(threadId)
               ) {
                 delete next[threadId];
@@ -422,7 +540,7 @@ export function App() {
           const project = current.projects.find(
             (item) =>
               item.id === current.activeProjectId &&
-              sameRuntimePath(item.path, cwd),
+              sameRuntimePath(item.path, cwd, runtime.backendMode),
           );
           if (!project) return current;
           if (activeDraftProjectId === project.id) return current;
@@ -432,6 +550,7 @@ export function App() {
               threadsRef.current,
               justStartedThreadIdRef.current,
               cwd,
+              runtime.backendMode,
             )
               ? justStartedThreadIdRef.current
               : activeThreadIdRef.current &&
@@ -439,13 +558,19 @@ export function App() {
                     threadsRef.current,
                     activeThreadIdRef.current,
                     cwd,
+                    runtime.backendMode,
                   )
                 ? activeThreadIdRef.current
               : null;
           const activeStillExists =
             current.activeThreadId !== null &&
             (listedIds.has(current.activeThreadId) ||
-              isKnownThreadForCwd(threadsRef.current, current.activeThreadId, cwd));
+              isKnownThreadForCwd(
+                threadsRef.current,
+                current.activeThreadId,
+                cwd,
+                runtime.backendMode,
+              ));
           const lastStillExists =
             project.lastActiveThreadId !== null &&
             (listedIds.has(project.lastActiveThreadId) ||
@@ -453,11 +578,17 @@ export function App() {
                 threadsRef.current,
                 project.lastActiveThreadId,
                 cwd,
+                runtime.backendMode,
               ));
           const nextThreadId =
             (runningTurnIdRef.current &&
             current.activeThreadId &&
-            isKnownThreadForCwd(threadsRef.current, current.activeThreadId, cwd)
+            isKnownThreadForCwd(
+              threadsRef.current,
+              current.activeThreadId,
+              cwd,
+              runtime.backendMode,
+            )
               ? current.activeThreadId
               : null) ??
             preferredActiveThreadId ??
@@ -489,7 +620,7 @@ export function App() {
         return [];
       }
     },
-    [activeDraftProjectId, client],
+    [activeDraftProjectId, client, runtime.backendMode],
   );
 
   useEffect(() => {
@@ -603,10 +734,13 @@ export function App() {
 
   useEffect(() => {
     setInspector((current) => {
-      if (current.type !== "canvas") return current;
+      if (current.type !== "canvas" && current.type !== "appPreview") {
+        return current;
+      }
       if (!desktop.activeProjectId) return { type: "empty" };
-      return current.projectId === desktop.activeProjectId
-        ? current
+      if (current.projectId === desktop.activeProjectId) return current;
+      return current.type === "appPreview"
+        ? { type: "appPreview", projectId: desktop.activeProjectId }
         : { type: "canvas", projectId: desktop.activeProjectId };
     });
   }, [desktop.activeProjectId]);
@@ -629,7 +763,13 @@ export function App() {
     if (desktop.activeThreadId && !activeThread) return;
     if (activeThread?.status.type === "notLoaded") return;
     setInspector((current) => {
-      if (current.type === "canvas" || current.type === "canvasProposal") {
+      if (
+        current.type === "canvas" ||
+        current.type === "appPreview" ||
+        current.type === "canvasProposal" ||
+        current.type === "canvasSuggestion" ||
+        current.type === "planPreview"
+      ) {
         return current;
       }
       return sameInspectorSelection(current, defaultInspectorSelection)
@@ -655,6 +795,9 @@ export function App() {
       inspector.type === "canvasProposal"
         ? desktop.planProposals[inspector.proposalTurnId]
         : desktop.canvasSuggestions[inspector.suggestionTurnId];
+    if (inspector.type === "canvasProposal" && record?.canvasProposalSnapshot) {
+      return;
+    }
     if (record?.status === "pending" && record.canvasProposalSnapshot) return;
     inspectorRetargetThreadIdRef.current = null;
     setInspector({ type: "empty" });
@@ -730,6 +873,7 @@ export function App() {
               threadsRef.current,
               activeThreadIdAtRefreshStart,
               activeProject.path,
+              runtime.backendMode,
             ));
         const lastThreadStillExists =
           activeProject.lastActiveThreadId !== null &&
@@ -746,6 +890,7 @@ export function App() {
             threadsRef.current,
             justStartedThreadIdRef.current,
             activeProject.path,
+            runtime.backendMode,
           )
         ) {
           return;
@@ -766,7 +911,7 @@ export function App() {
     }
   }, [activeDraftProjectId, activeProject?.id, activeProject?.path, connectionStatus, refreshThreads, visibleProjects]);
 
-  function handleTurnCompleted(_threadId: string, turn: Turn) {
+  function handleTurnCompleted(threadId: string, turn: Turn) {
     capturePlanCanvasProposal(turn);
     captureCanvasSuggestion(turn);
     const draft = inFlightDraftsRef.current.get(turn.id);
@@ -892,6 +1037,19 @@ export function App() {
     }));
   }
 
+  function setCanvasLayersOpen(projectId: string, open: boolean) {
+    setDesktop((current) => ({
+      ...current,
+      layout: {
+        ...current.layout,
+        canvasLayersOpenByProject: {
+          ...current.layout.canvasLayersOpenByProject,
+          [projectId]: open,
+        },
+      },
+    }));
+  }
+
   function selectProjectCanvas(
     project = activeProject,
     focusReference: string | null = null,
@@ -931,37 +1089,76 @@ export function App() {
   }
 
   function toggleProjectCanvas(project = activeProject) {
-    if (
+    const activeDraftCanvas =
       project &&
       desktop.layout.inspectorOpen &&
+      (inspector.type === "canvasProposal" ||
+        inspector.type === "canvasSuggestion") &&
+      inspector.projectId === project.id;
+    if (
+      activeDraftCanvas ||
+      (project &&
+      desktop.layout.inspectorOpen &&
       inspector.type === "canvas" &&
-      inspector.projectId === project.id
+        inspector.projectId === project.id)
     ) {
-      planModeOpenedCanvasProjectIdRef.current = null;
       closeInspectorPanel();
       return;
     }
-    planModeOpenedCanvasProjectIdRef.current = null;
     selectProjectCanvas(project);
+  }
+
+  function selectAppPreview(project = activeProject) {
+    if (!project) {
+      setActionError("Add or select a local project before opening App Preview.");
+      return;
+    }
+    setActionError(null);
+    setSendError(null);
+    setRetryDraft(null);
+    setInspector({
+      type: "appPreview",
+      projectId: project.id,
+    });
+    inspectorRetargetThreadIdRef.current = "canvas";
+    setDesktop((current) => ({
+      ...current,
+      activeProjectId: project.id,
+      layout: {
+        ...current.layout,
+        inspectorOpen: true,
+        inspectorWidth: Math.max(current.layout.inspectorWidth, 680),
+      },
+    }));
+  }
+
+  function toggleAppPreview(project = activeProject) {
+    if (
+      project &&
+      desktop.layout.inspectorOpen &&
+      inspector.type === "appPreview" &&
+      inspector.projectId === project.id
+    ) {
+      closeInspectorPanel();
+      return;
+    }
+    selectAppPreview(project);
   }
 
   function selectPlanProposalCanvas(
     proposal: PlanProposal,
     focusReference: string | null = null,
   ) {
+    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
     const project = desktop.projects.find(
-      (candidate) => candidate.id === proposal.projectId,
+      (candidate) => candidate.id === latestProposal.projectId,
     );
     if (!project) {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
-    if (!proposal.canvasProposalSnapshot) {
+    if (!latestProposal.canvasProposalSnapshot) {
       setSendError("That plan does not have a Canvas proposal to open.");
-      return;
-    }
-    if (proposal.status !== "pending") {
-      setSendError("That plan proposal is no longer active.");
       return;
     }
     const preferredWidth = preferredCanvasInspectorWidth();
@@ -971,21 +1168,106 @@ export function App() {
     setInspector({
       type: "canvasProposal",
       projectId: project.id,
-      proposalTurnId: proposal.turnId,
+      proposalTurnId: latestProposal.turnId,
       focusReference,
       focusRequestId: Date.now(),
+      readOnly: latestProposal.status !== "pending",
+    });
+    inspectorRetargetThreadIdRef.current = "canvas";
+    setDesktop((current) => {
+      return {
+        ...current,
+        activeProjectId: project.id,
+        activeThreadId: latestProposal.threadId,
+        layout: {
+          ...current.layout,
+          inspectorOpen: true,
+          inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
+        },
+      };
+    });
+  }
+
+  function showPlanUiImpact(proposal: PlanProposal) {
+    selectPlanProposalPreview(proposal);
+  }
+
+  function selectPlanProposalPreview(proposal: PlanProposal) {
+    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === latestProposal.projectId,
+    );
+    if (!project) {
+      setSendError("That plan belongs to a project that is no longer available.");
+      return;
+    }
+    if (!latestProposal.previewSpec) {
+      setSendError("That plan does not have a live app preview.");
+      return;
+    }
+    setActionError(null);
+    setSendError(null);
+    setRetryDraft(null);
+    setInspector({
+      type: "planPreview",
+      projectId: project.id,
+      proposalTurnId: latestProposal.turnId,
     });
     inspectorRetargetThreadIdRef.current = "canvas";
     setDesktop((current) => ({
       ...current,
       activeProjectId: project.id,
-      activeThreadId: proposal.threadId,
+      activeThreadId: latestProposal.threadId,
       layout: {
         ...current.layout,
         inspectorOpen: true,
-        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
+        inspectorWidth: Math.max(current.layout.inspectorWidth, 680),
       },
     }));
+  }
+
+  function updatePlanPreviewVariant(proposalTurnId: string, variantId: string) {
+    setDesktop((current) => {
+      const proposal = current.planProposals[proposalTurnId];
+      if (!proposal?.previewSpec) return current;
+      if (!proposal.previewSpec.variants.some((variant) => variant.id === variantId)) {
+        return current;
+      }
+      return {
+        ...current,
+        planProposals: {
+          ...current.planProposals,
+          [proposalTurnId]: {
+            ...proposal,
+            previewSelectedVariantId: variantId,
+            previewUserEditedAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
+  }
+
+  function updatePlanPreviewAreaMark(
+    proposalTurnId: string,
+    areaMark: PlanPreviewAreaMark | null,
+  ) {
+    setDesktop((current) => {
+      const proposal = current.planProposals[proposalTurnId];
+      if (!proposal) return current;
+      return {
+        ...current,
+        planProposals: {
+          ...current.planProposals,
+          [proposalTurnId]: {
+            ...proposal,
+            previewAreaMark: areaMark,
+            previewUserEditedAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
   }
 
   function selectCanvasSuggestionCanvas(
@@ -996,15 +1278,15 @@ export function App() {
       (candidate) => candidate.id === suggestion.projectId,
     );
     if (!project) {
-      setSendError("That Canvas suggestion belongs to a project that is no longer available.");
+      setSendError("That Canvas draft belongs to a project that is no longer available.");
       return;
     }
     if (!suggestion.canvasProposalSnapshot) {
-      setSendError("That response does not have a Canvas suggestion to open.");
+      setSendError("That response does not have a Canvas draft to open.");
       return;
     }
     if (suggestion.status !== "pending") {
-      setSendError("That Canvas suggestion is no longer active.");
+      setSendError("That Canvas draft is no longer active.");
       return;
     }
     const preferredWidth = preferredCanvasInspectorWidth();
@@ -1053,6 +1335,10 @@ export function App() {
         projectId: suggestion.projectId,
         updatedAt: Date.now(),
       });
+      const contentChanged = canvasDraftContentChanged(
+        suggestion.canvasProposalSnapshot,
+        nextCanvas,
+      );
       const nextParseStatus =
         suggestion.canvasProposalParseStatus === "none" ||
         suggestion.canvasProposalParseStatus === "pending"
@@ -1064,12 +1350,20 @@ export function App() {
           ...current.canvasSuggestions,
           [suggestionTurnId]: {
             ...suggestion,
+            canvasDraftBaseSnapshot: contentChanged
+              ? suggestion.canvasDraftBaseSnapshot ??
+                suggestion.canvasProposalSnapshot ??
+                null
+              : suggestion.canvasDraftBaseSnapshot,
             canvasProposalSnapshot: nextCanvas,
             canvasProposalParseStatus: nextParseStatus,
+            canvasUserEditedAt: contentChanged
+              ? Date.now()
+              : suggestion.canvasUserEditedAt,
             canvasProposalSummary:
-              suggestion.canvasProposalChangeCount > 0
+              !contentChanged || suggestion.canvasProposalChangeCount > 0
                 ? suggestion.canvasProposalSummary
-                : "Canvas suggestion edited manually.",
+                : "Canvas draft edited manually.",
             updatedAt: Date.now(),
           },
         },
@@ -1086,6 +1380,10 @@ export function App() {
         projectId: proposal.projectId,
         updatedAt: Date.now(),
       });
+      const contentChanged = canvasDraftContentChanged(
+        proposal.canvasProposalSnapshot,
+        nextCanvas,
+      );
       const nextParseStatus =
         proposal.canvasProposalParseStatus === "none" ||
         proposal.canvasProposalParseStatus === "pending"
@@ -1097,10 +1395,18 @@ export function App() {
           ...current.planProposals,
           [proposalTurnId]: {
             ...proposal,
+            canvasDraftBaseSnapshot: contentChanged
+              ? proposal.canvasDraftBaseSnapshot ??
+                proposal.canvasProposalSnapshot ??
+                null
+              : proposal.canvasDraftBaseSnapshot,
             canvasProposalSnapshot: nextCanvas,
             canvasProposalParseStatus: nextParseStatus,
+            canvasUserEditedAt: contentChanged
+              ? Date.now()
+              : proposal.canvasUserEditedAt,
             canvasProposalSummary:
-              proposal.canvasProposalChangeCount > 0
+              !contentChanged || proposal.canvasProposalChangeCount > 0
                 ? proposal.canvasProposalSummary
                 : "Canvas proposal edited manually.",
             updatedAt: Date.now(),
@@ -1145,6 +1451,34 @@ export function App() {
     setSendError(null);
   }
 
+  function attachAppPreviewMark(
+    project: Project,
+    areaMark: PlanPreviewAreaMark | null,
+    meta: { previewUrl: string; viewport: "desktop" | "mobile" },
+  ) {
+    setComposerContexts((current) => {
+      const withoutProjectMark = current.filter(
+        (context) =>
+          context.type !== "appPreview" || context.projectId !== project.id,
+      );
+      if (!areaMark) return withoutProjectMark;
+      const nextContext: ComposerAppPreviewContext = {
+        type: "appPreview",
+        id: `app-preview:${project.id}:${areaMark.createdAt}`,
+        projectId: project.id,
+        projectName: project.name,
+        previewUrl: meta.previewUrl,
+        viewport: meta.viewport,
+        areaMark,
+      };
+      return [...withoutProjectMark, nextContext];
+    });
+    if (!desktop.activeThreadId) {
+      setActiveDraftProjectId(project.id);
+    }
+    setSendError(null);
+  }
+
   function removeComposerContext(context: ComposerContextReference) {
     setComposerContexts((current) =>
       current.filter(
@@ -1157,17 +1491,17 @@ export function App() {
 
   function requestCurrentUiMockup(project: Project) {
     const prompt = [
-      "Inspect this local project and generate a low-fidelity current UI Canvas mockup.",
+      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
       "",
-      "Focus on UI that exists today. Do not design future UI and do not edit files.",
+      "Focus on interface screens that exist today. Do not design future screens and do not edit files.",
       "",
       "Return a short summary, then a parseable fenced ```canvas-proposal block. Use one line per visible UI piece, using create lines with state=current. Prefer grid coordinates when estimating placement.",
       "Use one Canvas page per distinct route or workflow. Use subPage when one route has meaningfully different states, such as empty chat, active chat, inspector open, auth OTP, onboarding, or settings tabs. Keep coordinates local to that sub-page.",
       "Use a compact screen-sketch grid for each subPage: x=0..36 and y=0..24. Keep important UI pieces readable inside that frame. Most panels should be 4..14 grid units wide, not page-sized.",
       "Do not create giant workspace/background/page-shell containers. The Canvas page and subPage already represent the screen frame. Output only visible UI pieces the user should review.",
       "",
-      'Example: create container title="Main chat" state=current page="Page 1" grid=2,2,12,18 label="Current chat area" noteForCodex="Existing primary conversation surface."',
-      'Example: create container title="Active chat" state=current page="Page 1" subPage="Active" grid=2,2,12,18 label="Thread with messages"',
+      'Example: create container title="Main chat" state=current page="Page 1" grid=2,2,12,18 description="Current chat area" noteForCodex="Existing primary conversation surface."',
+      'Example: create container title="Active chat" state=current page="Page 1" subPage="Active" grid=2,2,12,18 description="Thread with messages"',
       'Example: create button title="Send" state=current page="Page 1" grid=15,19,1.5,1.5 label="Send"',
       "",
       "Use Page 1, Page 2, etc. unless the project has obvious named screens. Keep the mockup simple and reviewable; omit uncertain internals rather than inventing them.",
@@ -1242,6 +1576,8 @@ export function App() {
     setInspector((current) =>
       current.type === "canvas"
         ? { type: "canvas", projectId: project.id }
+        : current.type === "appPreview"
+          ? { type: "appPreview", projectId: project.id }
         : { type: "empty" },
     );
     setDesktop((current) => ({
@@ -1267,14 +1603,21 @@ export function App() {
       project ??
       desktop.projects.find((candidate) => {
         const loadedThread = threads[threadId];
-        return loadedThread && sameRuntimePath(loadedThread.cwd, candidate.path);
+        return (
+          loadedThread &&
+          sameRuntimePath(loadedThread.cwd, candidate.path, runtime.backendMode)
+        );
       }) ??
       activeProject;
     clearActiveDraftSelection();
     setInspector((current) =>
       current.type === "canvas" && projectForThread
         ? { type: "canvas", projectId: projectForThread.id }
-        : current.type === "canvas"
+        : current.type === "appPreview" && projectForThread
+          ? { type: "appPreview", projectId: projectForThread.id }
+      : current.type === "canvas"
+        ? current
+        : current.type === "appPreview"
           ? current
           : { type: "empty" },
     );
@@ -1480,7 +1823,12 @@ export function App() {
 
   async function sendPrompt(event?: FormEvent) {
     event?.preventDefault();
-    const prompt = composerText.trim();
+    const preparedPrompt = preparePromptCanvasMentions(
+      composerText,
+      composerContexts,
+      canvasContextOptions,
+    );
+    const prompt = preparedPrompt.prompt.trim();
     if (!activeProject) {
       setSendError("Add or select a local project before sending.");
       return;
@@ -1490,7 +1838,7 @@ export function App() {
       projectId: activeProject.id,
       settings: { ...activeProject.settings },
       attachments: [...attachments],
-      contexts: [...composerContexts],
+      contexts: preparedPrompt.contexts,
       createdAt: Date.now(),
       localDraftProjectId:
         activeDraftProjectId === activeProject.id ? activeDraftProjectId : null,
@@ -1518,10 +1866,12 @@ export function App() {
     const blocked = sendBlockReason({
       activeProject: project,
       connectionStatus,
+      missingOpenAiAuth,
       hasUnsupportedAttachments: unsupportedAttachments(draft.attachments).length > 0,
       pendingApprovals,
       promptReady: Boolean(draft.prompt.trim()) || draft.contexts.length > 0,
-      runningTurnId,
+      sendStarting: sendStartingRef.current || sendStarting,
+      runningTurnId: runningTurnIdRef.current ?? runningTurnId,
     });
     if (blocked) {
       setSendError(blocked);
@@ -1534,6 +1884,8 @@ export function App() {
     }
     const sendingLocalDraft =
       draft.localDraftProjectId === project.id && activeDraftProjectId === project.id;
+    sendStartingRef.current = true;
+    setSendStarting(true);
     try {
       setSendError(null);
       if (!options.retry) setRetryDraft(null);
@@ -1556,13 +1908,44 @@ export function App() {
       const userPrompt =
         draft.prompt.trim() || "Use the attached project context.";
       const generatedMockupPrompt = isGeneratedCurrentUiMockupPrompt(userPrompt);
+      const explicitCanvasSuggestion = hasCanvasSuggestionContext(draft.contexts);
+      const autoCanvasSuggestion =
+        !draft.settings.planMode &&
+        !generatedMockupPrompt &&
+        !explicitCanvasSuggestion &&
+        shouldAutoCaptureCanvasSuggestionPrompt(userPrompt);
+      const canvasSuggestionContexts = autoCanvasSuggestion
+        ? [
+            ...draft.contexts,
+            {
+              type: "canvas" as const,
+              projectId: project.id,
+              projectName: project.name,
+              target: { kind: "project" as const },
+            },
+          ]
+        : draft.contexts;
       const planCanvasContext = draft.settings.planMode
-        ? canvasContextForPrompt(draft.contexts, promptDesktop, project, true)
+        ? canvasContextForPrompt(
+            draft.contexts,
+            promptDesktop,
+            project,
+            true,
+            userPrompt,
+          )
         : null;
       const canvasSuggestionContext = !draft.settings.planMode
         ? generatedMockupPrompt
           ? generatedMockupCanvasContext(project)
-          : canvasContextForPrompt(draft.contexts, promptDesktop, project, false)
+          : explicitCanvasSuggestion || autoCanvasSuggestion
+            ? canvasContextForPrompt(
+                canvasSuggestionContexts,
+                promptDesktop,
+                project,
+                false,
+                userPrompt,
+              )
+            : null
         : null;
       const promptedWithCanvas = planCanvasContext
         ? promptWithPlanModeContext(userPrompt, planCanvasContext)
@@ -1570,7 +1953,7 @@ export function App() {
           ? promptWithGeneratedMockupContext(userPrompt)
           : promptWithComposerContexts(
               userPrompt,
-              draft.contexts,
+              canvasSuggestionContexts,
               promptDesktop,
               project,
             );
@@ -1610,6 +1993,9 @@ export function App() {
       });
       if (planCanvasContext) {
         const now = Date.now();
+        const previewSpec = shouldOfferPlanPreview(userPrompt)
+          ? createPlanPreviewSpec(userPrompt)
+          : null;
         const proposal: PlanProposal = {
           id: `plan:${response.turn.id}`,
           projectId: project.id,
@@ -1620,6 +2006,7 @@ export function App() {
           canvasStatus: planCanvasContext.status,
           canvasSummary: planCanvasContext.summary,
           canvasBaseSnapshot: planCanvasContext.snapshot,
+          canvasDraftBaseSnapshot: null,
           canvasProposalSnapshot: planCanvasContext.snapshot,
           canvasProposalParseStatus: planCanvasContext.snapshot
             ? "pending"
@@ -1630,6 +2017,12 @@ export function App() {
             ? "Canvas proposal snapshot waiting for the plan response."
             : "No Canvas snapshot for this plan.",
           canvasProposalErrors: [],
+          canvasUserEditedAt: undefined,
+          previewSpec,
+          previewSelectedVariantId: previewSpec?.variants[0]?.id ?? null,
+          previewAreaMark: null,
+          previewUserEditedAt: undefined,
+          proposalKind: "plan",
           status: "pending",
           createdAt: now,
           updatedAt: now,
@@ -1653,17 +2046,19 @@ export function App() {
           threadId: targetThread.id,
           turnId: response.turn.id,
           prompt: userPrompt,
-          contexts: draft.contexts,
+          contexts: canvasSuggestionContexts,
           canvasStatus: canvasSuggestionContext.status,
           canvasSummary: canvasSuggestionContext.summary,
           canvasBaseSnapshot: canvasSuggestionContext.snapshot,
+          canvasDraftBaseSnapshot: null,
           canvasProposalSnapshot: canvasSuggestionContext.snapshot,
           canvasProposalParseStatus: "pending",
           canvasProposalParserVersion: 0,
           canvasProposalChangeCount: 0,
           canvasProposalSummary:
-            "Canvas suggestion snapshot waiting for the response.",
+            "Canvas draft waiting for the response.",
           canvasProposalErrors: [],
+          canvasUserEditedAt: undefined,
           status: "pending",
           createdAt: now,
           updatedAt: now,
@@ -1676,7 +2071,10 @@ export function App() {
           },
         }));
       }
+      runningTurnIdRef.current = response.turn.id;
       setRunningTurnId(response.turn.id);
+      sendStartingRef.current = false;
+      setSendStarting(false);
       activeThreadIdRef.current = targetThread.id;
       justStartedThreadIdRef.current = targetThread.id;
       if (draft.localDraftProjectId) {
@@ -1735,6 +2133,9 @@ export function App() {
     } catch (error) {
       setRetryDraft(draft);
       setSendError(sendFailureMessage(error));
+      sendStartingRef.current = false;
+      setSendStarting(false);
+      runningTurnIdRef.current = null;
       setRunningTurnId(null);
       justStartedThreadIdRef.current = null;
       return false;
@@ -1752,24 +2153,11 @@ export function App() {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
-    const acceptedCanvas = latestProposal.canvasProposalSnapshot
-      ? finalizeAcceptedCanvasProposal(
-          latestProposal.canvasProposalSnapshot,
-          latestProposal.canvasBaseSnapshot,
-        )
-      : null;
-    const promotedDesktop = acceptedCanvas
-      ? {
-          ...desktop,
-          canvases: {
-            ...desktop.canvases,
-            [project.id]: acceptedCanvas,
-          },
-        }
-      : desktop;
+    const attachedUiEdits = canvasDraftDeltaSummary(latestProposal);
+    const attachedPreview = planPreviewDecisionSummary(latestProposal);
     const accepted = await sendDraft(
       {
-        prompt: "I accept this plan. Implement it now.",
+        prompt: planProposalAcceptPrompt(attachedUiEdits, attachedPreview),
         projectId: project.id,
         settings: {
           ...project.settings,
@@ -1781,22 +2169,21 @@ export function App() {
         localDraftProjectId: null,
         targetThreadId: latestProposal.threadId,
       },
-      { clearComposer: false, desktopOverride: promotedDesktop },
+      { clearComposer: false, desktopOverride: desktop },
     );
     if (!accepted) return;
+    setPlanProposalFeedbackDrafts((current) => {
+      const next = { ...current };
+      delete next[latestProposal.turnId];
+      return next;
+    });
     setDesktop((current) => ({
       ...current,
-      canvases: acceptedCanvas
-        ? {
-            ...current.canvases,
-            [project.id]: acceptedCanvas,
-          }
-        : current.canvases,
       planProposals: updatePlanProposalStatus(
         current.planProposals,
         latestProposal.turnId,
         "accepted",
-        true,
+        false,
       ),
       projects: current.projects.map((candidate) =>
         candidate.id === project.id
@@ -1818,7 +2205,7 @@ export function App() {
     );
   }
 
-  async function modifyPlanProposal(proposal: PlanProposal) {
+  function editPlanProposalDraft(proposal: PlanProposal) {
     const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
     const project = desktop.projects.find(
       (candidate) => candidate.id === latestProposal.projectId,
@@ -1827,14 +2214,63 @@ export function App() {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
-    const revisionSummary = canvasProposalDeltaSummary(
-      latestProposal.canvasBaseSnapshot,
-      latestProposal.canvasProposalSnapshot,
+    if (!latestProposal.canvasProposalSnapshot) {
+      setSendError("That plan does not have a Canvas draft to edit.");
+      return;
+    }
+    setSendError(null);
+    setActionError(null);
+    setRetryDraft(null);
+    const preferredWidth = preferredCanvasInspectorWidth();
+    setInspector((current) =>
+      current.type === "canvasProposal" &&
+      current.proposalTurnId === latestProposal.turnId
+        ? { ...current, readOnly: false, focusRequestId: Date.now() }
+        : {
+            type: "canvasProposal",
+            projectId: project.id,
+            proposalTurnId: latestProposal.turnId,
+            readOnly: false,
+            focusRequestId: Date.now(),
+          },
     );
-    if (revisionSummary) {
+    inspectorRetargetThreadIdRef.current = "canvas";
+    setDesktop((current) => ({
+      ...current,
+      activeProjectId: project.id,
+      activeThreadId: latestProposal.threadId,
+      layout: {
+        ...current.layout,
+        inspectorOpen: true,
+        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
+      },
+    }));
+  }
+
+  async function modifyPlanProposal(proposal: PlanProposal, feedback = "") {
+    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === latestProposal.projectId,
+    );
+    if (!project) {
+      setSendError("That plan belongs to a project that is no longer available.");
+      return;
+    }
+    const revisionSummary = [
+      canvasDraftDeltaSummary(latestProposal),
+      planPreviewDecisionSummary(latestProposal),
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+    const feedbackText = feedback.trim();
+    if (revisionSummary || feedbackText) {
       const sent = await sendDraft(
         {
-          prompt: planProposalRevisionPrompt(latestProposal, revisionSummary),
+          prompt: planProposalRevisionPrompt(
+            latestProposal,
+            revisionSummary,
+            feedbackText,
+          ),
           projectId: project.id,
           settings: {
             ...project.settings,
@@ -1849,6 +2285,11 @@ export function App() {
         { clearComposer: true },
       );
       if (!sent) return;
+      setPlanProposalFeedbackDrafts((current) => {
+        const next = { ...current };
+        delete next[latestProposal.turnId];
+        return next;
+      });
       setDesktop((current) => ({
         ...current,
         planProposals: updatePlanProposalStatus(
@@ -1897,6 +2338,11 @@ export function App() {
           : candidate,
       ),
     }));
+    setPlanProposalFeedbackDrafts((current) => {
+      const next = { ...current };
+      delete next[latestProposal.turnId];
+      return next;
+    });
   }
 
   function declinePlanProposal(proposal: PlanProposal) {
@@ -1925,6 +2371,11 @@ export function App() {
     if (closeProposalInspector) {
       setInspector({ type: "empty" });
     }
+    setPlanProposalFeedbackDrafts((current) => {
+      const next = { ...current };
+      delete next[latestProposal.turnId];
+      return next;
+    });
   }
 
   function applyCanvasSuggestion(suggestion: CanvasSuggestion) {
@@ -1936,7 +2387,7 @@ export function App() {
       ) ?? activeProject;
     if (!project) {
       setSendError(
-        "That Canvas suggestion belongs to a project that is no longer available.",
+        "That Canvas draft belongs to a project that is no longer available.",
       );
       return;
     }
@@ -1949,22 +2400,145 @@ export function App() {
     const closeSuggestionInspector =
       inspector.type === "canvasSuggestion" &&
       inspector.suggestionTurnId === latestSuggestion.turnId;
-    setDesktop((current) => ({
-      ...current,
-      canvases: acceptedCanvas
-        ? {
-            ...current.canvases,
-            [project.id]: acceptedCanvas,
-          }
-        : current.canvases,
-      canvasSuggestions: updateCanvasSuggestionStatus(
-        current.canvasSuggestions,
-        latestSuggestion.turnId,
-        "applied",
-        true,
-      ),
-    }));
+    setDesktop((current) => {
+      const nextCanvas =
+        acceptedCanvas && isGeneratedCurrentUiMockupPrompt(latestSuggestion.prompt)
+          ? {
+              ...acceptedCanvas,
+              updatedAt: Date.now(),
+            }
+          : acceptedCanvas;
+      return {
+        ...current,
+        canvases: nextCanvas
+          ? {
+              ...current.canvases,
+              [project.id]: nextCanvas,
+            }
+          : current.canvases,
+        canvasSuggestions: applyCanvasSuggestionAndDismissPeers(
+          current.canvasSuggestions,
+          latestSuggestion.turnId,
+          project.id,
+        ),
+      };
+    });
     if (closeSuggestionInspector) {
+      setInspector({ type: "canvas", projectId: project.id });
+    }
+  }
+
+  function resetCanvasSuggestionDraft(suggestion: CanvasSuggestion) {
+    const latestSuggestion =
+      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
+    if (!latestSuggestion.canvasDraftBaseSnapshot) {
+      setSendError("That Canvas draft does not have a reset point.");
+      return;
+    }
+    const resetSnapshot = cloneProjectCanvas(latestSuggestion.canvasDraftBaseSnapshot);
+    setDesktop((current) => {
+      const currentSuggestion =
+        current.canvasSuggestions[latestSuggestion.turnId] ?? latestSuggestion;
+      return {
+        ...current,
+        canvasSuggestions: {
+          ...current.canvasSuggestions,
+          [latestSuggestion.turnId]: {
+            ...currentSuggestion,
+            canvasProposalSnapshot: resetSnapshot,
+            canvasUserEditedAt: undefined,
+            canvasProposalSummary: isGeneratedCurrentUiMockupPrompt(
+              latestSuggestion.prompt,
+            )
+              ? generatedCurrentUiDraftSummary(resetSnapshot)
+              : currentSuggestion.canvasProposalSummary,
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
+  }
+
+  async function askCodexAboutCanvasSuggestion(suggestion: CanvasSuggestion) {
+    const latestSuggestion =
+      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
+    const project =
+      desktop.projects.find(
+        (candidate) => candidate.id === latestSuggestion.projectId,
+      ) ?? activeProject;
+    if (!project) {
+      setSendError(
+        "That Canvas draft belongs to a project that is no longer available.",
+      );
+      return;
+    }
+    const summary =
+      canvasDraftDeltaSummary(latestSuggestion) ||
+      canvasProposalDeltaSummary(
+        latestSuggestion.canvasBaseSnapshot,
+        latestSuggestion.canvasProposalSnapshot,
+      );
+    const sent = await sendDraft(
+      {
+        prompt: canvasSuggestionAskPrompt(summary),
+        projectId: project.id,
+        settings: {
+          ...project.settings,
+          planMode: false,
+        },
+        attachments: [],
+        contexts: canvasSuggestionHandoffContexts(latestSuggestion, project),
+        createdAt: Date.now(),
+        localDraftProjectId: null,
+        targetThreadId: latestSuggestion.threadId,
+      },
+      { clearComposer: false },
+    );
+    if (!sent) return;
+  }
+
+  function updateCanvasFromPlanProposal(proposal: PlanProposal) {
+    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
+    const project =
+      desktop.projects.find(
+        (candidate) => candidate.id === latestProposal.projectId,
+      ) ?? activeProject;
+    if (!project) {
+      setSendError("That plan belongs to a project that is no longer available.");
+      return;
+    }
+    if (!latestProposal.canvasProposalSnapshot) {
+      setSendError("That plan does not have a Canvas draft to update.");
+      return;
+    }
+    const closeProposalInspector =
+      inspector.type === "canvasProposal" &&
+      inspector.proposalTurnId === latestProposal.turnId;
+    setDesktop((current) => {
+      const currentCanvas =
+        current.canvases[project.id] ?? createProjectCanvas(project);
+      const acceptedCanvas = mergeAcceptedCanvasProposal(
+        currentCanvas,
+        latestProposal.canvasProposalSnapshot as ProjectCanvas,
+        latestProposal.canvasBaseSnapshot,
+      );
+      return {
+        ...current,
+        canvases: {
+          ...current.canvases,
+          [project.id]: acceptedCanvas,
+        },
+        planProposals: {
+          ...current.planProposals,
+          [latestProposal.turnId]: {
+            ...latestProposal,
+            canvasUpdatedAt: Date.now(),
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
+    if (closeProposalInspector) {
       setInspector({ type: "canvas", projectId: project.id });
     }
   }
@@ -2055,12 +2629,15 @@ export function App() {
     const path = pathValue.trim();
     if (!path) return;
     const existing = desktop.projects.find((project) =>
-      sameRuntimePath(project.path, path),
+      sameRuntimePath(project.path, path, runtime.backendMode),
     );
-    const project = existing ?? createProject(path, desktop.projects.length);
+    const project =
+      existing ?? createProject(path, desktop.projects.length, runtime.backendMode);
     setInspector((current) =>
       current.type === "canvas"
         ? { type: "canvas", projectId: project.id }
+        : current.type === "appPreview"
+          ? { type: "appPreview", projectId: project.id }
         : current,
     );
     setDesktop((current) => ({
@@ -2079,13 +2656,13 @@ export function App() {
   }
 
   async function pickProjectFolder() {
-    const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
-    if (!invoke) {
+    const selectedPath = desktopInvoke<string | null>("pick_folder");
+    if (!selectedPath) {
       setActionError("Use the folder path field in this browser build.");
       return false;
     }
     try {
-      const path = await invoke<string | null>("pick_folder");
+      const path = await selectedPath;
       if (!path) return false;
       return Boolean(addProjectFromPath(path));
     } catch (error) {
@@ -2121,7 +2698,9 @@ export function App() {
     const removedThreadIds = new Set(
       project
         ? Object.values(threads)
-            .filter((thread) => sameRuntimePath(thread.cwd, project.path))
+            .filter((thread) =>
+              sameRuntimePath(thread.cwd, project.path, runtime.backendMode),
+            )
             .map((thread) => thread.id)
         : [],
     );
@@ -2291,28 +2870,230 @@ export function App() {
       ...project,
       settings: { ...project.settings, ...patch },
     }));
-    if (patch.planMode === true) {
-      planModeOpenedCanvasProjectIdRef.current = activeProject.id;
-      selectProjectCanvas(activeProject);
-    } else if (
-      patch.planMode === false &&
-      (planModeOpenedCanvasProjectIdRef.current === activeProject.id ||
-        ((inspector.type === "canvas" ||
-          inspector.type === "canvasProposal" ||
-          inspector.type === "canvasSuggestion") &&
-          inspector.projectId === activeProject.id))
-    ) {
-      planModeOpenedCanvasProjectIdRef.current = null;
-      if (
-        desktop.layout.inspectorOpen &&
-        (inspector.type === "canvas" ||
-          inspector.type === "canvasProposal" ||
-          inspector.type === "canvasSuggestion") &&
-        inspector.projectId === activeProject.id
-      ) {
-        closeInspectorPanel();
-      }
+  }
+
+  function openAuthDialog() {
+    setAuthDialog({
+      ...closedAuthDialogState(),
+      open: true,
+      phase: snapshot.account?.account ? "success" : "choose",
+    });
+  }
+
+  async function closeAuthDialog() {
+    const loginId = authDialog.loginId;
+    const shouldCancel =
+      authDialog.open &&
+      Boolean(loginId) &&
+      (authDialog.phase === "browser" ||
+        authDialog.phase === "deviceCode" ||
+        authDialog.phase === "starting");
+    setAuthDialog(closedAuthDialogState());
+    if (shouldCancel) {
+      await cancelAuthLogin(loginId);
     }
+  }
+
+  async function startChatgptLogin() {
+    if (!client.connected) {
+      setAuthDialog((current) => ({
+        ...current,
+        open: true,
+        phase: "choose",
+        error: "Codex is not connected. Try again after it reconnects.",
+      }));
+      return;
+    }
+
+    await cancelAuthLogin(authDialog.loginId);
+    setAuthDialog((current) => ({
+      ...current,
+      open: true,
+      phase: "starting",
+      loginId: null,
+      authUrl: null,
+      verificationUrl: null,
+      userCode: null,
+      apiKey: "",
+      error: null,
+    }));
+
+    try {
+      const response = await client.request<LoginAccountResponse>(
+        "account/login/start",
+        { type: "chatgpt", codexStreamlinedLogin: true },
+      );
+      await handleLoginResponse(response);
+    } catch (error) {
+      setAuthDialog((current) => ({
+        ...current,
+        phase: "choose",
+        loginId: null,
+        error: errorMessage(error),
+      }));
+    }
+  }
+
+  async function startDeviceCodeLogin() {
+    if (!client.connected) {
+      setAuthDialog((current) => ({
+        ...current,
+        open: true,
+        phase: "choose",
+        error: "Codex is not connected. Try again after it reconnects.",
+      }));
+      return;
+    }
+
+    await cancelAuthLogin(authDialog.loginId);
+    setAuthDialog((current) => ({
+      ...current,
+      open: true,
+      phase: "starting",
+      loginId: null,
+      authUrl: null,
+      verificationUrl: null,
+      userCode: null,
+      apiKey: "",
+      error: null,
+    }));
+
+    try {
+      const response = await client.request<LoginAccountResponse>(
+        "account/login/start",
+        { type: "chatgptDeviceCode" },
+      );
+      await handleLoginResponse(response);
+    } catch (error) {
+      setAuthDialog((current) => ({
+        ...current,
+        phase: "choose",
+        loginId: null,
+        error: errorMessage(error),
+      }));
+    }
+  }
+
+  function startApiKeyLogin() {
+    setAuthDialog((current) => ({
+      ...current,
+      open: true,
+      phase: "apiKey",
+      loginId: null,
+      authUrl: null,
+      verificationUrl: null,
+      userCode: null,
+      error: null,
+    }));
+  }
+
+  async function submitApiKeyLogin() {
+    const apiKey = authDialog.apiKey.trim();
+    if (!apiKey) return;
+    if (!client.connected) {
+      setAuthDialog((current) => ({
+        ...current,
+        error: "Codex is not connected. Try again after it reconnects.",
+      }));
+      return;
+    }
+
+    setAuthDialog((current) => ({
+      ...current,
+      phase: "savingApiKey",
+      error: null,
+    }));
+    try {
+      const response = await client.request<LoginAccountResponse>(
+        "account/login/start",
+        { type: "apiKey", apiKey },
+      );
+      await handleLoginResponse(response);
+    } catch (error) {
+      setAuthDialog((current) => ({
+        ...current,
+        phase: "apiKey",
+        error: errorMessage(error),
+      }));
+    }
+  }
+
+  async function handleLoginResponse(response: LoginAccountResponse) {
+    if (response.type === "chatgpt") {
+      setAuthDialog((current) => ({
+        ...current,
+        open: true,
+        phase: "browser",
+        loginId: response.loginId,
+        authUrl: response.authUrl,
+        verificationUrl: null,
+        userCode: null,
+        apiKey: "",
+        error: null,
+      }));
+      await openExternalAuthUrl(response.authUrl);
+      return;
+    }
+
+    if (response.type === "chatgptDeviceCode") {
+      setAuthDialog((current) => ({
+        ...current,
+        open: true,
+        phase: "deviceCode",
+        loginId: response.loginId,
+        authUrl: null,
+        verificationUrl: response.verificationUrl,
+        userCode: response.userCode,
+        apiKey: "",
+        error: null,
+      }));
+      await openExternalAuthUrl(response.verificationUrl);
+      return;
+    }
+
+    if (response.type === "apiKey" || response.type === "chatgptAuthTokens") {
+      setAuthDialog((current) => ({
+        ...current,
+        phase: "success",
+        loginId: null,
+        authUrl: null,
+        verificationUrl: null,
+        userCode: null,
+        apiKey: "",
+        error: null,
+      }));
+      await refreshSettings(activeProject?.path ?? null);
+    }
+  }
+
+  async function openExternalAuthUrl(url: string) {
+    try {
+      const opened = desktopInvoke("open_external_url", { url });
+      if (opened) {
+        await opened;
+      } else {
+        window.open(url, "_blank", "noopener,noreferrer");
+      }
+    } catch (error) {
+      setAuthDialog((current) =>
+        current.open ? { ...current, error: errorMessage(error) } : current,
+      );
+    }
+  }
+
+  async function cancelAuthLogin(loginId: string | null) {
+    if (!loginId || !client.connected) return;
+    try {
+      await client.request("account/login/cancel", { loginId });
+    } catch (error) {
+      console.warn("Failed to cancel Codex login", error);
+    }
+  }
+
+  function copyAuthText(value: string) {
+    void navigator.clipboard?.writeText(value).catch((error) => {
+      console.warn("Failed to copy auth text", error);
+    });
   }
 
   async function logoutAccount() {
@@ -2431,8 +3212,11 @@ export function App() {
     if (turnPollsRef.current.has(pollKey)) return;
     turnPollsRef.current.add(pollKey);
     try {
-      for (let attempt = 0; attempt < 120; attempt += 1) {
-        await wait(1500);
+      const maxAttempts = Math.ceil(
+        TURN_SETTLE_POLL_TIMEOUT_MS / TURN_SETTLE_POLL_INTERVAL_MS,
+      );
+      for (let attempt = 0; attempt < maxAttempts; attempt += 1) {
+        await wait(TURN_SETTLE_POLL_INTERVAL_MS);
         let thread: Thread | null = null;
         try {
           thread = await syncThread(threadId);
@@ -2533,6 +3317,18 @@ export function App() {
     inspector.type === "canvasProposal"
       ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
       : null;
+  const selectedPlanPreviewProposal =
+    inspector.type === "planPreview"
+      ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
+      : null;
+  const selectedAppPreviewContext =
+    inspector.type === "appPreview"
+      ? (composerContexts.find(
+          (context): context is ComposerAppPreviewContext =>
+            context.type === "appPreview" &&
+            context.projectId === inspector.projectId,
+        ) ?? null)
+      : null;
   const selectedCanvasSuggestion =
     inspector.type === "canvasSuggestion"
       ? (desktop.canvasSuggestions[inspector.suggestionTurnId] ?? null)
@@ -2551,7 +3347,30 @@ export function App() {
   const canvasReadOnly = canvasProject
     ? (threadsByProject.get(canvasProject.id) ?? []).some(
         (thread) => thread.status.type === "active",
-      )
+      ) ||
+      (inspector.type === "canvasProposal" &&
+        Boolean(inspector.readOnly) &&
+        selectedPlanProposal?.status !== "pending")
+    : false;
+  const activeCanvasState =
+    desktop.layout.inspectorOpen && activeProject
+      ? inspector.type === "canvas" && inspector.projectId === activeProject.id
+        ? "project"
+        : (inspector.type === "canvasProposal" ||
+              inspector.type === "canvasSuggestion" ||
+              inspector.type === "planPreview") &&
+            inspector.projectId === activeProject.id
+          ? "draft"
+          : "none"
+      : "none";
+  const activeAppPreviewSelected = Boolean(
+    desktop.layout.inspectorOpen &&
+      activeProject &&
+      inspector.type === "appPreview" &&
+      inspector.projectId === activeProject.id,
+  );
+  const canvasLayersOpen = canvasProject
+    ? (desktop.layout.canvasLayersOpenByProject[canvasProject.id] ?? false)
     : false;
 
   return (
@@ -2579,6 +3398,7 @@ export function App() {
         onPickProjectFolder={pickProjectFolder}
         onConnect={() => void connect()}
         onLogout={logoutAccount}
+        onOpenAuth={openAuthDialog}
         onProjectPathChange={setProjectPath}
         onArchiveProjectChats={(project) => void archiveProjectChats(project)}
         onArchiveThread={(threadId, project) => void archiveThread(threadId, project)}
@@ -2594,6 +3414,8 @@ export function App() {
             setInspector((current) =>
               current.type === "canvas"
                 ? { type: "canvas", projectId: project.id }
+                : current.type === "appPreview"
+                  ? { type: "appPreview", projectId: project.id }
                 : { type: "empty" },
             );
             inspectorRetargetThreadIdRef.current = project.lastActiveThreadId;
@@ -2627,7 +3449,7 @@ export function App() {
         pinnedThreadIds={desktop.pinnedThreadIds}
         projectPath={projectPath}
         projectThreadGroups={projectThreadGroups}
-        runtime={runtimeInfo}
+        runtime={runtime}
         snapshot={snapshot}
         threadSearch={threadSearch}
         updateProject={updateProject}
@@ -2642,16 +3464,16 @@ export function App() {
       <main className="workspace">
         <WorkspaceHeader
           activeProject={activeProject}
-          activeCanvasSelected={
-            desktop.layout.inspectorOpen &&
-            inspector.type === "canvas" &&
-            inspector.projectId === activeProject?.id
-          }
+          activeCanvasSelected={activeCanvasState !== "none"}
+          activeCanvasDraft={activeCanvasState === "draft"}
+          activeAppPreviewSelected={activeAppPreviewSelected}
           activeThread={activeThread}
           hasActiveProject={Boolean(activeProject)}
           connectionStatus={connectionStatus}
           connectionError={connectionError}
+          backendLabel={runtime.backendLabel}
           inspectorOpen={desktop.layout.inspectorOpen}
+          onOpenAppPreview={() => toggleAppPreview()}
           onOpenCanvas={() => toggleProjectCanvas()}
           onOpenSidebar={() => setSidebarDrawerOpen(true)}
           onToggleInspector={toggleInspectorPanel}
@@ -2664,13 +3486,26 @@ export function App() {
             activeThread={activeThread}
             onAcceptPlanProposal={(proposal) => void acceptPlanProposal(proposal)}
             onApplyCanvasSuggestion={applyCanvasSuggestion}
+            onAskCanvasSuggestion={(suggestion) =>
+              void askCodexAboutCanvasSuggestion(suggestion)
+            }
             onDeclinePlanProposal={declinePlanProposal}
             onDismissCanvasSuggestion={dismissCanvasSuggestion}
             onModifyPlanProposal={modifyPlanProposal}
             onOpenCanvasSuggestion={selectCanvasSuggestionCanvas}
             onOpenPlanProposalCanvas={selectPlanProposalCanvas}
+            onPlanProposalFeedbackChange={(turnId, value) =>
+              setPlanProposalFeedbackDrafts((current) => ({
+                ...current,
+                [turnId]: value,
+              }))
+            }
+            onShowPlanUiImpact={showPlanUiImpact}
+            onResetCanvasSuggestion={resetCanvasSuggestionDraft}
+            onUpdateCanvasFromPlanProposal={updateCanvasFromPlanProposal}
             onSelect={selectInspector}
             canvasSuggestions={desktop.canvasSuggestions}
+            planProposalFeedbackDrafts={planProposalFeedbackDrafts}
             planProposals={desktop.planProposals}
           />
         </section>
@@ -2680,8 +3515,12 @@ export function App() {
             <CanvasSuggestionReview
               suggestion={activePendingCanvasSuggestion}
               onApply={applyCanvasSuggestion}
+              onAskCodex={(suggestion) =>
+                void askCodexAboutCanvasSuggestion(suggestion)
+              }
               onDismiss={dismissCanvasSuggestion}
               onOpenCanvas={selectCanvasSuggestionCanvas}
+              onReset={resetCanvasSuggestionDraft}
               surface="strip"
             />
           </div>
@@ -2696,6 +3535,7 @@ export function App() {
           canSend={
             connectionStatus === "connected" &&
             Boolean(activeProject) &&
+            !missingOpenAiAuth &&
             !runningTurnId &&
             promptReady &&
             unsupportedAttachments(attachments).length === 0 &&
@@ -2738,7 +3578,10 @@ export function App() {
           activeThread={activeThread}
           canvas={selectedCanvas}
           canvasProject={canvasProject}
+          canvasLayersOpen={canvasLayersOpen}
           canvasProposal={selectedPlanProposal}
+          planPreviewProposal={selectedPlanPreviewProposal}
+          appPreviewContext={selectedAppPreviewContext}
           canvasSuggestion={selectedCanvasSuggestion}
           canvasReadOnly={canvasReadOnly}
           canvasSaveStatus={saveStatus}
@@ -2749,13 +3592,34 @@ export function App() {
           onReviewChanges={() => void reviewChanges()}
           onRollback={() => void rollbackChat()}
           onSelect={selectInspector}
+          onSetCanvasLayersOpen={setCanvasLayersOpen}
           onUpdateCanvas={updateProjectCanvas}
           onUpdateCanvasProposal={updatePlanProposalCanvas}
           onUpdateCanvasSuggestion={updateCanvasSuggestionCanvas}
+          onUpdatePlanPreviewAreaMark={updatePlanPreviewAreaMark}
+          onAttachAppPreviewMark={attachAppPreviewMark}
+          onUpdatePlanPreviewVariant={updatePlanPreviewVariant}
+          onEditPlanProposalDraft={editPlanProposalDraft}
           selection={inspector}
           activeTurn={activeTurn(activeThread)}
         />
       )}
+
+      <AuthDialog
+        state={authDialog}
+        snapshot={snapshot}
+        connectionStatus={connectionStatus}
+        onApiKeyChange={(apiKey) =>
+          setAuthDialog((current) => ({ ...current, apiKey }))
+        }
+        onClose={() => void closeAuthDialog()}
+        onCopyText={copyAuthText}
+        onOpenUrl={(url) => void openExternalAuthUrl(url)}
+        onStartApiKey={startApiKeyLogin}
+        onStartChatgpt={() => void startChatgptLogin()}
+        onStartDeviceCode={() => void startDeviceCodeLogin()}
+        onSubmitApiKey={() => void submitApiKeyLogin()}
+      />
     </div>
   );
 }
@@ -2763,22 +3627,41 @@ export function App() {
 function sendBlockReason(args: {
   activeProject: Project | null;
   connectionStatus: string;
+  missingOpenAiAuth: boolean;
   hasUnsupportedAttachments: boolean;
   pendingApprovals: PendingApproval[];
   promptReady: boolean;
+  sendStarting: boolean;
   runningTurnId: string | null;
 }) {
   if (args.connectionStatus !== "connected") {
     return "Codex is still connecting. Try again when the status says Connected.";
   }
   if (!args.activeProject) return "Add or select a local project before sending.";
-  if (args.runningTurnId) return "Codex is already working on this chat.";
+  if (args.missingOpenAiAuth) {
+    return "Sign in before sending prompts to OpenAI-hosted models.";
+  }
+  if (args.sendStarting) {
+    return "Codex is starting your message. Wait for it to begin before sending again.";
+  }
+  if (args.runningTurnId) {
+    return "Codex is already working on another turn. Wait for it to finish before sending again.";
+  }
   if (args.pendingApprovals.length > 0) {
     return "Answer the pending approval before sending another message.";
   }
   if (args.hasUnsupportedAttachments) return "Remove unsupported files before sending.";
   if (!args.promptReady) return "Type a message to send.";
   return null;
+}
+
+function shouldSurfaceCanvasDraft(suggestion: CanvasSuggestion) {
+  return (
+    suggestion.status === "pending" &&
+    suggestion.canvasProposalParseStatus === "parsed" &&
+    (suggestion.canvasProposalChangeCount > 0 || Boolean(suggestion.canvasUserEditedAt)) &&
+    Boolean(suggestion.canvasProposalSnapshot)
+  );
 }
 
 function finalAgentText(turn: Turn) {
@@ -2790,6 +3673,35 @@ function finalAgentText(turn: Turn) {
     )
     .map((item) => item.text)
     .join("\n\n");
+}
+
+function isAcceptedPlanImplementationTurn(turn: Turn) {
+  return turn.items.some((item) => {
+    if (item.type !== "userMessage") return false;
+    return item.content.some(
+      (part) =>
+        part.type === "text" &&
+        isAcceptedPlanImplementationPrompt(part.text),
+    );
+  });
+}
+
+function isAcceptedPlanImplementationPrompt(prompt: string) {
+  return prompt.trim().startsWith("I accept this plan. Implement it now");
+}
+
+function latestAcceptedPlanProposalForThread(
+  desktop: DesktopState,
+  threadId: string,
+) {
+  return (
+    Object.values(desktop.planProposals)
+      .filter(
+        (proposal) =>
+          proposal.threadId === threadId && proposal.status === "accepted",
+      )
+      .sort((left, right) => right.updatedAt - left.updatedAt)[0] ?? null
+  );
 }
 
 type PlanCanvasPromptContext = {
@@ -2813,12 +3725,16 @@ function updatePlanProposalStatus(
       ...proposal,
       status,
       canvasBaseSnapshot: clearSnapshots ? null : proposal.canvasBaseSnapshot,
+      canvasDraftBaseSnapshot: clearSnapshots
+        ? null
+        : proposal.canvasDraftBaseSnapshot,
       canvasProposalSnapshot: clearSnapshots
         ? null
         : proposal.canvasProposalSnapshot,
       canvasProposalParserVersion: clearSnapshots
         ? undefined
         : proposal.canvasProposalParserVersion,
+      canvasUserEditedAt: clearSnapshots ? undefined : proposal.canvasUserEditedAt,
       updatedAt: Date.now(),
     },
   };
@@ -2838,15 +3754,53 @@ function updateCanvasSuggestionStatus(
       ...suggestion,
       status,
       canvasBaseSnapshot: clearSnapshots ? null : suggestion.canvasBaseSnapshot,
+      canvasDraftBaseSnapshot: clearSnapshots
+        ? null
+        : suggestion.canvasDraftBaseSnapshot,
       canvasProposalSnapshot: clearSnapshots
         ? null
         : suggestion.canvasProposalSnapshot,
       canvasProposalParserVersion: clearSnapshots
         ? undefined
         : suggestion.canvasProposalParserVersion,
+      canvasUserEditedAt: clearSnapshots
+        ? undefined
+        : suggestion.canvasUserEditedAt,
       updatedAt: Date.now(),
     },
   };
+}
+
+function applyCanvasSuggestionAndDismissPeers(
+  suggestions: Record<string, CanvasSuggestion>,
+  appliedTurnId: string,
+  projectId: string,
+) {
+  const applied = updateCanvasSuggestionStatus(
+    suggestions,
+    appliedTurnId,
+    "applied",
+    true,
+  );
+  let changed = applied !== suggestions;
+  const next: Record<string, CanvasSuggestion> = {};
+  for (const [turnId, suggestion] of Object.entries(applied)) {
+    if (
+      turnId !== appliedTurnId &&
+      suggestion.projectId === projectId &&
+      suggestion.status === "pending"
+    ) {
+      changed = true;
+      next[turnId] = {
+        ...suggestion,
+        status: "dismissed",
+        updatedAt: Date.now(),
+      };
+      continue;
+    }
+    next[turnId] = suggestion;
+  }
+  return changed ? next : applied;
 }
 
 function supersedePendingPlanProposals(
@@ -2887,16 +3841,87 @@ function parseCanvasProposalForPlan(
       : parsed.errors.length > 0
         ? "failed"
         : "empty";
+  const previewSpec = shouldOfferPlanPreview(proposal.prompt, finalText)
+    ? createPlanPreviewSpec(proposal.prompt, finalText, proposal.previewSpec)
+    : null;
+  const selectedVariant =
+    previewSpec?.variants.find(
+      (variant) => variant.id === proposal.previewSelectedVariantId,
+    ) ?? previewSpec?.variants[0] ?? null;
   return {
     ...proposal,
+    canvasDraftBaseSnapshot:
+      parsed.changeCount > 0 ? cloneProjectCanvas(parsed.canvas) : null,
     canvasProposalSnapshot: parsed.canvas,
     canvasProposalParseStatus: parseStatus,
     canvasProposalParserVersion: CANVAS_PROPOSAL_PARSER_VERSION,
     canvasProposalChangeCount: parsed.changeCount,
     canvasProposalSummary: parsed.summary,
     canvasProposalErrors: parsed.errors,
+    canvasUserEditedAt: undefined,
+    previewSpec,
+    previewSelectedVariantId: selectedVariant?.id ?? null,
+    previewAreaMark: previewSpec ? proposal.previewAreaMark ?? null : null,
+    proposalKind: classifyPlanProposalKind(proposal.prompt, finalText, parsed.changeCount),
     updatedAt: Date.now(),
   };
+}
+
+function classifyPlanProposalKind(
+  prompt: string,
+  finalText: string,
+  changeCount: number,
+): PlanProposal["proposalKind"] {
+  if (changeCount <= 0 || isNoPlanProposalRequest(prompt)) return "plan";
+  const text = finalText.toLowerCase();
+  if (/\bsafer\s+(alternative|plan|path|shape)\b/.test(text)) {
+    return "safer_alternative";
+  }
+  if (/\bchallenge[sd]?\b|\bchallenging\b/.test(text)) {
+    return "safer_alternative";
+  }
+  if (
+    /\b(?:would|should)\s+not\s+(?:build|implement|create|accept|recommend)\b/.test(text) ||
+    /\bnot\s+(?:recommend|build|implement|create|accept)\b/.test(text) ||
+    /\b(?:reject|decline)\s+(?:the\s+)?(?:requested|request|literal)\b/.test(text)
+  ) {
+    return "safer_alternative";
+  }
+  const warnsAboutDuplicate =
+    /\b(duplicate|duplicat(?:e|es|ing|ed)|collision|parallel|separate\s+(?:store|api|service|system|subsystem|job|table))\b/.test(
+      text,
+    );
+  const offersAlternative =
+    /\b(instead|rather than|keep(?:ing)?\s+it|recommend(?:ed)?|safer|simpler|reuse)\b/.test(
+      text,
+    );
+  return warnsAboutDuplicate && offersAlternative ? "safer_alternative" : "plan";
+}
+
+function isNoPlanProposalRequest(prompt: string) {
+  const text = prompt.toLowerCase();
+  return (
+    /\bno\s+(?:plan\s+)?proposal\b/.test(text) ||
+    /\bwithout\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(text) ||
+    /\bdo\s+not\s+(?:create|show|return|make)\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(
+      text,
+    ) ||
+    /\bdon't\s+(?:create|show|return|make)\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(
+      text,
+    )
+  );
+}
+
+function shouldAutoCaptureCanvasSuggestionPrompt(prompt: string) {
+  const text = prompt.toLowerCase();
+  const referencesCanvas =
+    /\b(canvas|project map|map|ui reference|visual reference|coordinates?|xywh|position|layout)\b/.test(
+      text,
+    ) || /\b[bcgdtm][1-9]\d*\b/.test(text);
+  if (!referencesCanvas) return false;
+  return /\b(see|show|save|update|move|shift|center|align|resize|place|draw|create|add|adjust|change|apply)\b/.test(
+    text,
+  );
 }
 
 function parseCanvasSuggestionForTurn(
@@ -2916,6 +3941,8 @@ function parseCanvasSuggestionForTurn(
         : "empty";
   return {
     ...suggestion,
+    canvasDraftBaseSnapshot:
+      parsed.changeCount > 0 ? cloneProjectCanvas(parsedCanvas) : null,
     canvasProposalSnapshot: parsedCanvas,
     canvasProposalParseStatus: parseStatus,
     canvasProposalParserVersion: CANVAS_PROPOSAL_PARSER_VERSION,
@@ -2924,23 +3951,80 @@ function parseCanvasSuggestionForTurn(
       ? generatedCurrentUiDraftSummary(parsedCanvas)
       : parsed.summary,
     canvasProposalErrors: parsed.errors,
+    canvasUserEditedAt: undefined,
     updatedAt: Date.now(),
   };
 }
 
 function polishGeneratedCurrentUiDraft(canvas: ProjectCanvas): ProjectCanvas {
-  const items = canvas.items.filter((item) => !isOversizedGeneratedShell(item));
-  if (items.length === canvas.items.length) return canvas;
+  const items = canvas.items
+    .filter((item) => !isOversizedGeneratedShell(item))
+    .map((item) => ({
+      ...item,
+      state: item.state === "deleted" ? item.state : ("proposed" as const),
+      locked: false,
+      updatedAt: Date.now(),
+    }));
+  const itemIds = new Set(items.map((item) => item.id));
   const visibleItemIds = new Set(items.map((item) => item.id));
-  return {
+  const cleanedCanvas = {
     ...canvas,
     items,
     groups: canvas.groups
       .map((group) => ({
         ...group,
         itemIds: group.itemIds.filter((itemId) => visibleItemIds.has(itemId)),
+        state: group.state === "deleted" ? group.state : ("proposed" as const),
+        locked: false,
+        updatedAt: Date.now(),
       }))
-      .filter((group) => group.itemIds.length > 1),
+      .filter(
+        (group) =>
+          group.itemIds.length > 1 &&
+          group.itemIds.every((itemId) => itemIds.has(itemId)),
+      ),
+    updatedAt: Date.now(),
+  };
+  return pruneEmptyGeneratedUiViews(cleanedCanvas);
+}
+
+function pruneEmptyGeneratedUiViews(canvas: ProjectCanvas): ProjectCanvas {
+  const visibleItems = canvas.items.filter(
+    (item) => item.visible !== false && item.pageId && item.subPageId,
+  );
+  if (visibleItems.length === 0) return canvas;
+
+  const subPageIdsByPage = new Map<string, Set<string>>();
+  for (const item of visibleItems) {
+    if (!item.pageId || !item.subPageId) continue;
+    const subPageIds = subPageIdsByPage.get(item.pageId) ?? new Set<string>();
+    subPageIds.add(item.subPageId);
+    subPageIdsByPage.set(item.pageId, subPageIds);
+  }
+
+  const pages = canvas.pages
+    .filter((page) => subPageIdsByPage.has(page.id))
+    .map((page) => {
+      const subPageIds = subPageIdsByPage.get(page.id) ?? new Set<string>();
+      const subPages = page.subPages.filter((subPage) => subPageIds.has(subPage.id));
+      return {
+        ...page,
+        subPages: subPages.length > 0 ? subPages : page.subPages,
+      };
+    });
+
+  if (pages.length === 0) return canvas;
+
+  const sortedPages = [...pages].sort((left, right) => left.order - right.order);
+  const firstPage = sortedPages[0];
+  const firstSubPage = [...firstPage.subPages].sort(
+    (left, right) => left.order - right.order,
+  )[0];
+  return {
+    ...canvas,
+    pages,
+    activePageId: firstPage.id,
+    activeSubPageId: firstSubPage?.id ?? canvas.activeSubPageId,
     updatedAt: Date.now(),
   };
 }
@@ -2978,18 +4062,147 @@ function planProposalRevisionPrompt(
     proposal.canvasBaseSnapshot,
     proposal.canvasProposalSnapshot,
   ),
+  feedback = "",
 ) {
-  if (!summary) {
+  const feedbackText = feedback.trim();
+  if (!summary && !feedbackText) {
     return "Please revise the plan: ";
   }
+  if (feedbackText && !summary) {
+    return [
+      "Please revise the previous plan using this feedback.",
+      "Do not edit files yet.",
+      "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
+      "If the feedback mentions menu, submenu, dropdown, filter, sort, expand, open, close, panel, drawer, hover, or a click consequence, consider a same-page interaction frame instead of a new sub-page.",
+      "",
+      "User feedback:",
+      feedbackText,
+    ].join("\n");
+  }
+  if (feedbackText && summary) {
+    return [
+      "Please revise the previous plan using this feedback and the attached visual guidance.",
+      "Do not edit files yet.",
+      "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
+      "If the feedback mentions menu, submenu, dropdown, filter, sort, expand, open, close, panel, drawer, hover, or a click consequence, consider a same-page interaction frame instead of a new sub-page.",
+      "",
+      "User feedback:",
+      feedbackText,
+      "",
+      "Attached visual guidance:",
+      summary,
+    ].join("\n");
+  }
   return [
-    "Please revise the previous plan using these edits to the Canvas proposal.",
+    "Please revise the previous plan using the attached visual guidance.",
     "Do not edit files yet.",
-    "Return a revised product-facing plan and, if Canvas changes still matter, a fresh parseable canvas-proposal block.",
+    "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
     "",
-    "User-edited Canvas proposal changes:",
+    "Attached visual guidance:",
     summary,
   ].join("\n");
+}
+
+function planProposalAcceptPrompt(attachedUiEdits: string, attachedPreview = "") {
+  const previewText = attachedPreview.trim();
+  if (!attachedUiEdits.trim() && !previewText) {
+    return "I accept this plan. Implement it now.";
+  }
+  if (!attachedUiEdits.trim() && previewText) {
+    return [
+      "I accept this plan. Implement it now using the selected live app preview as guidance.",
+      "",
+      "Selected preview context:",
+      previewText,
+    ].join("\n");
+  }
+  if (attachedUiEdits.trim() && !previewText) {
+    return [
+      "I accept this plan. Implement it now using my latest UI draft edits as guidance.",
+      "Do not save the UI draft into Project Canvas memory as part of implementation; the app will offer Update Canvas after code changes.",
+      "",
+      "Latest attached UI draft edits:",
+      attachedUiEdits,
+    ].join("\n");
+  }
+  return [
+    "I accept this plan. Implement it now using the selected live app preview and my latest UI draft edits as guidance.",
+    "Do not save the UI draft into Project Canvas memory as part of implementation; the app will offer Update Canvas after code changes.",
+    "",
+    "Selected preview context:",
+    previewText,
+    "",
+    "Latest attached UI draft edits:",
+    attachedUiEdits,
+  ].join("\n");
+}
+
+function canvasDraftDeltaSummary(
+  record: Pick<
+    PlanProposal | CanvasSuggestion,
+    "canvasDraftBaseSnapshot" | "canvasBaseSnapshot" | "canvasProposalSnapshot"
+  >,
+) {
+  return canvasProposalDeltaSummary(
+    record.canvasDraftBaseSnapshot ?? record.canvasBaseSnapshot,
+    record.canvasProposalSnapshot,
+  );
+}
+
+function canvasDraftContentChanged(
+  previous: ProjectCanvas | null,
+  next: ProjectCanvas,
+) {
+  if (!previous) return true;
+  return (
+    JSON.stringify(canvasDraftComparableContent(previous)) !==
+    JSON.stringify(canvasDraftComparableContent(next))
+  );
+}
+
+function canvasDraftComparableContent(canvas: ProjectCanvas) {
+  return {
+    pages: canvas.pages,
+    items: canvas.items,
+    groups: canvas.groups,
+    interactionPreviews: canvas.interactionPreviews,
+  };
+}
+
+function canvasSuggestionAskPrompt(summary: string) {
+  if (!summary.trim()) {
+    return "Please review this Canvas draft and tell me the next best step. Do not apply Canvas memory or edit files unless I ask.";
+  }
+  return [
+    "Please review this Canvas draft and tell me the next best step.",
+    "Do not apply Canvas memory or edit files unless I ask.",
+    "",
+    "Latest Canvas draft edits:",
+    summary,
+  ].join("\n");
+}
+
+function canvasSuggestionHandoffContexts(
+  suggestion: CanvasSuggestion,
+  project: Project,
+): ComposerContextReference[] {
+  if (
+    suggestion.contexts.some(
+      (context) =>
+        context.type === "canvas" && context.projectId === suggestion.projectId,
+    )
+  ) {
+    return suggestion.contexts;
+  }
+  return [
+    ...suggestion.contexts,
+    {
+      type: "canvas",
+      projectId: project.id,
+      projectName: project.name,
+      target: { kind: "project" },
+    },
+  ];
 }
 
 function planProposalRevisionContexts(
@@ -3019,10 +4232,13 @@ function planProposalRevisionContexts(
 }
 
 function canvasContextIdentity(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    return `${context.projectId}:app-preview`;
+  }
   const target = context.target ?? { kind: "project" as const };
   if (target.kind === "project") return `${context.projectId}:project`;
   if (target.kind === "page") {
-    return `${context.projectId}:page:${target.mode}:${target.pageId ?? "backend"}:${
+    return `${context.projectId}:page:${target.pageId ?? "canvas"}:${
       target.subPageId ?? "all"
     }`;
   }
@@ -3033,6 +4249,9 @@ function canvasContextIdentity(context: ComposerContextReference) {
 }
 
 function canvasContextSearchLabel(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    return `${context.projectName} App Preview App Mark ${context.previewUrl}`;
+  }
   const target = context.target;
   if (!target || target.kind === "project") return context.projectName;
   if (target.kind === "page") {
@@ -3041,6 +4260,52 @@ function canvasContextSearchLabel(context: ComposerContextReference) {
     }`;
   }
   return `${context.projectName} ${target.reference} ${target.label}`;
+}
+
+function preparePromptCanvasMentions(
+  prompt: string,
+  contexts: ComposerContextReference[],
+  options: ComposerCanvasContextOption[],
+) {
+  const aliases: string[] = [];
+  const strippedPrompt = prompt
+    .replace(
+      /(^|\s)@(canvas)(?=$|\s|[.,;:!?])/gi,
+      (match, leading: string, alias: string) => {
+        aliases.push(alias.toLowerCase());
+        return leading;
+      },
+    )
+    .replace(/[ \t]{2,}/g, " ")
+    .trimStart();
+
+  if (aliases.length === 0) {
+    return { prompt, contexts: [...contexts] };
+  }
+
+  const selectedContext = canvasContextForMentionAlias(
+    aliases[aliases.length - 1] ?? "canvas",
+    options,
+  );
+  if (!selectedContext) {
+    return { prompt: strippedPrompt, contexts: [...contexts] };
+  }
+
+  return {
+    prompt: strippedPrompt,
+    contexts: [
+      ...contexts.filter((context) => context.type !== "canvas"),
+      selectedContext,
+    ],
+  };
+}
+
+function canvasContextForMentionAlias(
+  alias: string,
+  options: ComposerCanvasContextOption[],
+): ComposerCanvasContext | null {
+  if (alias.toLowerCase() !== "canvas") return null;
+  return options.find((option) => option.id.endsWith(":project"))?.context ?? null;
 }
 
 function canvasProposalDeltaSummary(
@@ -3098,12 +4363,91 @@ function canvasProposalDeltaSummary(
       changes.push(`- ${item.reference} removed from proposal snapshot`);
     }
   }
+  const basePreviewByKey = new Map(
+    baseCanvas.interactionPreviews.map((preview) => [
+      interactionPreviewKey(preview),
+      preview,
+    ]),
+  );
+  const proposalPreviewKeys = new Set<string>();
+  for (const preview of proposalCanvas.interactionPreviews) {
+    const key = interactionPreviewKey(preview);
+    proposalPreviewKeys.add(key);
+    const basePreview = basePreviewByKey.get(key) ?? null;
+    for (const frame of preview.frames) {
+      const baseFrame = basePreview?.frames.find(
+        (candidate) => candidate.frame === frame.frame,
+      );
+      if (baseFrame && sameInteractionFrame(baseFrame, frame)) continue;
+      changes.push(
+        `- ${preview.triggerReference} frame ${frame.frame}: ${interactionFrameSummary(
+          frame,
+        )}`,
+      );
+    }
+  }
+  for (const preview of baseCanvas.interactionPreviews) {
+    if (!proposalPreviewKeys.has(interactionPreviewKey(preview))) {
+      changes.push(`- ${preview.triggerReference} interaction preview removed`);
+    }
+  }
   if (changes.length === 0) return "";
   const clipped = changes.slice(0, 16);
   if (changes.length > clipped.length) {
     clipped.push(`- ${changes.length - clipped.length} more changes`);
   }
   return clipped.join("\n");
+}
+
+function interactionPreviewKey(
+  preview: ProjectCanvas["interactionPreviews"][number],
+) {
+  return `${preview.triggerKind}:${preview.triggerReference.toUpperCase()}`;
+}
+
+function sameInteractionFrame(
+  left: ProjectCanvas["interactionPreviews"][number]["frames"][number],
+  right: ProjectCanvas["interactionPreviews"][number]["frames"][number],
+) {
+  return (
+    left.sticky === right.sticky &&
+    left.holdMs === right.holdMs &&
+    JSON.stringify(left.affected) === JSON.stringify(right.affected)
+  );
+}
+
+function interactionFrameSummary(
+  frame: ProjectCanvas["interactionPreviews"][number]["frames"][number],
+) {
+  const affected = frame.affected
+    .slice(0, 5)
+    .map((delta) => {
+      const parts = [delta.reference];
+      if (
+        delta.x != null &&
+        delta.y != null &&
+        delta.width != null &&
+        delta.height != null
+      ) {
+        parts.push(`xywh=${formatCanvasRect({
+          x: delta.x,
+          y: delta.y,
+          width: delta.width,
+          height: delta.height,
+        })}`);
+      }
+      if (typeof delta.visible === "boolean") {
+        parts.push(`visible=${delta.visible}`);
+      }
+      return parts.join(" ");
+    })
+    .join("; ");
+  const timing = frame.sticky
+    ? "sticky until Stop"
+    : `hold ${frame.holdMs ?? 900}ms`;
+  return `${timing}; ${frame.affected.length} affected item${
+    frame.affected.length === 1 ? "" : "s"
+  }${affected ? ` (${affected})` : ""}`;
 }
 
 function sameCanvasRect(left: CanvasItem, right: CanvasItem) {
@@ -3119,7 +4463,7 @@ function isGeneratedCurrentUiMockupPrompt(prompt: string) {
   return prompt
     .trimStart()
     .startsWith(
-      "Inspect this local project and generate a low-fidelity current UI Canvas mockup.",
+      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
     );
 }
 
@@ -3127,7 +4471,7 @@ function generatedMockupCanvasContext(project: Project): PlanCanvasPromptContext
   const snapshot = createProjectCanvas(project);
   return {
     status: "empty",
-    summary: "Generated current UI draft",
+    summary: "Generated current interface draft",
     serialized: null,
     snapshot,
   };
@@ -3138,8 +4482,8 @@ function promptWithGeneratedMockupContext(prompt: string) {
     prompt,
     "",
     "Canvas generation mode:",
-    "The attached Canvas is only the destination for a generated current-UI draft. Do not treat existing Canvas items as accepted UI truth for this generation run.",
-    "Create a fresh reviewable Canvas suggestion that represents existing UI only. Use state=current for UI that exists today, but remember the draft is not accepted until the user applies it.",
+    "The attached Canvas is only the destination for a generated current-interface draft. Do not treat existing Canvas items as accepted interface truth for this generation run.",
+    "Create a fresh reviewable Canvas draft that represents existing screens only. Use state=current for interface pieces that exist today, but remember the draft is not accepted until the user applies it.",
     "Prefer readable pages and sub-pages over one large workspace map. Keep one sub-page visible/readable at a time by using page and subPage fields.",
     "Use a compact screen-sketch grid per subPage: x=0..36 and y=0..24. The Canvas page/subPage is the screen frame; do not output giant workspace/background/page-shell containers as items.",
     "Only output visible UI pieces the user should review. Omit decorative backgrounds and uncertain internals.",
@@ -3167,13 +4511,16 @@ function promptWithPlanModeContext(
     );
   } else {
     rules.push(
-      "Canvas status: usable. Use Canvas reference codes, coordinates, groups, and states automatically when the plan affects layout or workflow.",
+      "Canvas status: usable. Use Canvas reference codes, coordinates, groups, and states when the plan affects layout or workflow.",
     );
   }
 
   rules.push(
-    "When Canvas changes are relevant, include a compact Canvas proposal section that uses existing reference codes and the states current, proposed, and deleted. Canvas proposal text is not accepted Canvas state until the user accepts.",
+    "If the request creates hidden prompt/message state, parallel recovery paths, duplicated ownership, or estimate-vs-observed confusion, challenge the risky literal request and offer a safer plan in product language before implementation steps.",
+    "When Canvas changes are relevant, include a compact Canvas proposal section that uses existing reference codes and the states current, proposed, and deleted. Canvas proposal text is a draft overlay, not accepted Canvas memory.",
+    "For a small same-page click consequence such as a menu, submenu, dropdown, filter, sort control, panel, drawer, expand, open, or close behavior, prefer an interaction frame over a new sub-page.",
     'Use this parseable format in a fenced ```canvas-proposal block when possible: `C5 state=deleted`, `C4 xywh=120,80,220,132 state=current`, `C4 grid=4.29,2.86,7.86,4.71 state=current`, or `create container title="Settings panel" state=proposed page="Page 1" subPage="Active" xywh=360,80,220,132`. Keep one canvas change per line.',
+    "For interaction frames, use `interaction trigger=B3 frame=2 target=C12 xywh=120,80,220,132 visible=true sticky=true`. Frames stay on the same page/sub-page and are limited to frame 2 and optional frame 3.",
   );
 
   const canvasBlock = canvasContext.serialized
@@ -3192,14 +4539,53 @@ function promptWithComposerContexts(
   if (contexts.length === 0) return prompt;
   const blocks = contexts
     .map((context) => {
-      if (context.type !== "canvas") return null;
-      return serializeCanvasContext(context, desktop, fallbackProject);
+      if (context.type === "canvas") {
+        return serializeCanvasContext(context, desktop, fallbackProject, prompt);
+      }
+      if (context.type === "appPreview") {
+        return serializeAppPreviewContext(context);
+      }
+      return null;
     })
     .filter((block): block is string => Boolean(block));
   if (blocks.length === 0) return prompt;
+  const hasCanvas = contexts.some((context) => context.type === "canvas");
+  const hasAppPreview = contexts.some(
+    (context) => context.type === "appPreview",
+  );
+  const guidance = [
+    "Use only the attached context unless the user asks you to inspect more.",
+    hasCanvas
+      ? "Use the included Canvas visual reference codes when discussing layout changes. If you propose a concrete Canvas change, include a compact suggestion in a fenced ```canvas-proposal block using one change per line, such as `C6 xywh=720,75,220,132 state=proposed`, `C6 grid=25.71,2.68,7.86,4.71 state=proposed`, or `create container title=\"Inspector\" page=\"Page 1\" subPage=\"Inspector\" state=proposed grid=18,2,8,18`. For small same-page click consequences such as menus, filters, sort controls, dropdowns, panels, or drawers, use `interaction trigger=B3 frame=2 target=C12 xywh=120,80,220,132 visible=true sticky=true` when useful."
+      : null,
+    hasAppPreview
+      ? "For @AppMark context, treat the rectangle as a user-marked area in the live app preview. Use it as visual intent for placement, hierarchy, or UX feedback; do not claim exact DOM nodes unless you inspect the project."
+      : null,
+    "Do not assume this context is attached to future prompts unless the user attaches it again.",
+  ].filter((line): line is string => Boolean(line));
   return `${prompt}\n\nProject context explicitly attached by the user:\n${blocks.join(
     "\n\n",
-  )}\n\nUse only the attached Canvas scope as visual context. Use the included canvas reference codes when discussing layout changes. If you propose a concrete Canvas change, include a compact suggestion in a fenced \`\`\`canvas-proposal block using one change per line, such as \`C6 xywh=720,75,220,132 state=proposed\`, \`C6 grid=25.71,2.68,7.86,4.71 state=proposed\`, or \`create container title=\"Inspector\" page=\"Page 1\" subPage=\"Inspector\" state=proposed grid=18,2,8,18\`. Do not assume this canvas is attached to future prompts unless the user attaches it again.`;
+  )}\n\n${guidance.join("\n")}`;
+}
+
+function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
+  const mark = context.areaMark;
+  const lines = [
+    `@AppMark project="${quotePromptValue(context.projectName, 80)}"`,
+    `previewUrl=${quotePromptValue(context.previewUrl, 160)}`,
+    `viewport=${context.viewport}`,
+    `area=xywh(${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
+      mark.width,
+    )},${Math.round(mark.height)})`,
+    `previewSize=${Math.round(mark.viewportWidth)}x${Math.round(
+      mark.viewportHeight,
+    )}`,
+    `createdAt=${mark.createdAt}`,
+  ];
+  if (mark.note.trim()) {
+    lines.push(`note="${quotePromptValue(mark.note.trim(), 180)}"`);
+  }
+  return lines.join("\n");
 }
 
 function canvasContextForPrompt(
@@ -3207,8 +4593,12 @@ function canvasContextForPrompt(
   desktop: DesktopState,
   fallbackProject: Project,
   allowImplicit: boolean,
+  requestPrompt: string,
 ): PlanCanvasPromptContext | null {
-  const explicitContext = contexts.find((candidate) => candidate.type === "canvas");
+  const explicitContext = contexts.find(
+    (candidate): candidate is ComposerCanvasContext =>
+      candidate.type === "canvas",
+  );
   if (!explicitContext && !allowImplicit) return null;
   const project =
     (explicitContext
@@ -3222,7 +4612,7 @@ function canvasContextForPrompt(
       projectId: project.id,
       projectName: project.name,
       target: { kind: "project" },
-    } satisfies ComposerContextReference);
+    } satisfies ComposerCanvasContext);
   const canvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
   const visibleItems = canvas.items.filter((item) => item.visible);
   const visibleGroups = canvas.groups.filter((group) =>
@@ -3248,25 +4638,70 @@ function canvasContextForPrompt(
   return {
     status,
     summary,
-    serialized: serializeCanvasContext(context, desktop, fallbackProject),
+    serialized: serializeCanvasContext(
+      context,
+      desktop,
+      fallbackProject,
+      requestPrompt,
+    ),
     snapshot: cloneProjectCanvas(canvas),
   };
 }
 
+function hasCanvasSuggestionContext(contexts: ComposerContextReference[]) {
+  const context = contexts.find((candidate) => candidate.type === "canvas");
+  if (!context) return false;
+  return true;
+}
+
+function canvasPromptSnapshotForProject(desktop: DesktopState, project: Project) {
+  const savedCanvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
+  const draftCanvas = activeCanvasDraftSnapshotForProject(desktop, project.id);
+  return draftCanvas ?? savedCanvas;
+}
+
+function activeCanvasDraftSnapshotForProject(
+  desktop: DesktopState,
+  projectId: string,
+) {
+  const candidates = [
+    ...Object.values(desktop.planProposals).filter(
+      (proposal) =>
+        proposal.projectId === projectId &&
+        proposal.canvasProposalSnapshot &&
+        (proposal.status === "pending" ||
+          (proposal.status === "accepted" && !proposal.canvasUpdatedAt)),
+    ),
+    ...Object.values(desktop.canvasSuggestions).filter(
+      (suggestion) =>
+        suggestion.projectId === projectId &&
+        suggestion.status === "pending" &&
+        suggestion.canvasProposalSnapshot,
+    ),
+  ].sort((left, right) => right.updatedAt - left.updatedAt);
+  return candidates[0]?.canvasProposalSnapshot
+    ? cloneProjectCanvas(candidates[0].canvasProposalSnapshot)
+    : null;
+}
+
 function serializeCanvasContext(
-  context: ComposerContextReference,
+  context: ComposerCanvasContext,
   desktop: DesktopState,
   fallbackProject: Project,
+  requestPrompt = "",
 ) {
   const project =
     desktop.projects.find((candidate) => candidate.id === context.projectId) ??
     fallbackProject;
-  const canvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
+  const hasActiveDraft = Boolean(
+    activeCanvasDraftSnapshotForProject(desktop, project.id),
+  );
+  const canvas = canvasPromptSnapshotForProject(desktop, project);
   const pages = [...canvas.pages].sort((left, right) => left.order - right.order);
   const pageName = (pageId: string | null) =>
     pageId
       ? (pages.find((page) => page.id === pageId)?.name ?? pageId)
-      : "Backend";
+      : "Canvas";
   const subPageLabelFor = (pageId: string | null, subPageId: string | null) =>
     pageId && subPageId
       ? canvasSubPageDisplay(pages, pageId, subPageId)
@@ -3282,11 +4717,23 @@ function serializeCanvasContext(
   const groups = scoped.groups.sort(
     (left, right) => left.numericId - right.numericId,
   );
+  const scopedItemIds = new Set(scoped.items.map((item) => item.id));
+  const scopedGroupIds = new Set(scoped.groups.map((group) => group.id));
+  const interactionPreviews = canvas.interactionPreviews.filter((preview) =>
+    preview.triggerKind === "group"
+      ? scopedGroupIds.has(preview.triggerId)
+      : scopedItemIds.has(preview.triggerId),
+  );
   const lines = [
     `@Canvas project="${quotePromptValue(project.name, 80)}"`,
+    `canvasState=${hasActiveDraft ? "saved current plus active draft overlay" : "saved current"}`,
+    hasActiveDraft
+      ? "draftRule=items marked proposed/deleted and interaction previews are active draft guidance, not saved project truth"
+      : "draftRule=no active draft overlay attached",
     `target=${canvasContextTargetDescription(context, pageName)}`,
     `coordinates=local sub-page canvas xywh in raw units; grid unit=${CANVAS_GRID_UNIT}px; norm=${CANVAS_NORMALIZED_UNITS} units over ${CANVAS_WORLD_WIDTH}x${CANVAS_WORLD_HEIGHT}`,
-    `mode=${canvas.mode}; activePage=${quotePromptValue(
+    "interactionPreviewProposal=use interaction trigger=B3 frame=2 target=C12 xywh=x,y,w,h visible=true sticky=true; frames are same-page temporary previews, max frame 2 and 3",
+    `activePage=${quotePromptValue(
       pageName(canvas.activePageId),
       40,
     )}; activeDevice=${canvas.activeDevice}; updatedAt=${canvas.updatedAt}`,
@@ -3320,6 +4767,15 @@ function serializeCanvasContext(
   if (items.length > 120) {
     lines.push(`- ${items.length - 120} more items omitted`);
   }
+  if (interactionPreviews.length > 0) {
+    lines.push("interaction-previews:");
+    for (const preview of interactionPreviews.slice(0, 20)) {
+      lines.push(serializeInteractionPreview(preview));
+    }
+    if (interactionPreviews.length > 20) {
+      lines.push(`- ${interactionPreviews.length - 20} more previews omitted`);
+    }
+  }
   return lines.join("\n");
 }
 
@@ -3332,7 +4788,7 @@ function buildCanvasContextOptions(
   const pageName = (pageId: string | null) =>
     pageId
       ? (pages.find((page) => page.id === pageId)?.name ?? pageId)
-      : "Backend";
+      : "Canvas";
   const subPageName = (pageId: string | null, subPageId: string | null) =>
     pageId && subPageId
       ? canvasSubPageDisplay(pages, pageId, subPageId)
@@ -3340,7 +4796,7 @@ function buildCanvasContextOptions(
   const itemCountByPage = new Map<string, number>();
   const itemCountBySubPage = new Map<string, number>();
   for (const item of canvas.items.filter((item) => item.visible)) {
-    const key = item.pageId ?? "backend";
+    const key = item.pageId ?? canvas.activePageId;
     itemCountByPage.set(key, (itemCountByPage.get(key) ?? 0) + 1);
     if (item.pageId && item.subPageId) {
       const subPageKey = `${item.pageId}:${item.subPageId}`;
@@ -3354,7 +4810,9 @@ function buildCanvasContextOptions(
     {
       id: `${project.id}:project`,
       label: "Canvas",
-      detail: project.name,
+      detail: `${canvas.items.filter((item) => item.visible).length} item${
+        canvas.items.filter((item) => item.visible).length === 1 ? "" : "s"
+      }`,
       context: {
         type: "canvas",
         projectId: project.id,
@@ -3369,14 +4827,13 @@ function buildCanvasContextOptions(
     options.push({
       id: `${project.id}:page:${page.id}`,
       label: page.name,
-      detail: `UI page · ${count} item${count === 1 ? "" : "s"}`,
+      detail: `Page · ${count} item${count === 1 ? "" : "s"}`,
       context: {
         type: "canvas",
         projectId: project.id,
         projectName: project.name,
         target: {
           kind: "page",
-          mode: "ui",
           pageId: page.id,
           pageName: page.name,
           subPageId: null,
@@ -3397,7 +4854,6 @@ function buildCanvasContextOptions(
             projectName: project.name,
             target: {
               kind: "page",
-              mode: "ui",
               pageId: page.id,
               pageName: page.name,
               subPageId: subPage.id,
@@ -3407,28 +4863,6 @@ function buildCanvasContextOptions(
         });
       }
     }
-  }
-
-  const backendCount = itemCountByPage.get("backend") ?? 0;
-  if (backendCount > 0) {
-    options.push({
-      id: `${project.id}:page:backend`,
-      label: "Backend",
-      detail: `${backendCount} item${backendCount === 1 ? "" : "s"}`,
-      context: {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: {
-          kind: "page",
-          mode: "backend",
-          pageId: null,
-          pageName: "Backend",
-          subPageId: null,
-          subPageName: null,
-        },
-      },
-    });
   }
 
   const groups = [...canvas.groups].sort((left, right) => {
@@ -3448,8 +4882,7 @@ function buildCanvasContextOptions(
         projectName: project.name,
         target: {
           kind: "group",
-          mode: group.pageId ? "ui" : "backend",
-          pageId: group.pageId,
+          pageId: group.pageId ?? canvas.activePageId,
           pageName: pageName(group.pageId),
           subPageId: group.subPageId,
           subPageName: subPageName(group.pageId, group.subPageId),
@@ -3480,8 +4913,7 @@ function buildCanvasContextOptions(
         projectName: project.name,
         target: {
           kind: "item",
-          mode: item.pageId ? "ui" : "backend",
-          pageId: item.pageId,
+          pageId: item.pageId ?? canvas.activePageId,
           pageName: pageName(item.pageId),
           subPageId: item.subPageId,
           subPageName: subPageName(item.pageId, item.subPageId),
@@ -3498,7 +4930,7 @@ function buildCanvasContextOptions(
 
 function scopedCanvasReferences(
   canvas: ProjectCanvas,
-  context: ComposerContextReference,
+  context: ComposerCanvasContext,
 ) {
   const target = context.target;
   const allItems = [...canvas.items];
@@ -3507,6 +4939,12 @@ function scopedCanvasReferences(
     return { items: allItems, groups: allGroups };
   }
   if (target.kind === "page") {
+    if (target.pageId === null) {
+      return {
+        items: allItems,
+        groups: allGroups,
+      };
+    }
     return {
       items: allItems.filter(
         (item) =>
@@ -3536,12 +4974,13 @@ function scopedCanvasReferences(
 }
 
 function canvasContextTargetDescription(
-  context: ComposerContextReference,
+  context: ComposerCanvasContext,
   pageName: (pageId: string | null) => string,
 ) {
   const target = context.target;
   if (!target || target.kind === "project") return "whole-canvas";
   if (target.kind === "page") {
+    if (target.pageId === null) return "whole-canvas";
     return `page:${quotePromptValue(target.pageName || pageName(target.pageId), 60)}${
       target.subPageName
         ? `; subPage=${quotePromptValue(target.subPageName, 60)}`
@@ -3665,12 +5104,69 @@ function serializeCanvasItem(
     );
   }
   if (item.body.trim()) {
-    parts.push(`label="${quotePromptValue(item.body, 140)}"`);
+    const bodyField =
+      item.kind === "container" || item.kind === "modal" || item.kind === "divider"
+        ? "description"
+        : "label";
+    parts.push(`${bodyField}="${quotePromptValue(item.body, 140)}"`);
   }
   if (item.comment.trim()) {
     parts.push(`noteForCodex="${quotePromptValue(item.comment, 180)}"`);
   }
   return parts.join("; ");
+}
+
+function serializeInteractionPreview(
+  preview: ProjectCanvas["interactionPreviews"][number],
+) {
+  const parts = [
+    `- trigger=${preview.triggerReference}`,
+    `kind=${preview.triggerKind}`,
+    `frames=${preview.frames.map((frame) => frame.frame).join(",")}`,
+  ];
+  for (const frame of preview.frames) {
+    const affected = frame.affected
+      .slice(0, 12)
+      .map((delta) => formatInteractionDelta(delta))
+      .join(" | ");
+    parts.push(
+      `frame${frame.frame}=sticky:${frame.sticky}; holdMs:${
+        frame.holdMs ?? "none"
+      }; affected:${affected || "none"}`,
+    );
+  }
+  return parts.join("; ");
+}
+
+function formatInteractionDelta(
+  delta: ProjectCanvas["interactionPreviews"][number]["frames"][number]["affected"][number],
+) {
+  const parts = [delta.reference];
+  if (
+    delta.x != null &&
+    delta.y != null &&
+    delta.width != null &&
+    delta.height != null
+  ) {
+    parts.push(
+      `xywh=${formatCanvasRect({
+        x: delta.x,
+        y: delta.y,
+        width: delta.width,
+        height: delta.height,
+      })}`,
+    );
+  }
+  if (typeof delta.visible === "boolean") {
+    parts.push(`visible=${delta.visible}`);
+  }
+  if (delta.sourceGroupReference) {
+    parts.push(`group=${delta.sourceGroupReference}`);
+  }
+  if (delta.createdItem) {
+    parts.push("created=true");
+  }
+  return parts.join(" ");
 }
 
 function hasOriginalGeometry(item: CanvasItem) {
@@ -3801,6 +5297,14 @@ function sameInspectorSelection(
         left.focusReference === right.focusReference &&
         left.focusRequestId === right.focusRequestId
       );
+    case "appPreview":
+      return right.type === "appPreview" && left.projectId === right.projectId;
+    case "planPreview":
+      return (
+        right.type === "planPreview" &&
+        left.projectId === right.projectId &&
+        left.proposalTurnId === right.proposalTurnId
+      );
     case "empty":
       return true;
   }
@@ -3815,7 +5319,7 @@ function preferredCanvasInspectorWidth() {
 }
 
 function maxInspectorWidthForShell(shellWidth: number) {
-  return Math.max(INSPECTOR_MIN_WIDTH, shellWidth - CHAT_MIN_WIDTH);
+  return Math.max(INSPECTOR_MIN_WIDTH, shellWidth - CHAT_COMFORT_WIDTH);
 }
 
 function sidebarWidthForShell(shellWidth: number) {
@@ -3861,6 +5365,36 @@ function sendFailureMessage(error: unknown) {
     return "Codex is not connected to app-server yet. Retry after it reconnects.";
   }
   return `Send failed: ${message}`;
+}
+
+function mergeThreadWithLocalFailureState(
+  incoming: Thread,
+  local: Thread | undefined,
+) {
+  if (!local || incoming.turns.length === 0) return incoming;
+  const localTurns = new Map(local.turns.map((turn) => [turn.id, turn]));
+  return {
+    ...incoming,
+    turns: incoming.turns.map((turn) => {
+      const localTurn = localTurns.get(turn.id);
+      if (!localTurn?.error || turn.error || hasAgentOutput(turn)) return turn;
+      return {
+        ...turn,
+        status: localTurn.status === "failed" ? "failed" : turn.status,
+        error: localTurn.error,
+        items: localTurn.items.length > turn.items.length ? localTurn.items : turn.items,
+      };
+    }),
+  };
+}
+
+function hasAgentOutput(turn: Turn) {
+  return turn.items.some(
+    (item) =>
+      item.type === "agentMessage" ||
+      item.type === "commandExecution" ||
+      item.type === "fileChange",
+  );
 }
 
 type ModelDisplay = {
@@ -3942,9 +5476,10 @@ function isKnownThreadForCwd(
   threads: ThreadMap,
   threadId: string,
   cwd: string | null,
+  backendMode: BackendMode,
 ) {
   const thread = threads[threadId];
-  return Boolean(thread && cwd && sameRuntimePath(thread.cwd, cwd));
+  return Boolean(thread && cwd && sameRuntimePath(thread.cwd, cwd, backendMode));
 }
 
 function isThreadNotFound(error: unknown) {

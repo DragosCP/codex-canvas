@@ -17,6 +17,8 @@ storybook-static/
 target/
 codex-rs/target/
 apps/desktop/src-tauri/target/
+apps/desktop/src-tauri/resources/
+apps/desktop/electron/resources/
 
 # ignore README for publishing
 codex-cli/README.md
@@ -39,6 +41,8 @@ AGENTS.override.md
 
 # caches
 .cache/
+.tmp/
+tmp/
 .turbo/
 .parcel-cache/
 .eslintcache
@@ -73,6 +77,7 @@ coverage/
 
 # personal files
 personal/
+vision-weaver-main/
 
 # os
 .DS_Store

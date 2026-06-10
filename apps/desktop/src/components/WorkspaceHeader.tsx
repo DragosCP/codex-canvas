@@ -1,4 +1,5 @@
 import {
+  AppWindow,
   LayoutDashboard,
   PanelLeftOpen,
   PanelRightClose,
@@ -6,17 +7,20 @@ import {
 } from "lucide-react";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { threadTitle } from "../itemUtils";
-import { runtimeInfo } from "../runtime";
 import type { ConnectionStatus, Project, Thread } from "../types";
 
 export function WorkspaceHeader(props: {
   activeProject: Project | null;
+  activeCanvasDraft: boolean;
   activeCanvasSelected: boolean;
+  activeAppPreviewSelected: boolean;
   activeThread: Thread | null;
   hasActiveProject: boolean;
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
+  backendLabel: string;
   inspectorOpen: boolean;
+  onOpenAppPreview: () => void;
   onOpenCanvas: () => void;
   onOpenSidebar: () => void;
   onToggleInspector: () => void;
@@ -52,17 +56,35 @@ export function WorkspaceHeader(props: {
         <ConnectionBadge
           status={props.connectionStatus}
           error={props.connectionError}
-          backendLabel={runtimeInfo.backendLabel}
+          backendLabel={props.backendLabel}
         />
+        <button
+          className={`icon-button app-preview-toggle ${
+            props.activeAppPreviewSelected ? "active" : ""
+          }`}
+          onClick={props.onOpenAppPreview}
+          disabled={!props.activeProject}
+          aria-pressed={props.activeAppPreviewSelected}
+          title={
+            props.activeProject
+              ? "Open app preview"
+              : "Select a project before opening App Preview"
+          }
+          type="button"
+        >
+          <AppWindow size={18} />
+        </button>
         <button
           className={`icon-button canvas-toggle ${
             props.activeCanvasSelected ? "active" : ""
-          }`}
+          } ${props.activeCanvasDraft ? "draft" : ""}`}
           onClick={props.onOpenCanvas}
           disabled={!props.activeProject}
           aria-pressed={props.activeCanvasSelected}
           title={
-            props.activeProject
+            props.activeCanvasDraft
+              ? "Canvas draft is open"
+              : props.activeProject
               ? "Open project canvas"
               : "Select a project before opening Canvas"
           }

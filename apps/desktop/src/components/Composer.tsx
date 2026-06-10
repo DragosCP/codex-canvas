@@ -8,6 +8,7 @@ import {
   FolderPlus,
   Image as ImageIcon,
   ListChecks,
+  MousePointer2,
   Paperclip,
   Plus,
   RefreshCw,
@@ -17,6 +18,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -25,6 +27,11 @@ import {
 } from "react";
 import { attachmentStatusLabel } from "../attachments";
 import { contextDetails } from "../contextMeter";
+import {
+  desktopFileUrl,
+  desktopInvoke,
+  desktopPathForFile,
+} from "../desktopBridge";
 import { permissionPresets } from "../localState";
 import type {
   ComposerAttachment,
@@ -38,27 +45,6 @@ import type {
   ThreadTokenUsage,
 } from "../types";
 
-type TauriWindow = Window & {
-  __TAURI__?: {
-    core?: {
-      invoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-      convertFileSrc?: (path: string, protocol?: string) => string;
-    };
-    webview?: {
-      getCurrentWebview?: () => {
-        onDragDropEvent?: (
-          handler: (event: {
-            payload:
-              | { type: "over"; position?: { x: number; y: number } }
-              | { type: "drop"; paths: string[]; position?: { x: number; y: number } }
-              | { type: "cancel" | "leave" };
-          }) => void,
-        ) => Promise<() => void>;
-      };
-    };
-  };
-};
-
 const effortOptions: Array<{
   value: ProjectSettings["effort"];
   label: string;
@@ -70,6 +56,7 @@ const effortOptions: Array<{
 ];
 
 const imagePreviewCache = new Map<string, string>();
+const COMPOSER_MAX_ROWS = 7;
 
 export function Composer(props: {
   attachments: ComposerAttachment[];
@@ -123,11 +110,25 @@ export function Composer(props: {
   const canvasQuery = canvasMentionQuery(contextPickerQuery);
   const canvasContextMatches = canvasQuery.matches;
   const filteredCanvasContextOptions = canvasContextMatches
-    ? filterCanvasContextOptions(props.canvasContextOptions, canvasQuery.filter)
+    ? filterCanvasContextOptions(
+        props.canvasContextOptions,
+        canvasQuery.filter,
+        canvasQuery.scope,
+      )
     : [];
   const currentCanvasContext = props.contexts.find(
     (context) => context.type === "canvas",
   );
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea(textareaRef.current);
+  }, [props.text]);
+
+  useEffect(() => {
+    if (trailingContextMention(props.text)) return;
+    setContextPickerOpen(false);
+    setContextPickerQuery("");
+  }, [props.text]);
 
   useEffect(() => {
     addAttachmentPathsRef.current = props.onAddAttachmentPaths;
@@ -184,46 +185,12 @@ export function Composer(props: {
     return () => window.removeEventListener("keydown", togglePlanMode);
   }, [props.currentSettings.planMode, props.onSettingsChange]);
 
-  useEffect(() => {
-    const webview = (window as TauriWindow).__TAURI__?.webview?.getCurrentWebview?.();
-    if (!webview?.onDragDropEvent) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void webview
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "over") {
-          setDragActive(true);
-        } else if (event.payload.type === "drop") {
-          setDragActive(false);
-          if (event.payload.paths.length > 0) {
-            addAttachmentPathsRef.current(event.payload.paths);
-          }
-        } else {
-          setDragActive(false);
-        }
-      })
-      .then((cleanup) => {
-        if (disposed) {
-          cleanup();
-        } else {
-          unlisten = cleanup;
-        }
-      })
-      .catch(() => {
-        setDragActive(false);
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   async function openFilePicker() {
     setPlusOpen(false);
-    const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
-    if (invoke) {
+    const selectedPaths = desktopInvoke<string[]>("pick_files");
+    if (selectedPaths) {
       try {
-        const paths = await invoke<string[]>("pick_files");
+        const paths = await selectedPaths;
         if (paths.length > 0) props.onAddAttachmentPaths(paths);
         return;
       } catch {
@@ -237,7 +204,7 @@ export function Composer(props: {
   function handleBrowserFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     const paths = Array.from(files)
-      .map((file) => (file as File & { path?: string }).path ?? "")
+      .map((file) => desktopPathForFile(file))
       .filter(Boolean);
     if (paths.length === 0) {
       props.onAttachmentError("Could not read those file paths.");
@@ -351,15 +318,15 @@ export function Composer(props: {
         <div className="composer-context-strip" aria-label="Added context">
           {props.contexts.map((context) => (
             <button
-              key={`${context.type}:${context.projectId}`}
+              key={composerContextKey(context)}
               type="button"
               className="composer-context-chip"
-              title={`Remove ${canvasContextChipLabel(context)} Canvas context`}
+              title={`Remove ${composerContextChipTitle(context)}`}
               onClick={() => props.onRemoveContext(context)}
             >
-              <Square size={13} />
-              <span>@Canvas</span>
-              <small>{canvasContextChipLabel(context)}</small>
+              {composerContextChipIcon(context)}
+              <span>{composerContextMentionLabel(context)}</span>
+              <small>{composerContextChipLabel(context)}</small>
               <X size={13} />
             </button>
           ))}
@@ -662,6 +629,29 @@ function trailingContextMention(value: string) {
   return { query: match[1] ?? "" };
 }
 
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea || typeof window === "undefined") return;
+  const styles = window.getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 24;
+  const minHeight = Number.parseFloat(styles.minHeight) || lineHeight * 3;
+  const borderHeight =
+    (Number.parseFloat(styles.borderTopWidth) || 0) +
+    (Number.parseFloat(styles.borderBottomWidth) || 0);
+  const paddingHeight =
+    (Number.parseFloat(styles.paddingTop) || 0) +
+    (Number.parseFloat(styles.paddingBottom) || 0);
+  const maxHeight = lineHeight * COMPOSER_MAX_ROWS + borderHeight + paddingHeight;
+  textarea.style.height = "auto";
+  if (textarea.value.trim().length === 0) {
+    textarea.style.height = `${Math.ceil(minHeight)}px`;
+    textarea.style.overflowY = "hidden";
+    return;
+  }
+  const nextHeight = Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight));
+  textarea.style.height = `${Math.ceil(nextHeight)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
 function stripTrailingContextMention(value: string) {
   const match = /(?:^|\s)@[^\n@]*$/.exec(value);
   if (!match) return value;
@@ -671,21 +661,26 @@ function stripTrailingContextMention(value: string) {
 
 function canvasMentionQuery(value: string) {
   const trimmed = value.trim();
-  if (!trimmed) return { matches: true, filter: "" };
+  if (!trimmed) return { matches: true, filter: "", scope: "all" as const };
   const parts = trimmed.split(/[\s>/]+/).filter(Boolean);
   const root = (parts[0] ?? "").toLowerCase();
-  const matches = "canvas".startsWith(root) || root === "canvas";
-  const filter = root === "canvas" ? parts.slice(1).join(" ").toLowerCase() : "";
-  return { matches, filter };
+  const aliases = ["canvas"];
+  const matches = aliases.some((alias) => alias.startsWith(root) || alias === root);
+  const filter = root.startsWith("canvas") ? parts.slice(1).join(" ").toLowerCase() : "";
+  return { matches, filter, scope: "all" as const };
 }
 
 function filterCanvasContextOptions(
   options: ComposerCanvasContextOption[],
   filter: string,
+  scope: "all" = "all",
 ) {
-  if (!filter) return options;
+  const scopedOptions = options.filter((option) => {
+    return scope === "all" || Boolean(option);
+  });
+  if (!filter) return scopedOptions;
   const terms = filter.split(/\s+/).filter(Boolean);
-  return options.filter((option) => {
+  return scopedOptions.filter((option) => {
     const haystack = [
       option.label,
       option.detail,
@@ -713,7 +708,7 @@ function canvasContextKey(context: ComposerCanvasContext) {
   const target = context.target ?? { kind: "project" as const };
   if (target.kind === "project") return `${context.projectId}:project`;
   if (target.kind === "page") {
-    return `${context.projectId}:page:${target.mode}:${target.pageId ?? "backend"}:${
+    return `${context.projectId}:page:${target.pageId ?? "all"}:${
       target.subPageId ?? "all"
     }`;
   }
@@ -723,16 +718,58 @@ function canvasContextKey(context: ComposerCanvasContext) {
   return `${context.projectId}:group:${target.groupId}`;
 }
 
+function composerContextKey(context: ComposerContextReference) {
+  if (context.type === "appPreview") return context.id;
+  return `canvas:${canvasContextKey(context)}`;
+}
+
+function composerContextChipTitle(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    return `${context.projectName} App Mark`;
+  }
+  return `${canvasContextChipLabel(context)} Canvas context`;
+}
+
+function composerContextChipLabel(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    const host = context.previewUrl.replace(/^https?:\/\//i, "");
+    return `${context.projectName} - ${host}`;
+  }
+  return canvasContextChipLabel(context);
+}
+
+function composerContextMentionLabel(context: ComposerContextReference) {
+  return context.type === "appPreview" ? "App mark" : "@Canvas";
+}
+
+function composerContextChipIcon(context: ComposerContextReference) {
+  return context.type === "appPreview" ? (
+    <MousePointer2 size={13} />
+  ) : (
+    <Square size={13} />
+  );
+}
+
 function canvasContextChipLabel(context: ComposerCanvasContext) {
   const target = context.target;
   if (!target || target.kind === "project") return context.projectName;
+  if (target.kind === "page" && target.pageId === null) {
+    return `${context.projectName} · Canvas`;
+  }
   if (target.kind === "page") return `${context.projectName} · ${target.pageName}`;
   return `${context.projectName} · ${target.reference}`;
+}
+
+function canvasContextMentionLabel(_context: ComposerCanvasContext) {
+  return "@Canvas";
 }
 
 function canvasContextShortcut(context: ComposerCanvasContext) {
   const target = context.target;
   if (!target || target.kind === "project") return "@canvas";
+  if (target.kind === "page" && target.pageId === null) {
+    return "@Canvas";
+  }
   if (target.kind === "page") return target.subPageName ?? target.pageName;
   return target.reference;
 }
@@ -909,13 +946,13 @@ function useImagePreview(path: string | null) {
 
     let cancelled = false;
     const fallbackUrl = imagePreviewUrl(path);
-    const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
-    if (!invoke) {
+    const preview = desktopInvoke<string>("read_image_data_url", { path });
+    if (!preview) {
       setPreviewUrl(fallbackUrl);
       return;
     }
 
-    invoke<string>("read_image_data_url", { path })
+    preview
       .then((dataUrl) => {
         imagePreviewCache.set(path, dataUrl);
         if (!cancelled) setPreviewUrl(dataUrl);
@@ -970,8 +1007,8 @@ function shortModelLabel(label: string) {
 function imagePreviewUrl(path: string) {
   if (!path) return null;
   const nativePath = nativeFilePath(path);
-  const convertFileSrc = (window as TauriWindow).__TAURI__?.core?.convertFileSrc;
-  if (convertFileSrc) return convertFileSrc(nativePath);
+  const desktopUrl = desktopFileUrl(nativePath);
+  if (desktopUrl) return desktopUrl;
   if (/^[A-Za-z]:[\\/]/.test(nativePath)) {
     return encodeURI(`file:///${nativePath.replace(/\\/g, "/")}`);
   }

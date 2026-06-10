@@ -3,7 +3,7 @@ import type { ReactNode } from "react";
 type RichBlock =
   | { type: "heading"; level: number; text: string }
   | { type: "paragraph"; text: string }
-  | { type: "bullet"; text: string }
+  | { type: "bullet"; text: string; marker?: string }
   | { type: "quote"; text: string }
   | { type: "code"; text: string };
 
@@ -37,8 +37,11 @@ export function RichText(props: { text: string; className?: string }) {
         }
         if (block.type === "bullet") {
           return (
-            <div className="rich-bullet" key={index}>
-              <span aria-hidden="true" />
+            <div
+              className={`rich-bullet ${block.marker ? "ordered" : ""}`.trim()}
+              key={index}
+            >
+              <span aria-hidden="true">{block.marker}</span>
               <p>{renderInline(block.text)}</p>
             </div>
           );
@@ -117,6 +120,17 @@ function parseBlocks(text: string): RichBlock[] {
       continue;
     }
 
+    const ordered = trimmed.match(/^(\d+)[.)]\s+(.+)$/);
+    if (ordered) {
+      flushParagraph();
+      blocks.push({
+        type: "bullet",
+        marker: `${ordered[1]}.`,
+        text: ordered[2],
+      });
+      continue;
+    }
+
     const quote = trimmed.match(/^>\s?(.+)$/);
     if (quote) {
       flushParagraph();
@@ -135,7 +149,7 @@ function parseBlocks(text: string): RichBlock[] {
 function renderInline(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token =
-    /(`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|(?:[A-Za-z]:[\\/]|\/mnt\/|\.{0,2}[\\/]|(?:docs|plans|apps|codex-rs|codex-cli|sdk|scripts|tools)[\\/])[\w./\\\-()[\]#@]+)/g;
+    /(\*\*[^*\n][\s\S]*?[^*\n]\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|(?:[A-Za-z]:[\\/]|\/mnt\/|\.{0,2}[\\/]|(?:docs|plans|apps|codex-rs|codex-cli|sdk|scripts|tools)[\\/])[\w./\\\-()[\]#@]+)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 
@@ -149,6 +163,14 @@ function renderInline(text: string): ReactNode[] {
 }
 
 function renderToken(value: string, key: number): ReactNode {
+  if (value.startsWith("**") && value.endsWith("**")) {
+    return (
+      <strong className="rich-strong" key={key}>
+        {renderInline(value.slice(2, -2))}
+      </strong>
+    );
+  }
+
   if (value.startsWith("`") && value.endsWith("`")) {
     return (
       <code className="rich-inline-code" key={key}>

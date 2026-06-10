@@ -64,6 +64,7 @@ export type LayoutState = {
   commandSurfaceHeight: number;
   inspectorOpen: boolean;
   commandSurfaceOpen: boolean;
+  canvasLayersOpenByProject: Record<string, boolean>;
 };
 
 export type DesktopState = {
@@ -101,6 +102,16 @@ export type InspectorSelection =
       proposalTurnId: string;
       focusReference?: string | null;
       focusRequestId?: number;
+      readOnly?: boolean;
+    }
+  | {
+      type: "appPreview";
+      projectId: string;
+    }
+  | {
+      type: "planPreview";
+      projectId: string;
+      proposalTurnId: string;
     }
   | {
       type: "canvasSuggestion";
@@ -138,7 +149,19 @@ export type ComposerCanvasContext = {
   target?: ComposerCanvasContextTarget;
 };
 
-export type ComposerContextReference = ComposerCanvasContext;
+export type ComposerAppPreviewContext = {
+  type: "appPreview";
+  id: string;
+  projectId: string;
+  projectName: string;
+  previewUrl: string;
+  viewport: "desktop" | "mobile";
+  areaMark: PlanPreviewAreaMark;
+};
+
+export type ComposerContextReference =
+  | ComposerCanvasContext
+  | ComposerAppPreviewContext;
 
 export type ComposerCanvasContextTarget =
   | {
@@ -146,7 +169,6 @@ export type ComposerCanvasContextTarget =
     }
   | {
       kind: "page";
-      mode: CanvasMode;
       pageId: string | null;
       pageName: string;
       subPageId?: string | null;
@@ -154,7 +176,6 @@ export type ComposerCanvasContextTarget =
     }
   | {
       kind: "item";
-      mode: CanvasMode;
       pageId: string | null;
       pageName: string;
       subPageId?: string | null;
@@ -165,7 +186,6 @@ export type ComposerCanvasContextTarget =
     }
   | {
       kind: "group";
-      mode: CanvasMode;
       pageId: string | null;
       pageName: string;
       subPageId?: string | null;
@@ -194,6 +214,8 @@ export type PlanProposalStatus =
   | "declined"
   | "superseded";
 
+export type PlanProposalKind = "plan" | "safer_alternative";
+
 export type CanvasProposalParseStatus =
   | "none"
   | "pending"
@@ -211,15 +233,68 @@ export type PlanProposal = {
   canvasStatus: PlanCanvasStatus;
   canvasSummary: string;
   canvasBaseSnapshot: ProjectCanvas | null;
+  canvasDraftBaseSnapshot?: ProjectCanvas | null;
   canvasProposalSnapshot: ProjectCanvas | null;
   canvasProposalParseStatus: CanvasProposalParseStatus;
   canvasProposalParserVersion?: number;
   canvasProposalChangeCount: number;
   canvasProposalSummary: string;
   canvasProposalErrors: string[];
+  canvasUserEditedAt?: number;
+  previewSpec?: PlanPreviewSpec | null;
+  previewSelectedVariantId?: string | null;
+  previewAreaMark?: PlanPreviewAreaMark | null;
+  previewUserEditedAt?: number;
+  proposalKind: PlanProposalKind;
+  canvasUpdatedAt?: number;
   status: PlanProposalStatus;
   createdAt: number;
   updatedAt: number;
+};
+
+export type PlanPreviewComponentKind =
+  | "button"
+  | "panel"
+  | "menu"
+  | "modal"
+  | "input"
+  | "badge";
+
+export type PlanPreviewPlacement = "topbar" | "sidePanel" | "modal";
+
+export type PlanPreviewComponent = {
+  kind: PlanPreviewComponentKind;
+  label: string;
+  body: string;
+  actionLabel?: string;
+};
+
+export type PlanPreviewVariant = {
+  id: "A" | "B" | "C";
+  title: string;
+  tradeoff: string;
+  placement: PlanPreviewPlacement;
+  summary: string;
+  components: PlanPreviewComponent[];
+};
+
+export type PlanPreviewSpec = {
+  version: 1;
+  summary: string;
+  variants: PlanPreviewVariant[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type PlanPreviewAreaMark = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  note: string;
+  createdAt: number;
 };
 
 export type CanvasSuggestionStatus = "pending" | "applied" | "dismissed";
@@ -234,12 +309,14 @@ export type CanvasSuggestion = {
   canvasStatus: PlanCanvasStatus;
   canvasSummary: string;
   canvasBaseSnapshot: ProjectCanvas | null;
+  canvasDraftBaseSnapshot?: ProjectCanvas | null;
   canvasProposalSnapshot: ProjectCanvas | null;
   canvasProposalParseStatus: CanvasProposalParseStatus;
   canvasProposalParserVersion?: number;
   canvasProposalChangeCount: number;
   canvasProposalSummary: string;
   canvasProposalErrors: string[];
+  canvasUserEditedAt?: number;
   status: CanvasSuggestionStatus;
   createdAt: number;
   updatedAt: number;
@@ -255,8 +332,6 @@ export type LocalChatDraft = {
   createdAt: number;
   updatedAt: number;
 };
-
-export type CanvasMode = "ui" | "backend";
 
 export type CanvasDevice = "desktop" | "mobile";
 
@@ -339,16 +414,58 @@ export type CanvasGroup = {
   updatedAt: number;
 };
 
+export type CanvasInteractionTriggerKind = "item" | "group";
+
+export type CanvasInteractionFrameNumber = 2 | 3;
+
+export type CanvasInteractionItemDelta = {
+  itemId: string;
+  reference: string;
+  x?: number;
+  y?: number;
+  width?: number;
+  height?: number;
+  visible?: boolean;
+  createdItem?: CanvasItem | null;
+  sourceGroupId?: string | null;
+  sourceGroupReference?: string | null;
+};
+
+export type CanvasInteractionFrame = {
+  id: string;
+  frame: CanvasInteractionFrameNumber;
+  label: string;
+  affected: CanvasInteractionItemDelta[];
+  holdMs: number | null;
+  sticky: boolean;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CanvasInteractionPreview = {
+  id: string;
+  triggerKind: CanvasInteractionTriggerKind;
+  triggerId: string;
+  triggerReference: string;
+  title: string;
+  pageId: string | null;
+  subPageId: string | null;
+  device: CanvasDevice | null;
+  frames: CanvasInteractionFrame[];
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type ProjectCanvas = {
   projectId: string;
   version: 2;
-  mode: CanvasMode;
   activePageId: string;
   activeSubPageId: string;
   activeDevice: CanvasDevice;
   pages: CanvasPage[];
   items: CanvasItem[];
   groups: CanvasGroup[];
+  interactionPreviews: CanvasInteractionPreview[];
   updatedAt: number;
 };
 

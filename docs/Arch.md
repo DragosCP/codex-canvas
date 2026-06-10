@@ -1,41 +1,72 @@
 # Backend Architecture Map
 
-## Desktop UI Backend Direction
+## Desktop Runtime Boundary
 
-- The v1 desktop app should use `codex-rs/app-server` as the Codex runtime boundary and must not create a parallel agent runtime.
-- `codex-rs/app-server-protocol` defines the app contract for threads, turns, streamed items, permissions, filesystem operations, config, models, account, review, plugins, apps, and MCP surfaces.
-- Desktop-owned state should stay product-facing: project metadata, pinned folders, display names, ordering, hidden/archived projects, last active thread, inspector tabs, panel layout, and recent composer/settings choices.
-- The first canvas foundation is desktop-owned project state. It should not add app-server APIs until Connections indexing/maintenance, plan-to-canvas sync, or shared persistence are deliberately designed.
-- Canvas persistence should store the latest project-level snapshot with stable internal item IDs, user-facing reference codes, names, page/sub-page/mode, normalized coordinates, dimensions, z-order, state, lock/visibility, comments, and later relationships/mappings. Raw database IDs stay internal; reference codes such as `C1` and `B1` are the user/LLM-facing handles.
-- UI Canvas review persistence is split from the accepted project canvas. Plan Mode uses `planProposals`; normal explicit `@Canvas` chat uses `canvasSuggestions`. Both store base/proposal snapshots keyed by turn so proposed UI visual changes can be inspected before being promoted into the accepted project canvas. Composer Canvas context is explicit and may target Canvas All, UI-only, a UI page, a group, or one item; later Connections scopes should target the graph, a cluster, a node, or a relationship. The accepted project canvas snapshot remains whole internally so Apply can promote UI changes safely.
-- Canvas geometry has a compact LLM contract in `apps/desktop/src/canvasState.ts` and `apps/desktop/src/canvasProposal.ts`: raw `xywh` canvas units remain the source of truth, snapshots also serialize resolved `bounds`, visible-grid `grid` coordinates, and proportional `norm` coordinates, and the proposal parser accepts `xywh=...`, `grid=...`, or `norm=...` rectangles.
-- The Canvas model now includes UI sub-pages with local coordinate spaces. Pages own ordered sub-pages, items/groups carry `subPageId`, and deleting a sub-page removes only that local sub-page content. Items serialize with page/sub-page identity so a reference such as `P1.2 C6` is enough for an agent to identify the item and read local raw/grid/normalized geometry without relying on any global overview placement.
-- Connections/code-relationship state should use a different contract from UI geometry. The source of truth should be graph nodes, edges, clusters, UI anchors, relationship kinds, confidence, zoom/detail level, and source evidence; optional view coordinates are only for readability or user-pinned layout.
-- Connections should be backed by an explicit local project index: deterministic scans/static analysis where feasible, plus low-reasoning model summaries for feature ownership. Hidden model reasoning should not be treated as durable graph evidence.
-- Connections is maintained automatically. On first use or for a large existing project, it may run a one-time indexing pass. After Codex changes code, the app should update affected graph neighborhoods from observable searches, file reads, edits, tool calls, and static analysis. Agents should read Connections before implementation and update it after implementation.
-- Connections graph maintenance should not use the UI proposal Apply/Dismiss path. Apply/Dismiss remains for UI canvas drafts and plan proposal snapshots; Connections is current project memory.
-- The current-UI mockup bootstrap reuses `canvasSuggestions` instead of `planProposals`: clicking Generate prepares a normal chat with an explicit Canvas context chip, Codex returns `canvas-proposal` create lines with `state=current`, and Apply promotes the reviewed suggestion into the accepted project canvas.
-- Generated mockup suggestions should be parsed into `canvasSuggestions` and then projected through a compact UI surface. Raw parser payloads may remain in the stored turn text for audit/debug purposes, but normal chat rendering should hide or collapse them once a suggestion snapshot has been captured.
-- Bootstrap generation needs a clear base policy. When the accepted canvas is empty or sparse, the generated suggestion should not accidentally merge old experimental proposed items into the current-state draft unless the user explicitly asked to preserve them; replacing the active generated draft/page should be a deliberate suggestion operation before Apply.
-- Generated current-UI drafts can be manually corrected in-place before Apply. Those manual draft edits should not automatically create original-position ghost metadata; that metadata is for LLM proposals or accepted-current movement review.
-- Canvas state should use an explicit state definition that agents can read while exposing only three user-facing states: current/blue solid, proposed/gold dashed, and deleted/red. Movement is persisted as metadata on a current item, with original coordinates/dimensions preserved for grey ghost rendering and reset placement. Deleting proposed items can remove them from the snapshot; deleting current items should mark them deleted instead of dropping the record.
-- Avoid storing noisy interaction history for each drag or resize. Autosave a debounced latest snapshot first; add named snapshots/checkpoints later only when the product needs intentional versioning.
-- App-server-owned state should remain runtime-facing: threads, turns, transcript persistence, tools, command execution, file changes, approvals, sandboxing, review events, and model/config/account reads.
-- Before building UI surfaces, P03 requires a backend proof gate that starts/connects to app-server, lists/reads/starts threads, submits a prompt, streams a turn, receives command/file-change events, cancels a run, and reads config/model/account state.
-- P03 proof gate passed locally through `scripts/p03-backend-proof-gate.mjs` using app-server plus a mock Responses provider.
-- Near-term Windows dev runtime: `scripts/p03-real-app-server.mjs` launches the existing WSL-built `codex app-server`, then exposes a dev-only browser/WebView bridge because browser WebSockets include `Origin` and app-server rejects those handshakes by design. On Windows, the desktop shell starts this helper directly with Node and the script must provide a Windows-local `127.0.0.1:48890` bridge even when WSL localhost forwarding fails; the bridge forwards to the WSL bridge/app-server using the current WSL IP and stays alive even if the WSL starter process exits. This proves more real backend behavior than the mock server, but it is not the final packaged desktop architecture.
-- Real WSL command execution has been smoke-tested through app-server `command/exec` for `bash` and `rg`. Native Windows command/sandbox behavior is still unproven.
-- In the real WSL runtime, path translation is a first-class app contract. Desktop-owned project state may keep both a user-facing display path such as `C:\...` and a runtime cwd such as `/mnt/c/...`, but app-server calls must receive the runtime path. Windows drive paths must be normalized before thread/turn/filesystem calls, and path errors must be shown in the UI rather than becoming silent send failures.
-- `thread/list` responses can be metadata-oriented compared with a loaded `thread/read`. The desktop should preserve hydrated turns across list refreshes and re-read the active thread after live turn start/completion so the UI stays aligned with app-server state.
-- `thread/read` hydrates stored thread history for display but does not necessarily load the thread for appending a new turn. After restart, a listed/read thread can have `notLoaded` status; the desktop must call `thread/resume` before `turn/start`, and must clear or replace saved thread IDs if app-server reports `thread not found`.
-- Persisted raw shell response items are part of thread history. App-server history replay should project raw `exec_command` / `shell_command` / `container.exec` / `shell` `function_call` and matching `function_call_output` rollout items into `commandExecution` thread items so desktop clients can show command cards, output, exit code, and sandbox failures after restart.
-- A new empty app-server thread from `thread/start` is real and can be read with `thread/read` using `includeTurns: false`, but it is not materialized into normal `thread/list` history until the first user message. `includeTurns: true` is unavailable before that first message, and empty thread IDs can later surface as no-rollout/not-materialized failures. Desktop New Chat should therefore stay local until Send, then call `thread/start` followed by `turn/start`.
-- App-server `localImage` inputs directly load local image bytes. Structured `mention` inputs are for explicit tool/app/plugin-style mentions, not local document ingestion. Desktop should not represent a text/PDF/Office path as attached content unless it is actually injected or readable through existing tools.
-- The Tauri shell exposes small native `pick_files`, `pick_folder`, and `read_image_data_url` bridges. File picking feeds the existing desktop attachment classifier, folder picking feeds desktop-owned project state, and image preview reading only produces local thumbnail/lightbox data URLs; none of these are document-ingestion APIs or changes to app-server attachment semantics.
-- Thread rename and archive are app-server APIs (`thread/name/set`, `thread/archive`, `thread/unarchive`). No hard delete API has been proven for P03, so desktop v1 should label the action as Archive.
-- In the real WSL runtime, cwd comparison must use runtime-normalized path keys, not exact string equality. App-server may return canonicalized lowercase `/mnt/c/...` paths for a thread that desktop state originally stored with Windows-style casing, and sidebar/main state must still reconcile to one chat.
-- Account/auth visibility should come from app-server APIs such as `account/read`, `account/rateLimits/read`, `model/list`, and `config/read`; the desktop must not store or display tokens. The current WSL app-server can see the existing ChatGPT login and model list.
-- ChatGPT usage comes from app-server `account/rateLimits/read` plus `account/rateLimits/updated`. The backend may return multiple buckets in `rateLimitsByLimitId`; the `codex` bucket is the v1 usage source, and `usedPercent` is consumed quota, so "Usage remaining" UI must display `100 - usedPercent`.
-- Context window usage is app-server-owned. Live updates arrive through `thread/tokenUsage/updated` with `total`, `last`, and `modelContextWindow`; persisted usage replays when `thread/resume` includes turns. `total.totalTokens` is cumulative thread/API usage and can exceed the model window, so desktop context meters must use `last.totalTokens` as the latest active context size when `modelContextWindow` is present and sane. `thread/read` restores turns for display but does not emit the usage replay notification. Context compaction should render from the persisted `contextCompaction` thread item; deprecated `thread/compacted` is only a resync cue.
-- `apps/desktop/src-tauri/` contains the minimal Tauri v2 shell. On Windows, Rust stable MSVC, WebView2, and MSVC Build Tools are now verified locally; `tauri:dev` opens a native window and the Rust setup starts the current real WSL app-server helper plus bridge. The durable target remains a Rust-side app-server bridge that does not expose app-server directly to browser-origin WebSockets.
-- `tauri:build` currently produces a release exe, while installer bundling is still disabled. Live UI prompting through the real WSL app-server is proven for a streamed assistant response and command cards; file-change/review cards from the live UI path remain unproven.
+- The desktop app should use `codex-rs/app-server` as the Codex runtime boundary and must not create a parallel agent runtime.
+- `codex-rs/app-server-protocol` defines the contract for threads, turns, streamed items, permissions, filesystem operations, config, models, account, review, plugins, apps, and MCP surfaces.
+- Desktop-owned state should stay product-facing: project metadata, pinned folders, display names, ordering, hidden/archived projects, last active thread, inspector selection, panel layout, recent composer/settings choices, and project Canvas snapshots.
+- App-server-owned state remains runtime-facing: threads, turns, transcript persistence, tools, command execution, file changes, approvals, sandboxing, review events, and model/config/account reads.
+
+## Project Canvas
+
+- The existing coordinate-based Project Canvas is desktop-owned project planning state. It remains implemented infrastructure, but it is not the desired future UX for visual planning against a running app.
+- Canvas state is desktop-owned local project state for now. It stores stable internal item IDs, user-facing reference codes, names, pages, sub-pages, coordinates, dimensions, z-order, state, lock/visibility, comments, groups, and interaction previews.
+- Raw `xywh` canvas units remain the source of truth. Snapshots also serialize resolved `bounds`, visible-grid `grid` coordinates, and proportional `norm` coordinates.
+- The proposal parser in `apps/desktop/src/canvasProposal.ts` accepts compact `canvas-proposal` lines with `xywh=...`, `grid=...`, or `norm=...` rectangles and resolves them back into canvas units.
+- Interaction-frame lines such as `interaction trigger=T1 frame=2 target=C5 xywh=120,64,168,56 sticky=true` mutate draft `interactionPreviews`, not accepted Canvas memory unless the user later applies or updates Canvas.
+
+## Legacy Canvas Drafts And Plan Mode
+
+- Project Canvas is durable project memory for the existing coordinate-based Canvas implementation. Draft overlays are temporary plan/chat proposal data shown on top of Project Canvas.
+- Plan proposals store a base Canvas snapshot, draft proposal snapshot, parse status, change count, summary/errors, user-edit timestamp, and optional `canvasUpdatedAt`.
+- `Accept plan` is an implementation decision. It must not automatically save draft Canvas data into durable project memory.
+- Normal Canvas-only `Apply` can commit a generated or explicit Canvas suggestion. Post-implementation `Update Canvas` may promote useful visual results into project memory.
+- Historical proposal snapshots reopen read-only by default. `Edit draft` copies one into a new active draft overlay.
+- Draft deltas should be summarized only when the user submits a decision or explicit handoff, not after every drag/resize.
+
+## Live App Plan Preview
+
+- Live App Plan Preview is the future visual planning direction: the running app is the review surface, and proposed UI is temporarily injected into that app.
+- Do not model this as a separate global `UI mode`. Plan Mode remains the permission state; preview sessions are visual context attached to a plan/chat/project.
+- Live app preview is available from normal chat as well as Plan Mode. A user can open the app preview, draw an area mark, and continue chatting without first typing `@Canvas`, `@Preview`, or enabling Plan Mode.
+- The preview host is desktop-owned UI/runtime state. It must not create a parallel agent runtime or bypass `codex-rs/app-server` for Codex work.
+- Preview state should include project ID, URL, route label, viewport, status, error, updated timestamp, and cleanup/reset status.
+- Plan preview state should include one to three preview variants, active variant ID, current temporary interaction state, route, viewport, screenshot reference, and optional area mark.
+- Preview variants are temporary specs, not branches, builds, or code implementations. The host should load one real app preview and swap the selected injected variant.
+- Area marks are temporary context: screenshot bounds, route, viewport, user instruction, and timestamp. They are not durable Canvas geometry.
+- When an area mark is created outside a pending plan, the desktop should attach a compact composer context chip automatically. The next user message should include the mark context; removing the chip drops that mark from the send context.
+- Prefer semantic placement anchors over exact DOM selectors: visible text, accessibility role/name, route region, or user-marked area.
+- Raw DOM selectors, component guesses, or source hints are implementation aids only. They should not become the primary product model or user-facing truth.
+- If injection is unsafe or impossible for a project, fall back to screenshot marking plus plan text.
+
+## Generated Interface Drafts
+
+- The empty/fresh Canvas bootstrap uses normal `canvasSuggestions`, not Plan Mode.
+- The generator asks Codex for current-interface `canvas-proposal` create lines and reviews the result as an editable draft.
+- Generated drafts keep a generated base snapshot for Reset and a mutable review snapshot for user edits.
+- During review, generated current-interface items render as draft/proposed. Final Apply promotes accepted items into current saved Canvas memory.
+- Live App Plan Preview should become the preferred visual planning surface when a local preview is available. Model-estimated generated mockups remain fallback while the legacy Canvas implementation exists.
+
+## Desktop Shell
+
+- On Windows, the Electron desktop shell starts a native Codex app-server sidecar plus a Windows-local origin-stripping bridge. User-facing project paths may stay Windows-style, but app-server calls must receive runtime-normalized paths.
+- The WSL/Node bridge remains a dev runtime option only. A shareable build should follow the packaged Codex shape: ship a native app-server sidecar and launch it hidden from Electron, without requiring WSL, Node, or repo-local scripts on the recipient machine.
+- The desktop shell selects the backend runtime by `P03_DESKTOP_BACKEND`: `real-native`/`native`/`sidecar` use the native sidecar, and `real-wsl`/`wsl` use the dev WSL helper. Electron defaults to the native sidecar.
+- The native sidecar lane launches packaged `codex.exe app-server --listen ws://127.0.0.1:48889` and exposes the UI-facing bridge on `ws://127.0.0.1:48890`.
+- Browser/WebView clients must not connect directly to app-server websocket. Electron owns the local origin-stripping TCP bridge so app-server can keep rejecting browser `Origin` headers while the desktop UI can connect through loopback.
+- Dev helper processes receive `P03_DESKTOP_PARENT_PID` or are owned by the Electron process so rebuilds or forced closes do not leave orphan app-server helpers.
+- Release desktop builds should not open a console window. Electron starts helper processes with no-window flags and keeps app-server logs in files rather than foreground terminals.
+- `scripts/stage-desktop-sidecar.mjs` builds and stages the Windows release sidecar in `apps/desktop/electron/resources/codex-sidecar`: `codex.exe`, `codex-resources/codex-command-runner.exe`, `codex-resources/codex-windows-sandbox-setup.exe`, and `codex-resources/rg.exe`.
+- Thread list/read/resume behavior must reconcile sidebar state and hydrated turns without showing stale chats or raw thread IDs.
+- Electron exposes small native bridges for file/folder picking, image previews, auth URL opening, and future preview/browser control; document ingestion remains an app-server/tool concern.
+- Tauri is retired on the current branch. Electron must preserve the existing app-server boundary and local bridge semantics unless the app-server contract explicitly changes.
+- Account/auth/model/usage visibility should come from app-server APIs. The desktop can start app-server `account/login/start` flows for ChatGPT browser auth, ChatGPT device-code auth, or API-key auth, then listen for `account/login/completed` and `account/updated`; it must not store or display tokens.
+- Electron owns only native helpers such as opening auth URLs in the user's browser. App-server owns localhost callbacks, credential persistence, token refresh, and logout.
+
+## Verification
+
+- Parser/state logic should use unit-style checks where possible.
+- React rendering behavior can use a browser/component harness.
+- Repeated desktop flows should prefer DOM/state automation gates in the real desktop shell when available.
+- Screenshots and manual pointer driving are still useful for final visual sanity, but should not be the only repeated assertion layer.
+- After user-visible Canvas, Live App Plan Preview, Plan Mode, composer, or project behavior changes, dogfood in two local projects when feasible and say exactly what could not be verified.

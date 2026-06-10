@@ -13,6 +13,16 @@ const bridgePort = process.env.P03_REAL_BRIDGE_PORT ?? "48890";
 const bridgeHost = process.env.P03_REAL_BRIDGE_HOST ?? "0.0.0.0";
 const appServerUrl = `ws://127.0.0.1:${appServerPort}`;
 const bridgeUrl = `ws://127.0.0.1:${bridgePort}`;
+const desktopParentPid = Number.parseInt(
+  process.env.P03_DESKTOP_PARENT_PID ?? "",
+  10,
+);
+const watchedParentPid = process.platform === "win32" ? desktopParentPid : NaN;
+const hasWatchedParentPid =
+  Number.isFinite(watchedParentPid) && watchedParentPid > 0;
+
+let cleanupAndExit = () => process.exit(0);
+watchParentProcess(() => cleanupAndExit());
 
 if (process.platform === "win32") {
   const wslScript = wslpath(scriptPath);
@@ -33,7 +43,7 @@ if (process.platform === "win32") {
       "--",
       "bash",
       "-lc",
-      `cd ${sh(wslRepo)} && node ${sh(wslScript)}`,
+      `cd ${sh(wslRepo)} && P03_DESKTOP_PARENT_PID= node ${sh(wslScript)}`,
     ],
     {
       stdio: "inherit",
@@ -41,26 +51,37 @@ if (process.platform === "win32") {
         ...process.env,
         P03_REAL_BRIDGE_HOST: "0.0.0.0",
       },
+      windowsHide: true,
     },
   );
 
+  let windowsBridgeServer = null;
+  cleanupAndExit = () => {
+    wslProcess.kill();
+    windowsBridgeServer?.close();
+    process.exit(0);
+  };
+
   for (const signal of ["SIGINT", "SIGTERM"]) {
-    process.on(signal, () => {
-      wslProcess.kill();
-      process.exit(0);
-    });
+    process.on(signal, cleanupAndExit);
   }
 
   const wslBridgeHost = await waitForWslBridgeHost(bridgePort);
-  const windowsBridgeServer = await startWebSocketBridge(
-    bridgePort,
-    bridgePort,
-    wslBridgeHost,
-    "127.0.0.1",
-  );
+  windowsBridgeServer = (await readyz(bridgePort))
+    ? null
+    : await startWebSocketBridge(
+        bridgePort,
+        bridgePort,
+        wslBridgeHost,
+        "127.0.0.1",
+      );
 
   console.log(`P03 WSL bridge reachable at ws://${wslBridgeHost}:${bridgePort}`);
-  console.log(`P03 Windows desktop bridge listening at ${bridgeUrl}`);
+  console.log(
+    windowsBridgeServer
+      ? `P03 Windows desktop bridge listening at ${bridgeUrl}`
+      : `P03 Windows desktop bridge using WSL localhost forwarding at ${bridgeUrl}`,
+  );
   console.log("Use Ctrl+C to stop.");
 
   wslProcess.on("exit", (code) => {
@@ -77,6 +98,13 @@ if (!existsSync(codexBin)) {
 }
 
 let appServer = null;
+let bridgeServer = null;
+cleanupAndExit = () => {
+  appServer?.kill();
+  bridgeServer?.close();
+  process.exit(0);
+};
+
 if (await readyz(appServerPort)) {
   console.log(`Using existing real WSL app-server at ${appServerUrl}`);
 } else {
@@ -91,14 +119,10 @@ if (await readyz(appServerPort)) {
 }
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => {
-    appServer?.kill();
-    process.exit(0);
-  });
+  process.on(signal, cleanupAndExit);
 }
 
 await waitForReady(appServerPort);
-let bridgeServer = null;
 if (await readyz(bridgePort)) {
   console.log(`Using existing real WSL browser bridge at ${bridgeUrl}`);
 } else {
@@ -218,6 +242,24 @@ function wait(ms) {
   return new Promise((resolvePromise) => {
     setTimeout(resolvePromise, ms);
   });
+}
+
+function watchParentProcess(onExit) {
+  if (!hasWatchedParentPid) return;
+  const timer = setInterval(() => {
+    if (isProcessAlive(watchedParentPid)) return;
+    onExit();
+  }, 1000);
+  timer.unref?.();
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
 }
 
 function keepAlive() {

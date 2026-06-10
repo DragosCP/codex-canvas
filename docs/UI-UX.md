@@ -1,155 +1,112 @@
 # UI / UX Direction
 
-## Desktop App V1 Direction
+## Desktop App V1
 
-- P03 focuses on the app itself before the visual planning canvas.
-- V1 should prove the core loop: add a local project/folder, create or resume a chat, send a prompt, stream the assistant response, show agent commands, review file edits, handle permissions, and persist projects/chats/layout after restart.
-- The attached desktop screenshots are workflow references, not a pixel-perfect spec. Reuse useful patterns such as the project sidebar, composer controls, permissions/model menus, file cards, inspector/document panel, and progress/status surfaces.
-- Use a read-only or mostly read-only Command Output Surface for inspecting commands the agent ran through Codex; do not make V1 a general-purpose interactive terminal emulator.
-- Keep advanced surfaces such as the full canvas, rich plugin management, automations, microphone/realtime, and polished account upsells deferred until the core loop works.
-- The first shell in `apps/desktop/` uses a three-panel layout with sidebar, chat/composer, inspector, plus a bottom read-only Command Output Surface. Keep tightening density and workflow polish around the core loop before adding canvas, microphone, or advanced admin surfaces.
-- Normal users should not need to click Connect. The desktop shell should start/connect automatically, show clear starting/connecting/connected/failed states, and preserve a retry action only for failures. Mock/demo backend modes must be labeled honestly.
-- The composer primary Send action must stay visible at normal desktop window sizes. Retry should appear only after a real previous prompt and must read as secondary. Disabled sends need an inline reason, and send failures must surface in the composer instead of becoming silent no-ops.
-- Retry belongs to the current recoverable prompt only. It should resend the same prompt with the same project/model/effort/permission/Plan Mode settings where possible, and should clear when the user changes project, selects another chat, starts a new chat, or archives the failed chat.
-- New Chat opens a session-local draft for the selected project. It should not create a backend thread until the first Send/Enter. Draft text and attachments should survive switching chats during the app session, and empty inactive drafts should not appear as saved chats.
-- Composer controls should behave like a compact chat product surface: textarea first, one simple plus menu for Add photos & files and Plan Mode, permissions/model controls as contained popovers, and no persistent instruction text under the control row.
-- Attachments should stay quiet: filename first for non-images, with at most one small useful state such as Ready or Unsupported. Images attach directly as removable thumbnail cards, and clicking an image opens a large preview with keyboard left/right navigation. Text/code/Markdown files are ready for tool inspection, not automatically loaded into context; unsupported files should block Send with simple copy.
-- Left navigation should feel like product navigation, not nested content cards. Projects and chats are slim rows by default; hover and selected states may use subtle row backgrounds, but nav should avoid boxed chat-list regions and cards inside cards.
-- Project chats belong under their project in the sidebar for V1. Global Chats remains deferred until there is a clearer product reason and backend/search behavior to support it honestly.
-- Settings/account belongs in a compact bottom-left sidebar popover, not the right inspector. Show usage only when real app-server rate-limit data is available; otherwise omit it. "Usage remaining" should show remaining quota, not backend consumed quota.
-- Sidebar, chat history, inspector, and long command output should scroll independently. The composer should stay reachable, and long messages or diffs should never stretch the whole app shell.
-- Hidden panels should not reserve dead space. If the inspector is closed, the chat workspace uses the available width; if it is open, it must show useful activity or detail content.
-- Inspector detail is scoped to the active chat. When the user switches chats, retarget the inspector to that chat's first Markdown edit if one exists; otherwise return to Activity/empty rather than showing stale files from another chat.
-- The inspector should be resizable by the user and document previews should wrap readable content rather than creating inner horizontal scrollers. Markdown-like text in chat and inspector should use product styling for headings, links, paths, and inline code instead of looking like a raw dump.
-- The desktop shell must adapt before controls overlap: the chat column and composer footer should shrink/wrap first, and the inspector should stay open until the window reaches a truly tight breakpoint. When auto-collapsing at that breakpoint, update the inspector toggle state/icon so the UI says the panel is closed.
-- When the Inspector/Canvas is open, resizing should prioritize real workspace room: the right panel may grow until chat is phone-like, the left navigation should collapse into the drawer before chat drops below phone width, and the Inspector/Canvas itself should keep a phone-like minimum width rather than becoming unusably narrow.
-- At phone-like widths, the left navigation should move into a slide-in drawer with an obvious reopen control instead of forcing the chat/composer to overlap or reserve unusable width.
-- Empty command output should stay out of the way. Show a compact read-only Commands dock only after commands exist.
-- Agent commentary is progress/status activity, not final assistant prose. Render `final_answer` as the main response; render `commentary` as compact secondary progress that can collapse after completion.
-- In the desktop chat, the default completed-turn view should show the final output only, with a compact "Worked for..." or "Thought process" reveal above it. Commands belong inside that reveal as slim text rows under "Ran x commands"; do not render command cards, command panels, or inspector command details by default.
-- The "Worked for..." divider should span the same readable width as the assistant output, not stop at the timestamp. Expanded thought-process text should use normal readable foreground, while command rows stay secondary/muted with a command icon.
-- Edited-file summaries should stay lightweight in the chat: show "Edited x files", list the first three files with `+/-` line counts, then "Show x more files" for the rest. Markdown file rows may open the document inspector; do not load large diffs into the inspector by default.
-- Internal audit/proof prose such as "Evidence surfaces include..." should not appear in the normal assistant answer surface. Keep persisted transcript data intact, but hide scaffolding-style evidence paragraphs from the product chat display.
-- Command and sandbox failures belong in command surfaces, not as normal assistant body text. A missing sandbox dependency such as `bubblewrap` should read as a failed command/sandbox issue, distinct from a failed assistant answer.
-- Primary workflow headers should lead with project and chat names. Full filesystem paths, WSL/runtime labels, and backend details belong in hover text, settings, or error details.
-- Model controls should not say ambiguous defaults when the backend state is known or still loading. Show the selected model, configured model, loading state, or error state.
-- Context usage belongs in the composer footer as a compact meter. Show real percentages and token counts only from the latest active context-window usage, never from cumulative lifetime token spend; if usage is missing or internally inconsistent, show a quiet unavailable state. Compaction appears in chat as a slim timeline divider, not a normal assistant message.
-- For WSL-backed projects, users should be allowed to paste or recognize normal Windows paths, while the app quietly uses WSL runtime paths behind the scenes. If path conversion fails, the app should explain the problem in user language.
-- After restart or reconnect, the sidebar, main chat, and composer must reconcile to the same valid thread. If a saved thread is missing or not loadable, clear it or create a recoverable new chat state; never leave old messages visible while the sidebar says no chats, and never expose raw thread IDs as the user's problem.
+- The core loop is: add a project, create or resume a chat, send a prompt, stream the assistant response, show commands/file edits, handle permissions, and persist layout after restart.
+- Keep the app feeling like a focused SPA: fast project/chat switching, no stale route flashes, no stale previous-screen UI, and no hidden panels reserving dead space.
+- Left navigation is product navigation, not nested cards. Projects and chats should be slim rows with subtle selected/hover treatment.
+- The composer stays reachable and primary. Attachments are compact, removable, and block Send only when unsupported.
+- The settings/account popover should show a direct `Sign in` action when app-server reports OpenAI auth is required and no account is connected. The auth dialog keeps ChatGPT as the primary path, with device code and API key as compact fallbacks.
+- Plan Mode belongs in the composer controls. Toggling Plan Mode should not navigate, open Canvas, or change Inspector focus by itself.
+- The Inspector is a detail surface. When closed, chat should use the width. When open, it should show useful activity, documents, file review, approvals, or Canvas.
 
-## Planned Canvas UX
+## Mode Model
 
-- Canvas is project-owned visual working memory, not a Plan Mode-only object.
-- Canvas should not appear as another chat row. It belongs to the project and can live as a project-level Inspector/workspace action.
-- The Canvas entry point should read as intentional project UI: prefer a clear project-level button near the project/chat workspace header, with a visible label when there is room and a tooltip when compact.
-- On a fresh project, the Canvas should support an obvious bootstrap action such as "Generate current UI mockup" that asks Codex to inspect the local project and create an editable low-fidelity current-state layout.
-- Generated current-state containers should start as reviewable, not magically correct: users should be nudged to inspect placement, adjust item names/coordinates, and mark what is accepted without making the canvas feel like a settings form.
-- The "Generate current UI mockup" bootstrap should use the normal explicit `@Canvas` suggestion flow, not Plan Mode. The generated mockup is applied to Canvas only after the user reviews and applies the Canvas suggestion; accepting it should not send an implementation turn.
-- The generated mockup flow should not expose the raw `canvas-proposal` block as the primary assistant answer. After the parser captures a valid suggestion, chat should show a short human summary and keep the generated Canvas review fixed near the composer, similar to a pending action strip, so the user can scroll without losing Apply/Dismiss. Put the Canvas/Apply/Dismiss actions below the summary text so the card remains readable in narrow chat widths.
-- The generated prompt itself should render compactly in the transcript. The user should not see a large wall of hidden parser instructions after pressing Generate; the detailed prompt can remain part of the sent request, but the chat bubble should read like a concise "Generate current UI mockup" request.
-- Avoid loading flashes during generated mockup runs: keep the previous stable chat/canvas surface visible while the new turn or suggestion is being prepared, reserve the review strip area instead of letting it jump between the message body and composer, and keep a stable collapsed "Thinking" row visible while the model is working instead of letting the activity surface appear and disappear.
-- Generated current UI draft items use blue/current when they describe existing UI, but the surrounding review label should say they are still an unapplied generated draft. Apply promotes the draft to accepted Canvas; Dismiss leaves the accepted Canvas unchanged.
-- Generated UI pages should stay readable. Prefer one Canvas page per distinct route/workflow and sub-pages for materially different states within that route, such as empty chat, active chat, Inspector-open chat, settings tabs, auth OTP, onboarding steps, or a repo chooser dialog. Use a compact per-sub-page screen grid rather than one huge workspace map, avoid giant background/page-shell rectangles, and keep any future screen-frame treatment visually quiet and out of the user's main layer-management burden.
-- Plans should be reviewable visually before implementation, not only as technical text.
-- A plan Expand/review action should show the accepted low-fidelity UI layout and the proposed plan canvas snapshot in one spatial view, not as a separate unrelated mockup.
-- Every plan should prepare UI proposal snapshots when visual placement needs review. Connections should be read as current project truth during planning and updated automatically after accepted code changes.
-- Recommended v1: a project-level Canvas action opens the canvas surface, and the Plan Mode toggle in the chat composer footer opens or emphasizes the same canvas in expanded Canvas Inspector mode.
-- When Plan Mode is on, Canvas should become more prominent and should be able to show "proposed changes for this plan" without hiding the chat context the user is planning from.
-- While Plan Mode is on, Canvas can be brought forward as the visual review surface. Turning Plan Mode off should give the chat space back by closing the active Canvas view; the user can reopen Canvas explicitly from the project Canvas button.
-- Plan Mode should treat plan text and canvas proposal as one review object: the written plan is the verbal version of the proposal and the canvas snapshot is the spatial version. Do not create a separate chat-level "Apply to Canvas" workflow.
-- Future plans should become shorter as Canvas becomes project truth. UI should carry visual intent; Connections should carry code ownership and relationships; chat should ask for decisions and summarize changes instead of becoming the durable memory store.
-- The chat-side plan card owns the review choices: Accept, Modify, and Decline. Accept promotes the proposal snapshot to current canvas, strips proposal-only original-position review metadata from changed items, switches an open proposal Canvas back to the accepted project Canvas, and continues implementation; Modify lets the user revise by text or by editing the proposal canvas; Decline discards both the plan proposal and proposal snapshot, closes an open proposal Canvas, and returns the Inspector to a neutral state. The Canvas header may identify that the user is viewing a plan proposal, but it should not show a second approval system.
-- Current implementation has the first chat-side proposal shell plus stored visual proposal snapshots. A compact Accept/Modify/Decline strip appears below a Plan Mode response, with Canvas status and parsed proposal-change status shown quietly. If a visual proposal exists, a Canvas action opens the proposal snapshot in the Inspector so the user can inspect or edit it before Accept. Canvas references in the strip can open and focus the matching proposal item/group. Modify/Re-analyse submits a compact summary of the current proposal snapshot changes directly when there is a visual delta; if there is no visual delta, it falls back to a typed revision draft.
-- Sending a new prompt in the same chat should replace older pending plan proposals. This keeps the review model close to official Codex: the user can accept the current plan, modify it, dismiss it, or simply continue with a new prompt that supersedes the old pending decision.
-- The first parser is intentionally compact: Codex should return one change per line in a `canvas-proposal` fenced block, using existing references such as `C5 state=deleted`, movement/resize such as `C4 xywh=120,80,220,132 state=current`, or creation such as `create container title="Settings panel" state=proposed page="Page 1" xywh=360,80,220,132`.
-- If the user edits the proposal canvas directly, track those edits quietly and summarize them when the user submits Modify/Re-analyse. Do not rewrite the chat input after every drag. The summary should include changed reference codes and before/after coordinates or states, and should be generated from the latest proposal snapshot at the moment Modify is pressed. When that summary is non-empty, Modify/Re-analyse should send the revision immediately rather than forcing a second Send click.
-- Chat should remain conversational. It can show a compact Canvas section inside the plan card with changed references such as `C5 moved` or `C13 marked deleted`; clicking a reference opens and focuses the Canvas proposal at that item.
-- Plan Mode prompts should always include a clear Canvas status:
-  - Canvas empty: tell Codex not to invent existing Canvas references or exact current coordinates; it may propose a bootstrap canvas snapshot or recommend generating a current UI mockup first.
-  - Canvas sparse: tell Codex the canvas is rough user context, not complete application truth.
-  - Canvas usable: tell Codex to use the accepted canvas snapshot automatically and, when the plan affects UI layout, workflow, code ownership, or reuse, return a canvas proposal snapshot alongside the written plan.
-- If the user chooses not to use Canvas, the Plan Proposal Review should still work as a normal plan review. The plan card can omit the Canvas section or show a small "No canvas attached" state, but should not nag.
-- If Canvas has little data, the UI should avoid pretending precision. Prefer language like "Canvas is sparse" and "Suggested visual bootstrap" rather than exact-sounding visual changes against missing context.
-- Expanded Canvas Inspector should open at a useful default size, remember width, and offer one-click maximize for detailed spatial editing.
-- Normal Inspector is for details. Expanded Plan Mode Canvas Inspector is for spatial editing.
-- Inspector-style details can live inside the expanded Canvas Inspector for layers, properties, comments, and plan controls.
-- The canvas can be viewed from the project at any time; Plan Mode is a focused planning/editing path, not the only way to reach it.
-- Canvas can act as project context for a prompt or plan. For normal chat, the user can use `@canvas`, `@Canvas-UI`, later `@Canvas-Connections`, or a composer context chip. In Plan Mode, the app should automatically include relevant UI and Connections context when it has data, because Canvas is project truth and the user should not have to manage it manually.
-- The handoff should support repeated use over time: users can call out Canvas before a future prompt, let Codex read the latest snapshot, and then update the canvas through the plan or direct canvas edits.
-- The composer has a real `@` picker for project context. Typing `@canvas` exposes Canvas as a first-class project item and can attach Canvas All, UI-only, a UI page, a group, or a single item such as `C6`; later it should also expose Connections-only, a Connections cluster, node, or relationship.
-- `@Canvas` should mean Canvas All or open the picker. `@Canvas-UI` should attach only UI canvas state and expect `canvas-proposal` changes when visual changes matter. `@Canvas-Connections` should attach current Connections graph state once implemented; routine graph updates happen automatically after scans and code changes. The visible chip labels should be plain, such as `Canvas: All`, `Canvas: UI`, and `Canvas: Connections`.
-- Selecting a Canvas scope from the `@` picker inserts a visible removable chip, not only plain text. On Send, the desktop app includes a compact serialized snapshot for that explicit scope. UI scopes serialize project, mode, pages, groups, items, reference codes, states, coordinates, bounds, grid coordinates, normalized coordinates, visibility, locks, labels, and comments. Connections scopes serialize graph nodes, edges, clusters, anchors, relationship labels, confidence, zoom/detail level, and evidence. This remains desktop-local in v1 instead of pretending Canvas is an app/plugin/server mention.
-- Normal chat with an explicit Canvas attachment can produce a lightweight Canvas suggestion card. If Codex returns a parseable `canvas-proposal` block, the app stores a suggestion snapshot separate from the accepted project Canvas, shows changed references such as `C6 updated`, and lets the user open the proposed before/after view without entering Plan Mode. Applying the suggestion promotes it to the accepted Canvas; dismissing it discards the suggestion snapshot.
-- Canvas references in ordinary assistant prose should stay plain unless the user explicitly attached Canvas or the message has a stored Canvas proposal/suggestion. Prefer explicit `@Canvas` scoping over making every `C6`-looking token clickable without context.
-- Unlike Markdown/document inspector selections, Canvas is scoped to the active project rather than a single chat. If Canvas is open and the user switches chats in the project, the Canvas view should remain available instead of retargeting to a chat document.
-- Broader canvas access from the chat/thread header or a main workspace tab can be deferred until a later interface plan.
-- UI/Connections should be the top-level Canvas mode and belongs in the Canvas header row, aligned with the Canvas title, so the canvas body can spend its first row on tools and layers instead of duplicate chrome. V1 should hide Desktop/Mobile switching until the manual UI canvas loop proves it needs that extra dimension.
-- UI is the visual planning surface: screens, states, layout intent, workflow, and simple UX contracts that protect against unwanted rewrites such as centering, deleting, or restyling the wrong frontend code.
-- Connections is the living code relationship surface: frontend components, hooks, stores, routes, APIs, services, persistence, tools, jobs, integrations, and their relationship to UI nodes. It is current truth, not a proposal review surface.
-- UI pages should be fast to switch through a compact side page menu near the canvas edge rather than adding more header clutter. Default labels should stay simple as P1, P2, P3, etc. in the first surface; page renaming can wait until it clearly improves the workflow.
-- A UI page can have sub-pages when it needs multiple screen states. If there is only one sub-page, hide it and let the user refer to the page as `P1`. If there are multiple sub-pages, show a compact selector for states such as `P1.1 Empty`, `P1.2 Active`, and `P1.3 Inspector`.
-- Sub-page creation should be icon-light: a small `+` state control near the canvas tools creates the next sub-page for the active page and switches to it. Once there are two or more sub-pages, show compact chips; each chip can be selected, and the active chip exposes a small delete action. Do not show sub-page chrome as a second page rail.
-- Deleting a sub-page should require confirmation when it contains items, remove its local items/groups, switch to the nearest remaining sub-page, and never allow deleting the last sub-page of a page.
-- Show one sub-page at a time by default. Do not lay four desktop screens side by side as the normal editing view; a future overview mode can arrange sub-pages spatially, but everyday editing should keep text readable.
-- Each sub-page owns a local coordinate system. Serialized item geometry should include page/sub-page identity and local raw/grid/normalized coordinates inside that sub-page, so an agent can reason about `P1.2 C6` without depending on global canvas placement.
-- A sub-page should represent a meaningfully different layout state, not every hover or tiny dropdown. Use sub-pages for different tabs, dialogs, auth/onboarding states, or workspace modes that change layout enough for planning.
-- Do not repeat project/canvas names inside the Canvas Inspector when the main chat/header already names the project and the inspector header already says Canvas.
-- The user can view the canvas at any time, but editing should be locked while any thread in the project is running.
-- A user should be able to feed canvas edits back into a pending plan before final submission.
-- Proposal canvas edits are safe because they happen on a snapshot copy. The current canvas remains the source of truth unless the user accepts the proposal.
-- Canvas item state should expose only three end-user colors backed by an explicit state config: blue solid means current/existing UI, gold dashed means proposed/temporary UI, and red means marked for deletion.
-- Movement is not a fourth user-facing state. When an existing item is intentionally moved, show the original geometry as a grey ghost at its saved `x/y/w/h`, then show the moved item at the latest geometry in its normal blue/gold/red state. Proposal edits collapse to the latest proposed position; do not show intermediate movement history on the canvas. During Plan Mode review, moved items must keep their current state color unless the proposal explicitly changes state, because the user is reviewing a temporary snapshot, not already seeing implemented truth.
-- Human edits inside an unapplied generated current-UI draft should be direct draft edits. Do not show grey original-position ghosts for every manual correction in that draft; reserve the ghost treatment for proposed LLM changes against accepted canvas truth or for explicit moved-current accepted items.
-- Current/proposed/deleted should be a visual layer language first, not a prominent add-mode toggle. New manual items can default to proposed; selected-item Details should expose only gold/blue/red state swatches in that order, while layer row color and a small info guide explain the meaning.
-- Locking is protection from accidental edits, not the primary state language. Do not show lock icons inside canvas shapes; the color, fill, and border style should tell the user and the LLM what the item means. Lock controls can live in Layers/right-click when useful, but lock icons should stay neutral and must not compete with state colors.
-- Current blue items should not be deleted straight away. Delete on a proposed gold item removes it permanently; delete on a current blue item should use a red delete affordance and mark it as deleted/red. Deleted red items should not show an ordinary delete control in the layer row.
-- Visible canvas labels should be human reference codes, not raw database IDs. Use stable short references such as `C1`, `B1`, `T1`, `M1`, and `D1` so the user can say "move B1 under C2" and the LLM can read the same reference in the serialized canvas.
-- Mobile and desktop likely need separate canvases because the user experience can diverge substantially.
+- Plan Mode is the permission mode: no code changes until the user accepts.
+- Canvas/live app preview is the visual surface: it helps the user understand and steer the plan.
+- Do not add a separate top-level `UI mode` or `Canvas mode` beside Plan Mode.
+- Normal chat can use `@Canvas` or a later `@Preview` mention to attach visual context while still allowing implementation, but the user should also be able to attach preview context by action alone.
+- If the user draws a rectangle in the live app preview without Plan Mode and without a prior mention, add a removable composer chip automatically. The chip is the visible confirmation that the marked app area will be included with the next prompt.
+- Plan Mode plus a UI-relevant request should automatically offer visual review through the live app preview.
+- The user should not need to understand mode combinations. In plain behavior: Plan Mode means "show me first"; Canvas/preview means "show me visually."
 
-## Interaction Principles
+## Canvas Surface
 
-- Fewer clicks is better.
-- The user should work mostly with containers and text, plus minimal primitives such as modal, divider, and button.
-- The user should be able to select, move, resize, edit, delete proposed containers, group/ungroup, lock/unlock, comment, reset placement, and mark proposed work as current.
-- The first canvas surface needs strong basics before automation: a useful empty state, obvious add/edit/delete affordances, responsive move/resize behavior, selected-item styling that is hard to miss, and a clear read-only/locked presentation while a thread is running.
-- Basic zoom/pan is part of the first editing loop, but it should stay lightweight: mouse-wheel zooms, trackpad pinch zooms around the pointer, two-finger scroll pans, shift/horizontal wheel pans, middle-mouse drag pans, Space+drag pans, and compact toolbar icons allow zoom in, zoom out, and fit/reset view.
-- In the desktop WebView shell, pinch support depends on the native WebView allowing pinch gesture delivery. Prevent browser page zoom at the app layer so the gesture can belong to the canvas instead of resizing the whole desktop UI.
-- Add tools should be compact draggable icons, not text-heavy buttons: Container, Text, Modal, Divider, and Button. Labels belong in tooltips or small captions only when there is room.
-- Button items should be compact and highly recognizable. Prefer a small round or pill shape with a centered `B`/reference code when space is tight, and keep button width/height linked so state changes do not turn a button into a broken container. Details can still describe the visible label as "Button." Other item kinds may also collapse their visible text to a short reference when the shape is too small.
-- The canvas should expose a subtle coordinate grid. Selected items should show concise coordinates and dimensions. Canvas item coordinates should remain stable canvas units independent of zoom/pan; the viewport is only a camera. The serialized canvas state includes raw canvas `xywh`, resolved `bounds`, `grid` coordinates based on the visible grid unit, and proportional `norm` coordinates so agents can reason about placement without relying on screenshots.
-- Agent-readable canvas geometry should expose both origin/size and resolved bounds: `x`, `y`, `width`, `height`, `left`, `top`, `right`, and `bottom`. Rounded items use their bounding rectangle, because that is the useful layout rectangle for users and agents.
-- Canvas shapes should feel like planning overlays, not opaque app panels. Keep blue/gold/red fills translucent enough to reveal overlapping content, use calmer longer dashed borders for temporary and original-position outlines, and bring dragged editable items forward so stacked shapes remain manageable.
-- Selection should be unmistakable without becoming loud: selected canvas items use a clear light edge and soft ring, selected groups emphasize the group frame, and selected Layers rows get a small visible rail.
-- Locked items must still be selectable from the canvas. Locking prevents move/resize, not selection; clicking a locked shape should select it, reveal Details, and make the matching Layers row obvious enough to unlock.
-- Multi-select should come before grouping: drag an empty canvas area to select items, use Ctrl+click to add or remove individual items or groups, and then right-click the selected set to group. Drag-select must not auto-group.
-- Holding Shift while dragging an unlocked item or group should constrain movement to the strongest axis, so users can move straight horizontally or vertically without fighting the grid.
-- Groups should read as light structure in Layers: a group row with indented children and small connector lines, plus spacing before and after the group so it is easy to scan.
-- Groups should only be created from items with the same state. Do not mix blue/current, gold/proposed, and red/deleted in one group; the state should be readable at a glance by both the user and the agent.
-- Treat a group as a relationship, not a new shape. The group row should expose one group-level position lock and ungroup, but no delete control. State changes while grouped apply to all children, and individual state changes require ungrouping first.
-- Clicking any child of a group selects the whole group. Grouped children are visible in Layers for orientation, but they are not independently editable until ungrouped.
-- Dragging an unlocked group moves the whole group while preserving child spacing. Dragging a locked group should not move anything, even if the drag starts on a child.
-- Moved current groups should offer Apply group position and Reset group position in Details and right-click. Applying accepts every moved child as the new current baseline; resetting returns moved children to their grey original-position coordinates. Both actions should lock the group afterward.
-- Ungrouping a moved current group should remain allowed and should not erase child movement metadata. After ungrouping, each moved child keeps its own apply/reset path.
-- For group selection, selecting the larger/outer item should be enough when it clearly contains the grouped children. In ordinary UI/UX mockups, child panels should not cross outside the parent container; they may touch the parent border. If a design really needs overflow, the child item's own bounds should make that explicit.
-- Layers should be compact rows with reference code, name, and small neutral icons for visibility/lock/delete where allowed. Tooltips should describe the action, such as "Unlock position" or "Lock position", rather than only naming the current state. Do not show leading type icons or separate state swatch shapes; the whole row should carry the state color/treatment. A tiny info button can reveal the visual language.
-- Layer sorting should help plan review: deleted first, moved-current pairs next, proposed next, and unchanged current last. Canvas z-order still controls visual stacking on the board.
-- Details should not become a debugging panel. For the selected item, show name, label/copy/note, one optional "Note for Codex" field, gold/blue/red state swatches, coordinates, and dimensions. Keep field lengths bounded so the canvas stays scannable. Created/updated time, plan references, and internal IDs can be stored, but should not crowd the first editing surface unless the user asks for that information.
-- The Details header should carry the selected reference and kind inline, such as `C11 Container`; when nothing is selected, show only `Details`. Notes should be one-line by default, and X/Y/W/H fields should use compact inline label/value rows.
-- Details should not duplicate layer/right-click actions. Remove persistent lock/unlock and delete buttons from Details; show reset placement only when the selected item is a moved current item.
-- Canvas persistence should feel automatic and calm. Prefer debounced autosave of the latest project canvas snapshot over a big Save button or a stored record for every drag/edit. Because users will experiment and sometimes change a state by mistake, include simple undo/redo for recent canvas edits instead of exposing full layer-history machinery. Later versions can add deliberate snapshots/checkpoints when users need to preserve alternatives.
-- Normal Canvas is project-scoped, not global. If the user switches or adds a project while Canvas is open, the visible Canvas should follow the active project before accepting edits; proposal and generated-draft canvases remain attached to their own review records until accepted or dismissed.
-- Deletion, clear-canvas, and generated-draft Apply/Dismiss should persist immediately and visibly. A tiny Saving/Saved indicator is preferred over a large Save button, but the user should never wonder whether a cleared canvas will come back after restart.
-- Plan proposal persistence should be separate from accepted canvas persistence. A proposal snapshot can survive while the plan review is open, but should not replace the project canvas until accepted. On Accept, changed positions become the new saved coordinates and the grey original-position helper should disappear from the accepted canvas.
-- Right-click should be a major shortcut path for canvas editing: bring forward/back, duplicate, lock/unlock, change state/color, reset placement, mark as current, and delete when allowed. For grouped items, right-click acts on the group and should offer lock/unlock group, ungroup, and group state changes only.
-- Moved blue/current items should offer both outcomes close together: Apply position accepts the new coordinates as current and removes the ghost; Reset position returns to the saved ghost coordinates.
-- Clicking empty canvas clears selection. Escape remains the explicit keyboard escape hatch.
-- Keyboard Delete/Backspace should follow the same state rules as layer delete: proposed/gold deletes permanently, current/blue marks deleted, and deleted/red has no ordinary delete action.
-- Chat and canvas should not compete for the same active input surface; Canvas may be selected as a project row while Plan Mode gives it focused editing emphasis.
-- The canvas should avoid heavy design-tool complexity, admin/debug clutter, and boxes inside boxes unless there is a clear workflow reason.
-- Connections should feel like a calm zoomable graph surface, not a UI coordinate board. It does not need pages, sub-pages, Desktop/Mobile variants, or visible `xywh` placement as product truth.
-- Connections visuals should show the level of detail the zoom supports: feature/product areas when zoomed out, ownership clusters at medium zoom, and files/classes/functions/calls/data flow when zoomed in.
-- Show only high-signal relationships such as attaches to, contains, imports, calls, renders, reads/writes, persists, triggers, reuses, or possible duplicate. If the user pans/zooms into a dense area, a small rendering/loading state is acceptable while the detailed neighborhood appears.
-- Do not place action buttons inside the graph itself. Keep scan/update/status controls in the Canvas header and node actions in right-click or the composer.
-- Connections does not use UI Canvas blue/gold/red state language. It may use temporary emphasis for active path, selected neighborhood, recently changed path, possible duplicate, or high-confidence conflict.
-- On a new or small project, Connections can build gradually as Codex works. On a mid/large project, it should run a one-time project mapping/indexing pass in the background, then maintain only changed neighborhoods after each turn.
-- User interaction should stay lightweight: right-click a node/edge to reference it in the composer, ask about it, or flag it as wrong. The user should not be asked to approve ordinary graph maintenance.
+- Canvas remains the visible project planning entry point, but the future visual planning experience is the live running app.
+- The project Canvas button should read plainly as `Canvas` until a better product name exists.
+- When a local app preview is available, Canvas/Plan Mode should open the real app preview instead of a separate container editor.
+- Proposed UI should be temporarily injected into the app itself. It should look like proposed app UI, not like an overlay of blue boxes or DOM tags.
+- Raw DOM tags, selectors, CSS properties, and coordinate panels should not be the primary visible workflow.
+- On a fresh or sparse project, prefer finding or starting a real app preview. Use generated current-interface mockups only as fallback.
+- Generated mockups should render as editable drafts until applied while the legacy Canvas flow remains available. The raw `canvas-proposal` payload should be hidden after a suggestion snapshot is captured.
+- Legacy draft review actions should stay compact: `Open draft`, `Apply`, `Apply edits`, `Reset`, `Ask Codex`, and `Dismiss`.
+- Legacy Canvas edits inside a draft should show a quiet attached state such as `Canvas edits attached`.
+
+## Live App Plan Preview
+
+- The live app is the planning surface.
+- The live app preview is available anytime a project is active, not only inside Plan Mode.
+- In Plan Mode, a visual plan can show `Show app preview`. Opening it displays the real app with temporary proposed UI injected into the likely location.
+- If Codex has multiple plausible designs, the plan can show `Compare options` with up to three variants.
+- Option controls should be compact tabs or cards labeled `A`, `B`, and `C`, each with a short title and tradeoff. Avoid large marketing-style option panels.
+- Switching options should reset the current temporary injection and inject the selected variant into the same live app preview.
+- The app does not need to build or run three implementations. It should preview one selected temporary variant at a time, with optional screenshots for quick comparison.
+- Proposed UI should be muted or tagged as temporary, but it should still be clickable enough to understand the workflow: menus, drawers, tabs, dialogs, and simple next states.
+- Preview controls belong in compact top chrome: route or URL chip, viewport, reload, reset preview, `Mark area`, and proposed UI visibility.
+- `Mark area` lets the user draw a temporary rectangle on the app or snapshot and explain what should move or change there.
+- In normal chat, finishing a mark should add an `App mark`-style composer chip automatically. The user can then type naturally, send the prompt, or remove the chip.
+- `Mark area` is an escape hatch after the options miss or need refinement, not the primary way users design from scratch.
+- Area marks disappear after revision, acceptance, or dismissal. They are not saved as Canvas layers.
+- Preview unavailable states should offer direct next steps: choose URL, start app command, retry, or continue with a screenshot/text plan.
+- Advanced DOM/source hints should be hidden unless implementation accuracy requires them after approval.
+- Plan Mode handoff should include live route, viewport, injected preview spec, temporary interaction state, and area mark only when explicitly accepted or submitted for revision.
+
+## Legacy Pages, Sub-Pages, And Layers
+
+These rules describe the existing coordinate-based Project Canvas while it remains implemented.
+
+- Use Canvas pages for distinct routes, screens, or workflows.
+- Use sub-pages for materially different states within a page, such as empty/active, panel open, modal open, selected tab, confirmation, or recovery/error.
+- Keep Canvas page navigation prominent. Connections are not a visible Canvas tab in the current product direction.
+- Keep Canvas top chrome compact: the header row owns the Canvas title, page navigation, active page states, Layers button, and saved/draft status. State labels can omit the page prefix because the active page is visible beside them.
+- Layers and Details share one right-side Canvas panel. Selecting an item shows Layers with Details below; clicking empty Canvas space hides the whole panel. The Layers button can reveal the panel when nothing is selected.
+- If a page has only one sub-page, keep the sub-page concept visually quiet.
+- Layers should be compact rows with reference code, name, visibility, lock, and delete/mark-deleted where allowed.
+- Details should show name, visible label/copy, note for Codex, state swatches, coordinates, dimensions, and only context-specific actions.
+- Avoid duplicating layer/right-click actions in Details.
+
+## Legacy Interaction Preview
+
+These rules describe the existing coordinate-based interaction frame system while it remains implemented.
+
+- Interaction preview frames show small same-page consequences without turning Canvas into a prototype timeline.
+- A selected trigger can own frame 2 and optional frame 3. Playback shows the alternate geometry/visibility and Stop returns to base.
+- Frame editing is an explicit mode with a clear banner, `Save frame`, and `Cancel`.
+- Groups can be triggers or affected targets, but frame storage resolves to child item geometry/visibility deltas.
+- Do not add frame-specific grouping, ungrouping, deletion, or group membership editing in v1.
+
+## Plan Mode Review
+
+- The chat-side plan card owns the official decision: `Yes, implement this plan`, `No, and tell Codex what to do differently`, `Submit`, and `Dismiss Esc`.
+- If the plan is a safer alternative, option 1 should say that plainly, such as `Yes, implement safer plan`.
+- Injected app previews, selected variants, and area marks are supporting visual context for the plan. They do not save project memory on plan acceptance.
+- Option 1 can use the selected preview variant or marked area as implementation guidance.
+- Option 2 can send typed feedback, selected variant context, area marks, or any combination.
+- After implementation, prefer reloading the live app preview and comparing it to the accepted plan preview. Show `View Canvas` or `Update Canvas` only when the legacy Canvas flow is explicitly involved.
+
+## Legacy Canvas Editing Rules
+
+These rules describe the existing coordinate-based Project Canvas while it remains implemented. They are not the target UX for Live App Plan Preview.
+
+- Current items are blue/current, proposed items are gold/draft, and deleted items are red.
+- Moving a current item creates a grey original-position ghost with Apply position and Reset position.
+- Proposed items can be removed directly. Current items should be marked deleted so the change can be reviewed.
+- Grouped items select as one group. Ungroup is the escape hatch for editing children independently.
+- An unlocked group moves as a unit; a locked group cannot move.
+- Applying a moved group accepts all child positions as the new current baseline. Resetting returns them to the original ghost coordinates.
+- Right-click is a major editing shortcut: add, paste, bring front/back, duplicate, copy, cut, group, ungroup, lock, state changes, apply/reset position, and delete/mark deleted.
+
+## Responsive And Visual Quality
+
+- Canvas, chat, sidebar, and inspector should resize without overlapping controls.
+- At narrow widths, the left navigation should move into a drawer before the chat or Canvas becomes unusable.
+- Text must fit inside buttons, chips, rows, and panels at desktop and mobile widths.
+- Avoid boxes inside boxes unless the workflow truly requires it.
+- Keep colors calm: dark product shell, blue for saved/current Canvas, soft yellow for drafts, red for planned deletions, and restrained borders.
+
+## Verification
+
+- Prefer DOM/state automation for repeated desktop checks when available.
+- Use screenshots/manual review for final visual fit, not as the only regression method.
+- For Live App Plan Preview changes, verify preview open/close, project switching, route reload, option comparison, option switching, proposed UI injection, temporary interactions, area marking, automatic composer chip attachment outside Plan Mode, revision, approval, dismissal, and cleanup.
+- For legacy Canvas changes, verify open/close, generated draft review, page/sub-page navigation, editing, undo/redo, Plan Mode decision flow, and post-implementation Canvas update when relevant.
