@@ -5,6 +5,11 @@ import type {
   ThreadItem,
   Turn,
 } from "./types";
+import {
+  previewArtifactActionName,
+  previewArtifactDisplayName,
+  previewArtifactKindFromText,
+} from "./mockupArtifacts";
 
 export function sandboxPolicyFor(
   mode: SandboxMode,
@@ -32,17 +37,217 @@ export function allItems(thread: Thread | null): ThreadItem[] {
 
 export function threadTitle(thread: Thread): string {
   const title = thread.name || thread.preview || "New chat";
-  return isGeneratedCurrentUiMockupTitle(title)
-    ? "Generate current interface mockup"
-    : title;
+  const visualPlanningTitle = friendlyEmptyProjectVisualPlanningTitle(title);
+  if (visualPlanningTitle) return visualPlanningTitle;
+  const existingDecisionTitle = friendlyExistingAppVisualDecisionTitle(title);
+  if (existingDecisionTitle) return existingDecisionTitle;
+  const existingPreviewTitle = friendlyExistingAppPreviewFirstTitle(title);
+  if (existingPreviewTitle) return existingPreviewTitle;
+  const mockupReviewTitle = friendlySavedMockupReviewTitle(title);
+  if (mockupReviewTitle) return mockupReviewTitle;
+  const visualDecisionTitle = friendlyVisualDecisionSelectionTitle(title);
+  if (visualDecisionTitle) return visualDecisionTitle;
+  const buildSelectedTitle = friendlyBuildSelectedMockupTitle(title);
+  if (buildSelectedTitle) return buildSelectedTitle;
+  const mockupTitle = friendlyMockupPromptTitle(title);
+  if (mockupTitle) return mockupTitle;
+  return scrubInternalThreadTitle(
+    trimInternalContextTail(unwrapPlanModeUserRequest(title)),
+  ) || "New chat";
 }
 
-function isGeneratedCurrentUiMockupTitle(title: string) {
-  return title
-    .trimStart()
-    .startsWith(
-      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
+function friendlySavedMockupReviewTitle(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  const sentinel = "[Codex Saved Mockup Review Context]";
+  const sentinelIndex = visible.indexOf(sentinel);
+  if (sentinelIndex === -1) {
+    return null;
+  }
+  const payload = visible.slice(sentinelIndex);
+  const marker = "\n\nUser request:\n";
+  const markerIndex = payload.indexOf(marker);
+  if (markerIndex === -1) return `Review saved ${savedArtifactLabel(payload, 2)}`;
+  const request = trimInternalContextTail(
+    payload.slice(markerIndex + marker.length),
+  ).trim();
+  return request ? compactTitle(request) : `Review saved ${savedArtifactLabel(payload, 2)}`;
+}
+
+function friendlyEmptyProjectVisualPlanningTitle(text: string) {
+  const request = extractOriginalRequestForSentinel(
+    text,
+    "[Codex Empty Project Visual Planning Context]",
+  );
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Start with visual options";
+}
+
+function friendlyExistingAppVisualDecisionTitle(text: string) {
+  const request = extractOriginalRequestForSentinel(
+    text,
+    "[Codex Existing App Visual Decision Context]",
+  );
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Review current app change";
+}
+
+function friendlyExistingAppPreviewFirstTitle(text: string) {
+  const request = extractOriginalRequestForSentinel(
+    text,
+    "[Codex Existing App Preview First Context]",
+  );
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Preview current app change";
+}
+
+function scrubInternalThreadTitle(title: string) {
+  if (title.includes("[Codex Saved Mockup Review Context]")) {
+    return `Review saved ${savedArtifactLabel(title, 2)}`;
+  }
+  if (title.includes("[Codex Empty Project Visual Planning Context]")) {
+    return "Start with visual options";
+  }
+  if (title.includes("[Codex Existing App Visual Decision Context]")) {
+    return "Review current app change";
+  }
+  if (title.includes("[Codex Existing App Preview First Context]")) {
+    return "Preview current app change";
+  }
+  if (title.includes("[Codex Visual Decision Selection]")) {
+    return "Use selected option";
+  }
+  if (title.includes("[Codex Mockup Artifact Task]")) {
+    return `Update saved ${savedArtifactLabel(title, 2)}`;
+  }
+  if (title.includes("[Codex Build Selected Mockup]")) {
+    return `Build selected ${savedArtifactLabel(title, 1)}`;
+  }
+  return title;
+}
+
+function friendlyVisualDecisionSelectionTitle(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Visual Decision Selection]")) {
+    return null;
+  }
+  const marker = "\n\nUser-visible composer text:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "Use selected option";
+  const request = trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+  return request ? compactTitle(request) : "Use selected option";
+}
+
+function friendlyBuildSelectedMockupTitle(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Build Selected Mockup]")) {
+    return null;
+  }
+  const marker = "\n\nUser-visible request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return null;
+  const request = trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+  return request ? compactTitle(request) : `Build selected ${savedArtifactLabel(visible, 1)}`;
+}
+
+function unwrapPlanModeUserRequest(text: string) {
+  const visible = text.trimStart();
+  const marker = "\n\nUser request:\n";
+  if (!visible.startsWith("Plan Mode:") || !visible.includes(marker)) {
+    return visible;
+  }
+  return visible.slice(visible.indexOf(marker) + marker.length);
+}
+
+function extractOriginalRequestForSentinel(text: string, sentinel: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith(sentinel)) return null;
+  const marker = "\n\nOriginal user request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function trimInternalContextTail(text: string) {
+  const endMarkers = [
+    "Project context explicitly attached by the user:\n",
+    "\n\nProject context explicitly attached by the user:\n",
+    "Files to inspect if needed:\n",
+    "\n\nFiles to inspect if needed:\n",
+    "Supporting selected mockup context:\n",
+    "\n\nSupporting selected mockup context:\n",
+    "Build rules:\n",
+    "\n\nBuild rules:\n",
+    "Selected preview context:\n",
+    "\n\nSelected preview context:\n",
+  ];
+  const end = endMarkers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  return end == null ? text : text.slice(0, end);
+}
+
+function compactTitle(text: string) {
+  const firstLine = text.split(/\r?\n/).find((line) => line.trim()) ?? "";
+  const normalized = firstLine.replace(/\s+/g, " ").trim();
+  return normalized.length > 72
+    ? `${normalized.slice(0, 69).trimEnd()}...`
+    : normalized;
+}
+
+export function friendlyMockupPromptTitle(text: string): string | null {
+  const visible = text.trimStart();
+  if (visible.startsWith("[Codex Mockup Artifact Task]")) {
+    const artifactKind = previewArtifactKindFromText(visible, "mockup");
+    const createMatch = visible.match(
+      /Create\s+(\d+)\s+saved local (?:mockup|wireframe|preview)/i,
     );
+    if (createMatch) {
+      const depth = visible.match(/depth\s+"(quick|full)"/i)?.[1] ?? "";
+      const depthLabel = depth === "full" ? "full demo " : depth === "quick" ? "quick " : "";
+      return `Create ${createMatch[1]} ${depthLabel}${previewArtifactDisplayName(
+        artifactKind,
+        2,
+        "lower",
+      )} first`;
+    }
+    const reviseMatch = visible.match(
+      /Revise saved (?:mockup|wireframe|preview) option\s+([A-C]|Option [A-C]|(?:mockup|wireframe|preview)-[a-c])/i,
+    );
+    if (reviseMatch) {
+      return `Revise ${previewArtifactActionName(artifactKind)} ${mockupOptionLabel(
+        reviseMatch[1],
+      )}`;
+    }
+    return `Update saved ${previewArtifactDisplayName(artifactKind, 2, "lower")}`;
+  }
+  if (visible.startsWith("[Codex Build Selected Mockup]")) {
+    const artifactLabel = savedArtifactLabel(visible, 1);
+    const titleMatch = visible.match(/- Title:\s*(.+)/);
+    return titleMatch?.[1]?.trim()
+      ? `Build selected ${artifactLabel}: ${titleMatch[1].trim()}`
+      : `Build selected ${artifactLabel}`;
+  }
+  return null;
+}
+
+function savedArtifactLabel(text: string, count: number) {
+  return previewArtifactDisplayName(
+    previewArtifactKindFromText(text, "mockup"),
+    count,
+    "lower",
+  );
+}
+
+function mockupOptionLabel(value: string) {
+  const match = value.match(/[A-C]/i);
+  return match ? match[0].toUpperCase() : value;
 }
 
 export function appendDelta(
@@ -60,19 +265,96 @@ export function appendDelta(
         aggregatedOutput: `${item.aggregatedOutput ?? ""}${delta}`,
       };
     }
-    if (item.type === "reasoning")
-      return { ...item, summary: [...item.summary, delta] };
     return item;
   });
+}
+
+export function appendPlanDelta(
+  items: ThreadItem[],
+  itemId: string,
+  delta: string,
+): ThreadItem[] {
+  let found = false;
+  const next = items.map((item) => {
+    if (item.id !== itemId || item.type !== "plan") return item;
+    found = true;
+    return { ...item, text: `${item.text}${delta}` };
+  });
+  return found ? next : [...next, { type: "plan", id: itemId, text: delta }];
+}
+
+export function appendReasoningSummaryDelta(
+  items: ThreadItem[],
+  itemId: string,
+  summaryIndex: number,
+  delta: string,
+): ThreadItem[] {
+  return updateReasoningDelta(items, itemId, "summary", summaryIndex, delta);
+}
+
+export function appendReasoningTextDelta(
+  items: ThreadItem[],
+  itemId: string,
+  contentIndex: number,
+  delta: string,
+): ThreadItem[] {
+  return updateReasoningDelta(items, itemId, "content", contentIndex, delta);
+}
+
+export function ensureReasoningSummaryPart(
+  items: ThreadItem[],
+  itemId: string,
+  summaryIndex: number,
+): ThreadItem[] {
+  return updateReasoningDelta(items, itemId, "summary", summaryIndex, "");
+}
+
+function updateReasoningDelta(
+  items: ThreadItem[],
+  itemId: string,
+  field: "summary" | "content",
+  index: number,
+  delta: string,
+): ThreadItem[] {
+  const safeIndex = Math.max(0, Math.trunc(index));
+  let found = false;
+  const next = items.map((item) => {
+    if (item.id !== itemId || item.type !== "reasoning") return item;
+    found = true;
+    const values = appendIndexedDelta(item[field], safeIndex, delta);
+    return { ...item, [field]: values };
+  });
+  if (found) return next;
+  const values = appendIndexedDelta([], safeIndex, delta);
+  return [
+    ...next,
+    {
+      type: "reasoning",
+      id: itemId,
+      summary: field === "summary" ? values : [],
+      content: field === "content" ? values : [],
+    },
+  ];
+}
+
+function appendIndexedDelta(values: string[], index: number, delta: string) {
+  const next = [...values];
+  while (next.length <= index) next.push("");
+  next[index] = `${next[index] ?? ""}${delta}`;
+  return next;
 }
 
 export function upsertItem(
   items: ThreadItem[],
   next: ThreadItem,
 ): ThreadItem[] {
-  const existing = items.findIndex((item) => item.id === next.id);
-  if (existing === -1) return [...items, next];
-  return items.map((item, index) => (index === existing ? next : item));
+  const baseItems =
+    next.type === "userMessage" && !isOptimisticUserMessage(next)
+      ? items.filter((item) => !isOptimisticUserMessage(item))
+      : items;
+  const existing = baseItems.findIndex((item) => item.id === next.id);
+  if (existing === -1) return [...baseItems, next];
+  return baseItems.map((item, index) => (index === existing ? next : item));
 }
 
 export function updateTurnItems(
@@ -94,6 +376,185 @@ export function replaceTurn(turns: Turn[], turn: Turn): Turn[] {
   if (!turns.some((existing) => existing.id === turn.id))
     return [...turns, turn];
   return turns.map((existing) => (existing.id === turn.id ? turn : existing));
+}
+
+export function mergeThreadWithLocalState(
+  incoming: Thread,
+  local: Thread | undefined,
+) {
+  if (!local) return incoming;
+  if (incoming.turns.length === 0) {
+    return {
+      ...incoming,
+      status: shouldPreserveLocalThreadStatus(incoming, local)
+        ? local.status
+        : incoming.status,
+      turns: local.turns,
+    };
+  }
+  const localTurns = new Map(local.turns.map((turn) => [turn.id, turn]));
+  const incomingTurnIds = new Set(incoming.turns.map((turn) => turn.id));
+  const localOnlyTurns = local.turns.filter(
+    (turn) => !incomingTurnIds.has(turn.id) && shouldPreserveLocalTurn(turn),
+  );
+  return {
+    ...incoming,
+    status: shouldPreserveLocalThreadStatus(incoming, local)
+      ? local.status
+      : incoming.status,
+    turns: [
+      ...incoming.turns.map((turn) =>
+        mergeTurnWithLocalState(turn, localTurns.get(turn.id)),
+      ),
+      ...localOnlyTurns,
+    ],
+  };
+}
+
+function mergeTurnWithLocalState(incoming: Turn, local: Turn | undefined) {
+  if (!local) return incoming;
+
+  if (shouldPreserveLocalProgress(incoming, local)) {
+    return {
+      ...incoming,
+      status: local.status === "inProgress" ? local.status : incoming.status,
+      items: mergeThreadItems(incoming.items, local.items),
+    };
+  }
+
+  if (local.error && !incoming.error && !hasAgentOutput(incoming)) {
+    return {
+      ...incoming,
+      status: local.status === "failed" ? "failed" : incoming.status,
+      error: local.error,
+      items:
+        local.items.length > incoming.items.length ? local.items : incoming.items,
+    };
+  }
+
+  return incoming;
+}
+
+function shouldPreserveLocalThreadStatus(incoming: Thread, local: Thread) {
+  if (local.status.type !== "active") return false;
+  const incomingTurns = new Map(incoming.turns.map((turn) => [turn.id, turn]));
+  return local.turns.some((turn) => {
+    if (turn.status !== "inProgress") return false;
+    const incomingTurn = incomingTurns.get(turn.id);
+    return !incomingTurn || incomingTurn.status === "inProgress";
+  });
+}
+
+function shouldPreserveLocalTurn(turn: Turn) {
+  return turn.status === "inProgress" || Boolean(turn.error);
+}
+
+function shouldPreserveLocalProgress(incoming: Turn, local: Turn) {
+  return local.status === "inProgress" && incoming.status === "inProgress";
+}
+
+function mergeThreadItems(
+  incomingItems: ThreadItem[],
+  localItems: ThreadItem[],
+) {
+  const localById = new Map(localItems.map((item) => [item.id, item]));
+  const incomingIds = new Set(incomingItems.map((item) => item.id));
+  const incomingHasRealUserMessage = incomingItems.some(
+    (item) => item.type === "userMessage" && !isOptimisticUserMessage(item),
+  );
+  return [
+    ...incomingItems.map((item) =>
+      mergeThreadItemWithLocalState(item, localById.get(item.id)),
+    ),
+    ...localItems.filter(
+      (item) =>
+        !incomingIds.has(item.id) &&
+        !(incomingHasRealUserMessage && isOptimisticUserMessage(item)),
+    ),
+  ];
+}
+
+function isOptimisticUserMessage(item: ThreadItem) {
+  return item.type === "userMessage" && item.id.startsWith("optimistic-user:");
+}
+
+function mergeThreadItemWithLocalState(
+  incoming: ThreadItem,
+  local: ThreadItem | undefined,
+): ThreadItem {
+  if (!local || incoming.type !== local.type) return incoming;
+  if (incoming.type === "agentMessage" && local.type === "agentMessage") {
+    return local.text.length > incoming.text.length
+      ? { ...incoming, text: local.text }
+      : incoming;
+  }
+  if (incoming.type === "plan" && local.type === "plan") {
+    return local.text.length > incoming.text.length
+      ? { ...incoming, text: local.text }
+      : incoming;
+  }
+  if (incoming.type === "reasoning" && local.type === "reasoning") {
+    const incomingLength = reasoningTextLength(incoming);
+    const localLength = reasoningTextLength(local);
+    return localLength > incomingLength
+      ? {
+          ...incoming,
+          summary: mergeIndexedText(incoming.summary, local.summary),
+          content: mergeIndexedText(incoming.content, local.content),
+        }
+      : incoming;
+  }
+  if (
+    incoming.type === "commandExecution" &&
+    local.type === "commandExecution"
+  ) {
+    const incomingOutput = incoming.aggregatedOutput ?? "";
+    const localOutput = local.aggregatedOutput ?? "";
+    return localOutput.length > incomingOutput.length
+      ? { ...incoming, aggregatedOutput: localOutput }
+      : incoming;
+  }
+  if (incoming.type === "fileChange" && local.type === "fileChange") {
+    const incomingLength = fileChangeTextLength(incoming);
+    const localLength = fileChangeTextLength(local);
+    return localLength > incomingLength ? local : incoming;
+  }
+  return incoming;
+}
+
+function mergeIndexedText(incoming: string[], local: string[]) {
+  const maxLength = Math.max(incoming.length, local.length);
+  const next: string[] = [];
+  for (let index = 0; index < maxLength; index += 1) {
+    const incomingText = incoming[index] ?? "";
+    const localText = local[index] ?? "";
+    next.push(
+      localText.length > incomingText.length ? localText : incomingText,
+    );
+  }
+  return next;
+}
+
+function reasoningTextLength(item: Extract<ThreadItem, { type: "reasoning" }>) {
+  return [...item.summary, ...item.content].join("").length;
+}
+
+function fileChangeTextLength(
+  item: Extract<ThreadItem, { type: "fileChange" }>,
+) {
+  return item.changes.reduce(
+    (total, change) => total + change.path.length + change.diff.length,
+    0,
+  );
+}
+
+function hasAgentOutput(turn: Turn) {
+  return turn.items.some(
+    (item) =>
+      item.type === "agentMessage" ||
+      item.type === "commandExecution" ||
+      item.type === "fileChange",
+  );
 }
 
 export function itemLabel(item: ThreadItem): string {

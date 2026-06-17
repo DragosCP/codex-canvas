@@ -16,7 +16,9 @@
     "proof": "node ../../scripts/p03-backend-proof-gate.mjs",
     "sidecar:stage": "node ../../scripts/stage-desktop-sidecar.mjs",
     "test:compaction-render": "node ../../scripts/p03-compaction-render-test.mjs",
-    "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs"
+    "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs",
+    "test:p19": "node ../../scripts/p19-plan-preview-parser-test.mjs",
+    "test:p20": "node ../../scripts/p20-active-canvas-absence-test.mjs && node ../../scripts/p20-prompt-wrapper-title-test.mjs && node ../../scripts/p20-local-state-legacy-canvas-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

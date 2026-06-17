@@ -13,10 +13,12 @@ import {
   closedAuthDialogState,
   type AuthDialogState,
 } from "./components/AuthDialog";
-import { CanvasSuggestionReview, ChatThread } from "./components/ChatThread";
+import { ChatThread } from "./components/ChatThread";
 import { Composer } from "./components/Composer";
 import { Inspector } from "./components/Inspector";
+import { MockupOptionStrip } from "./components/MockupOptionStrip";
 import { ProjectSidebar } from "./components/ProjectSidebar";
+import { VisualDecisionStripView } from "./components/VisualDecisionStrip";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
 import {
   classifyAttachment,
@@ -24,29 +26,13 @@ import {
   promptWithInspectableFiles,
   unsupportedAttachments,
 } from "./attachments";
-import {
-  CANVAS_GRID_UNIT,
-  CANVAS_NORMALIZED_UNITS,
-  CANVAS_WORLD_HEIGHT,
-  CANVAS_WORLD_WIDTH,
-  cloneProjectCanvas,
-  createProjectCanvas,
-  gridRectFromCanvasRect,
-  normalizedRectFromCanvasRect,
-} from "./canvasState";
-import {
-  CANVAS_PROPOSAL_PARSER_VERSION,
-  applyCanvasProposalText,
-  finalizeAcceptedCanvasProposal,
-  mergeAcceptedCanvasProposal,
-} from "./canvasProposal";
 import { useAppServerConnection } from "./hooks/useAppServerConnection";
 import { useAppServerEvents } from "./hooks/useAppServerEvents";
 import { useDocumentPreview } from "./hooks/useDocumentPreview";
 import {
   activeTurn,
-  allItems,
   ensureTurn,
+  mergeThreadWithLocalState,
   sandboxPolicyFor,
   threadTitle,
 } from "./itemUtils";
@@ -64,33 +50,52 @@ import {
 } from "./runtime";
 import { desktopInvoke } from "./desktopBridge";
 import {
-  createPlanPreviewSpec,
+  parsePlanPreviewSpec,
   planPreviewDecisionSummary,
   shouldOfferPlanPreview,
 } from "./planPreview";
+import {
+  createProposalSetId,
+  previewArtifactActionName,
+  previewArtifactDisplayName,
+  previewArtifactFilePrefix,
+  previewArtifactKindFromText,
+} from "./mockupArtifacts";
+import {
+  parseVisualDecisionStrip,
+  type VisualDecisionOption,
+  type VisualDecisionStrip,
+} from "./visualDecision";
+import {
+  WORKSPACE_PROGRESS_POLL_MS,
+  formatDuration,
+  formatShortLineDelta,
+  liveProgressDetail,
+  liveProgressHeadline,
+  mergeThreadFileChanges,
+  summarizeTurnProgress,
+  useWorkspaceProgress,
+  type TurnProgressSummary,
+} from "./turnProgress";
 import type {
   AppServerSnapshot,
   BackendMode,
-  CanvasBounds,
-  CanvasGroup,
-  CanvasItem,
-  CanvasPage,
-  CanvasSuggestion,
   ComposerAttachment,
   ComposerAppPreviewContext,
-  ComposerCanvasContext,
-  ComposerCanvasContextOption,
   ComposerContextReference,
+  ComposerMockupPreviewContext,
   DesktopState,
   InspectorSelection,
   LocalChatDraft,
+  MockupPreviewSet,
   PendingApproval,
-  PlanCanvasStatus,
   PlanPreviewAreaMark,
+  PlanPreviewSessionState,
   PlanProposal,
+  PreviewArtifactKind,
   Project,
-  ProjectCanvas,
   ProjectSettings,
+  SavedMockup,
   Thread,
   ThreadItem,
   ThreadMap,
@@ -103,6 +108,7 @@ import type { LoginAccountResponse } from "../../../codex-rs/app-server-protocol
 
 type SubmissionDraft = {
   prompt: string;
+  visiblePrompt?: string;
   projectId: string;
   settings: ProjectSettings;
   attachments: ComposerAttachment[];
@@ -110,6 +116,9 @@ type SubmissionDraft = {
   createdAt: number;
   localDraftProjectId?: string | null;
   targetThreadId?: string | null;
+  openMockupsOnComplete?: boolean;
+  proposalSetId?: string | null;
+  artifactKind?: PreviewArtifactKind | null;
 };
 
 type ProjectThreadGroup = {
@@ -118,10 +127,33 @@ type ProjectThreadGroup = {
   draft: LocalChatDraft | null;
 };
 
+type VisualDecisionComposerAction = {
+  decisionId: string;
+  option: VisualDecisionOption;
+};
+
+type ProjectEmptyStatus = {
+  empty: boolean;
+  reason: string;
+  meaningfulEntries: string[];
+  ignoredEntries: string[];
+};
+
+type MockupsListResult = Omit<MockupPreviewSet, "projectId"> & {
+  projectPath: string;
+};
+
+type ActiveVisualDecision = {
+  id: string;
+  turnId: string;
+  decision: VisualDecisionStrip;
+};
+
 const SIDEBAR_DRAWER_WIDTH = 700;
 const INSPECTOR_AUTO_COLLAPSE_WIDTH = 660;
 const INSPECTOR_MIN_WIDTH = 320;
 const CHAT_COMFORT_WIDTH = 520;
+const PREVIEW_CHAT_MIN_WIDTH = 320;
 const CHAT_PHONE_LAYOUT_WIDTH = 460;
 const INSPECTOR_AUTO_COLLAPSE_QUERY = `(max-width: ${INSPECTOR_AUTO_COLLAPSE_WIDTH}px)`;
 const TURN_SETTLE_POLL_INTERVAL_MS = 1500;
@@ -132,6 +164,7 @@ export function App() {
     loadDesktopState(),
   );
   const [runtime, setRuntime] = useState(runtimeInfo);
+  const [runtimeReady, setRuntimeReady] = useState(false);
   const [threads, setThreads] = useState<ThreadMap>({});
   const [tokenUsageByThread, setTokenUsageByThread] =
     useState<ThreadTokenUsageMap>({});
@@ -147,9 +180,9 @@ export function App() {
   const [chatDrafts, setChatDrafts] = useState<Record<string, LocalChatDraft>>(
     {},
   );
-  const [activeDraftProjectId, setActiveDraftProjectId] = useState<string | null>(
-    null,
-  );
+  const [activeDraftProjectId, setActiveDraftProjectId] = useState<
+    string | null
+  >(null);
   const [composerText, setComposerText] = useState("");
   const [planProposalFeedbackDrafts, setPlanProposalFeedbackDrafts] = useState<
     Record<string, string>
@@ -158,6 +191,17 @@ export function App() {
   const [composerContexts, setComposerContexts] = useState<
     ComposerContextReference[]
   >([]);
+  const [visualDecisionComposerAction, setVisualDecisionComposerAction] =
+    useState<VisualDecisionComposerAction | null>(null);
+  const [mockupPreviewSets, setMockupPreviewSets] = useState<
+    Record<string, MockupPreviewSet>
+  >({});
+  const [projectEmptyStatusById, setProjectEmptyStatusById] = useState<
+    Record<string, ProjectEmptyStatus>
+  >({});
+  const [dismissedVisualDecisionIds, setDismissedVisualDecisionIds] = useState<
+    Record<string, true>
+  >(() => loadDismissedVisualDecisionIds());
   const [projectPath, setProjectPath] = useState("");
   const [threadSearch, setThreadSearch] = useState("");
   const [runningTurnId, setRunningTurnId] = useState<string | null>(null);
@@ -165,8 +209,9 @@ export function App() {
   const [sendError, setSendError] = useState<string | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<SubmissionDraft | null>(null);
-  const [saveStatus, setSaveStatus] = useState<"saving" | "saved">("saved");
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
+  const [mockupPreviewLiveResetToken, setMockupPreviewLiveResetToken] =
+    useState(0);
   const [shellWidth, setShellWidth] = useState(() =>
     typeof window === "undefined" ? 1200 : window.innerWidth,
   );
@@ -181,6 +226,11 @@ export function App() {
   const runningTurnIdRef = useRef<string | null>(null);
   const sendStartingRef = useRef(false);
   const activeThreadIdRef = useRef<string | null>(null);
+  const previousActiveThreadIdRef = useRef<string | null>(
+    desktop.activeThreadId,
+  );
+  const activeDraftProjectIdRef = useRef<string | null>(null);
+  const pendingSendProjectIdRef = useRef<string | null>(null);
   const threadSelectionVersionRef = useRef(0);
   const justStartedThreadIdRef = useRef<string | null>(null);
   const turnPollsRef = useRef<Set<string>>(new Set());
@@ -190,29 +240,33 @@ export function App() {
 
   useEffect(() => {
     let cancelled = false;
-    void loadRuntimeInfo().then((resolved) => {
-      if (cancelled) return;
-      setRuntime(resolved);
-      setDesktop((current) => {
-        let changed = current.appServerUrl !== resolved.appServerUrl;
-        const projects = current.projects.map((project) => {
-          const path = normalizeProjectPathForRuntime(
-            project.path,
-            resolved.backendMode,
-          );
-          if (path === project.path) return project;
-          changed = true;
-          return { ...project, path };
+    void loadRuntimeInfo()
+      .then((resolved) => {
+        if (cancelled) return;
+        setRuntime(resolved);
+        setDesktop((current) => {
+          let changed = current.appServerUrl !== resolved.appServerUrl;
+          const projects = current.projects.map((project) => {
+            const path = normalizeProjectPathForRuntime(
+              project.path,
+              resolved.backendMode,
+            );
+            if (path === project.path) return project;
+            changed = true;
+            return { ...project, path };
+          });
+          if (!changed) return current;
+          return {
+            ...current,
+            appServerUrl: resolved.appServerUrl,
+            projects,
+            activeThreadId: null,
+          };
         });
-        if (!changed) return current;
-        return {
-          ...current,
-          appServerUrl: resolved.appServerUrl,
-          projects,
-          activeThreadId: null,
-        };
+      })
+      .finally(() => {
+        if (!cancelled) setRuntimeReady(true);
       });
-    });
     return () => {
       cancelled = true;
     };
@@ -225,14 +279,46 @@ export function App() {
       ) ?? null,
     [desktop.activeProjectId, desktop.projects],
   );
-  const activeCanvasProjectId =
-    inspector.type === "canvas" ||
+  const activeComposerContexts = useMemo(
+    () =>
+      activeProject
+        ? composerContextsForProject(composerContexts, activeProject.id)
+        : [],
+    [activeProject, composerContexts],
+  );
+  const activeThreadProposalSetId =
+    desktop.activeThreadId != null
+      ? desktop.mockupActiveProposalSetIdsByThreadId[desktop.activeThreadId] ??
+        null
+      : null;
+
+  useEffect(() => {
+    if (!activeProject) return;
+    void refreshProjectEmptyStatus(activeProject);
+    if (activeThreadProposalSetId) {
+      void loadMockupsForProject(
+        activeProject.id,
+        activeThreadProposalSetId,
+        false,
+        false,
+      );
+    }
+    // These helpers intentionally run only when the selected project identity
+    // changes. Their internal state writes should not retrigger discovery.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [activeProject?.id, activeProject?.path, activeThreadProposalSetId]);
+
+  const activePreviewProjectId =
     inspector.type === "appPreview" ||
-    inspector.type === "canvasProposal" ||
-    inspector.type === "canvasSuggestion" ||
+    inspector.type === "mockupPreview" ||
     inspector.type === "planPreview"
       ? inspector.projectId
       : null;
+  const previewFocused =
+    desktop.layout.inspectorOpen &&
+    (inspector.type === "appPreview" ||
+      inspector.type === "planPreview" ||
+      inspector.type === "mockupPreview");
   const sidebarDockedWidth = sidebarWidthForShell(shellWidth);
   const inspectorWidth = desktop.layout.inspectorOpen
     ? desktop.layout.inspectorWidth
@@ -242,8 +328,7 @@ export function App() {
     shellWidth - sidebarDockedWidth - inspectorWidth,
   );
   const sidebarDrawerMode =
-    shellWidth <= SIDEBAR_DRAWER_WIDTH ||
-    dockedChatWidth <= CHAT_COMFORT_WIDTH;
+    shellWidth <= SIDEBAR_DRAWER_WIDTH || dockedChatWidth <= CHAT_COMFORT_WIDTH;
   const availableChatWidth = Math.max(
     0,
     shellWidth - (sidebarDrawerMode ? 0 : sidebarDockedWidth) - inspectorWidth,
@@ -261,25 +346,69 @@ export function App() {
   const activeThread = desktop.activeThreadId
     ? (threads[desktop.activeThreadId] ?? null)
     : null;
-  const activePendingCanvasSuggestion = activeThread
-    ? [...activeThread.turns]
-        .reverse()
-        .map((turn) => desktop.canvasSuggestions[turn.id])
-        .find((suggestion) =>
-          suggestion ? shouldSurfaceCanvasDraft(suggestion) : false,
-        ) ?? null
+  const activeProjectEmptyStatus = activeProject
+    ? (projectEmptyStatusById[activeProject.id] ?? null)
     : null;
+  const activeProjectHasSavedMockups = activeProject
+    ? Boolean(
+        activeThreadProposalSetId &&
+          mockupPreviewSets[activeThreadProposalSetId]?.mockups.length,
+      )
+    : false;
+  const activeVisualDecision = useMemo(
+    () =>
+      latestVisualDecision(activeThread, dismissedVisualDecisionIds, {
+        hasSavedMockups: activeProjectHasSavedMockups,
+        projectEmptyStatus: activeProjectEmptyStatus,
+      }),
+    [
+      activeProjectEmptyStatus,
+      activeProjectHasSavedMockups,
+      activeThread,
+      dismissedVisualDecisionIds,
+    ],
+  );
+
+  function preferredLivePreviewSelection(
+    projectId: string,
+    threadId: string | null,
+  ): InspectorSelection {
+    const proposalSetId =
+      threadId != null
+        ? desktop.mockupActiveProposalSetIdsByThreadId[threadId]?.trim() || ""
+        : "";
+    if (
+      proposalSetId &&
+      !desktop.mockupHistoryProposalSetIds[proposalSetId]
+    ) {
+      return {
+        type: "mockupPreview",
+        projectId,
+        proposalSetId,
+      };
+    }
+    return {
+      type: "appPreview",
+      projectId,
+    };
+  }
   const activeDraft = activeDraftProjectId
     ? (chatDrafts[activeDraftProjectId] ?? null)
     : null;
-  const activeItems = allItems(activeThread);
-  const fileChangeItems = activeItems.filter(
-    (item): item is Extract<ThreadItem, { type: "fileChange" }> =>
-      item.type === "fileChange",
+  const activeTurnState = activeTurn(activeThread);
+  const activeWorkspaceProgress = useWorkspaceProgress(
+    activeProject,
+    activeTurnState,
   );
+  const activeTurnProgress = summarizeTurnProgress(
+    activeTurnState,
+    activeProject,
+    activeWorkspaceProgress,
+  );
+  const fileChangeItems = mergeThreadFileChanges(activeThread);
   const currentSettings = activeProject?.settings ?? defaultSettings;
   const promptReady =
-    composerText.trim().length > 0 || composerContexts.length > 0;
+    composerText.trim().length > 0 || activeComposerContexts.length > 0;
   const activeContextUsage = desktop.activeThreadId
     ? (tokenUsageByThread[desktop.activeThreadId] ?? null)
     : null;
@@ -326,72 +455,6 @@ export function App() {
     setRunningTurnId,
   });
 
-  useEffect(() => {
-    setDesktop((current) => {
-      let nextPlanProposals = current.planProposals;
-      let nextCanvasSuggestions = current.canvasSuggestions;
-      let changed = false;
-      for (const proposal of Object.values(current.planProposals)) {
-        if (
-          !proposal.canvasBaseSnapshot ||
-          (proposal.canvasProposalParseStatus !== "pending" &&
-            (proposal.canvasProposalParserVersion ?? 0) >=
-              CANVAS_PROPOSAL_PARSER_VERSION)
-        ) {
-          continue;
-        }
-        const turn = threads[proposal.threadId]?.turns.find(
-          (candidate) => candidate.id === proposal.turnId,
-        );
-        if (!turn || turn.status === "inProgress") continue;
-        const finalText = finalAgentText(turn);
-        if (!finalText.trim()) continue;
-        const parsedProposal = parseCanvasProposalForPlan(proposal, finalText);
-        if (parsedProposal === proposal) continue;
-        if (!changed) nextPlanProposals = { ...current.planProposals };
-        nextPlanProposals[proposal.turnId] = parsedProposal;
-        changed = true;
-      }
-      for (const suggestion of Object.values(current.canvasSuggestions)) {
-        if (
-          !suggestion.canvasBaseSnapshot ||
-          suggestion.status !== "pending" ||
-          (suggestion.canvasProposalParseStatus !== "pending" &&
-            (suggestion.canvasProposalParserVersion ?? 0) >=
-              CANVAS_PROPOSAL_PARSER_VERSION)
-        ) {
-          continue;
-        }
-        const turn = threads[suggestion.threadId]?.turns.find(
-          (candidate) => candidate.id === suggestion.turnId,
-        );
-        if (!turn || turn.status === "inProgress") continue;
-        const finalText = finalAgentText(turn);
-        if (!finalText.trim()) continue;
-        const parsedSuggestion = parseCanvasSuggestionForTurn(
-          suggestion,
-          finalText,
-        );
-        if (parsedSuggestion === suggestion) continue;
-        if (!changed) {
-          nextPlanProposals = { ...current.planProposals };
-          nextCanvasSuggestions = { ...current.canvasSuggestions };
-        } else if (nextCanvasSuggestions === current.canvasSuggestions) {
-          nextCanvasSuggestions = { ...current.canvasSuggestions };
-        }
-        nextCanvasSuggestions[suggestion.turnId] = parsedSuggestion;
-        changed = true;
-      }
-      return changed
-        ? {
-            ...current,
-            planProposals: nextPlanProposals,
-            canvasSuggestions: nextCanvasSuggestions,
-          }
-        : current;
-    });
-  }, [threads]);
-
   const {
     client,
     connectionStatus,
@@ -402,7 +465,7 @@ export function App() {
   } = useAppServerConnection({
     appServerUrl: desktop.appServerUrl,
     activeProjectPath: activeProject?.path ?? null,
-    autoConnect: runtime.autoConnect,
+    autoConnect: runtime.autoConnect && runtimeReady,
     onNotification: handleNotification,
     onServerRequest: handleServerRequest,
   });
@@ -415,8 +478,9 @@ export function App() {
       }
 
       if (message.method !== "account/login/completed") return;
-      const params =
-        message.params as AccountLoginCompletedNotification | undefined;
+      const params = message.params as
+        | AccountLoginCompletedNotification
+        | undefined;
       if (!params) return;
       void refreshSettings(activeProject?.path ?? null);
       setAuthDialog((current) => {
@@ -452,6 +516,22 @@ export function App() {
       offNotification();
     };
   }, [activeProject?.path, client, refreshSettings]);
+
+  useEffect(() => {
+    if (!activeProject || !activeThreadProposalSetId) return;
+    if (mockupPreviewSets[activeThreadProposalSetId]) return;
+    void loadMockupsForProject(
+      activeProject.id,
+      activeThreadProposalSetId,
+      false,
+      false,
+    );
+  }, [
+    activeProject?.id,
+    activeProject?.path,
+    activeThreadProposalSetId,
+    mockupPreviewSets,
+  ]);
 
   const { documentText, documentError } = useDocumentPreview(client, inspector);
   const missingOpenAiAuth = Boolean(
@@ -489,7 +569,7 @@ export function App() {
       }
       setThreads((current) => ({
         ...current,
-        [response.thread.id]: mergeThreadWithLocalFailureState(
+        [response.thread.id]: mergeThreadWithLocalState(
           response.thread,
           current[response.thread.id],
         ),
@@ -520,7 +600,8 @@ export function App() {
             for (const [threadId, thread] of Object.entries(next)) {
               if (
                 sameRuntimePath(thread.cwd, cwd, runtime.backendMode) &&
-                !listedIds.has(threadId)
+                !listedIds.has(threadId) &&
+                !shouldPreserveLocalThreadDuringRefresh(thread)
               ) {
                 delete next[threadId];
               }
@@ -528,10 +609,7 @@ export function App() {
           }
           for (const thread of response.data) {
             const existing = next[thread.id];
-            next[thread.id] =
-              existing && existing.turns.length > 0 && thread.turns.length === 0
-                ? { ...thread, turns: existing.turns }
-                : thread;
+            next[thread.id] = mergeThreadWithLocalState(thread, existing);
           }
           return next;
         });
@@ -543,7 +621,12 @@ export function App() {
               sameRuntimePath(item.path, cwd, runtime.backendMode),
           );
           if (!project) return current;
-          if (activeDraftProjectId === project.id) return current;
+          if (
+            activeDraftProjectIdRef.current === project.id ||
+            pendingSendProjectIdRef.current === project.id
+          ) {
+            return current;
+          }
           const preferredActiveThreadId =
             justStartedThreadIdRef.current &&
             isKnownThreadForCwd(
@@ -561,7 +644,7 @@ export function App() {
                     runtime.backendMode,
                   )
                 ? activeThreadIdRef.current
-              : null;
+                : null;
           const activeStillExists =
             current.activeThreadId !== null &&
             (listedIds.has(current.activeThreadId) ||
@@ -596,7 +679,7 @@ export function App() {
               ? current.activeThreadId
               : lastStillExists
                 ? project.lastActiveThreadId
-                : (response.data[0]?.id ?? null));
+                : null);
           if (
             current.activeThreadId === nextThreadId &&
             project.lastActiveThreadId === nextThreadId
@@ -620,7 +703,7 @@ export function App() {
         return [];
       }
     },
-    [activeDraftProjectId, client, runtime.backendMode],
+    [client, runtime.backendMode],
   );
 
   useEffect(() => {
@@ -633,10 +716,8 @@ export function App() {
 
   useEffect(() => {
     desktopRef.current = desktop;
-    setSaveStatus("saving");
     const timer = window.setTimeout(() => {
       saveDesktopState(desktop);
-      setSaveStatus("saved");
     }, 250);
     return () => window.clearTimeout(timer);
   }, [desktop]);
@@ -650,6 +731,10 @@ export function App() {
       window.removeEventListener("pagehide", flushState);
     };
   }, []);
+
+  useEffect(() => {
+    saveDismissedVisualDecisionIds(dismissedVisualDecisionIds);
+  }, [dismissedVisualDecisionIds]);
 
   useEffect(() => {
     function updateShellWidth() {
@@ -685,7 +770,7 @@ export function App() {
       return;
     }
 
-    const maxWidth = maxInspectorWidthForShell(shellWidth);
+    const maxWidth = maxInspectorWidthForShell(shellWidth, previewFocused);
     setDesktop((current) => {
       if (!current.layout.inspectorOpen) return current;
       const nextWidth = clamp(
@@ -699,7 +784,7 @@ export function App() {
         layout: { ...current.layout, inspectorWidth: nextWidth },
       };
     });
-  }, [desktop.layout.inspectorOpen, shellWidth]);
+  }, [desktop.layout.inspectorOpen, previewFocused, shellWidth]);
 
   useEffect(() => {
     if (!sidebarDrawerMode && sidebarDrawerOpen) {
@@ -733,15 +818,42 @@ export function App() {
   }, [desktop.activeThreadId]);
 
   useEffect(() => {
+    const previousThreadId = previousActiveThreadIdRef.current;
+    previousActiveThreadIdRef.current = desktop.activeThreadId;
+    if (previousThreadId === desktop.activeThreadId) return;
+    if (!desktop.activeProjectId) return;
+    const projectId = desktop.activeProjectId;
+    let shouldResetToLive = false;
     setInspector((current) => {
-      if (current.type !== "canvas" && current.type !== "appPreview") {
+      if (current.type !== "mockupPreview") return current;
+      const nextSelection = preferredLivePreviewSelection(
+        projectId,
+        desktop.activeThreadId,
+      );
+      shouldResetToLive = nextSelection.type === "mockupPreview";
+      return nextSelection;
+    });
+    if (shouldResetToLive) {
+      setMockupPreviewLiveResetToken((value) => value + 1);
+    }
+  }, [desktop.activeProjectId, desktop.activeThreadId]);
+
+  useEffect(() => {
+    activeDraftProjectIdRef.current = activeDraftProjectId;
+  }, [activeDraftProjectId]);
+
+  useEffect(() => {
+    setInspector((current) => {
+      if (
+        current.type !== "appPreview" &&
+        current.type !== "mockupPreview"
+      ) {
         return current;
       }
       if (!desktop.activeProjectId) return { type: "empty" };
       if (current.projectId === desktop.activeProjectId) return current;
-      return current.type === "appPreview"
-        ? { type: "appPreview", projectId: desktop.activeProjectId }
-        : { type: "canvas", projectId: desktop.activeProjectId };
+      if (current.type === "mockupPreview") return { type: "empty" };
+      return { type: "appPreview", projectId: desktop.activeProjectId };
     });
   }, [desktop.activeProjectId]);
 
@@ -764,10 +876,8 @@ export function App() {
     if (activeThread?.status.type === "notLoaded") return;
     setInspector((current) => {
       if (
-        current.type === "canvas" ||
         current.type === "appPreview" ||
-        current.type === "canvasProposal" ||
-        current.type === "canvasSuggestion" ||
+        current.type === "mockupPreview" ||
         current.type === "planPreview"
       ) {
         return current;
@@ -785,36 +895,6 @@ export function App() {
   ]);
 
   useEffect(() => {
-    if (
-      inspector.type !== "canvasProposal" &&
-      inspector.type !== "canvasSuggestion"
-    ) {
-      return;
-    }
-    const record =
-      inspector.type === "canvasProposal"
-        ? desktop.planProposals[inspector.proposalTurnId]
-        : desktop.canvasSuggestions[inspector.suggestionTurnId];
-    if (inspector.type === "canvasProposal" && record?.canvasProposalSnapshot) {
-      return;
-    }
-    if (record?.status === "pending" && record.canvasProposalSnapshot) return;
-    inspectorRetargetThreadIdRef.current = null;
-    setInspector({ type: "empty" });
-    setDesktop((current) =>
-      current.layout.inspectorOpen
-        ? {
-            ...current,
-            layout: {
-              ...current.layout,
-              inspectorOpen: false,
-            },
-          }
-        : current,
-    );
-  }, [desktop.canvasSuggestions, desktop.planProposals, inspector]);
-
-  useEffect(() => {
     if (!activeDraftProjectId) return;
     setChatDrafts((current) => {
       const existing = current[activeDraftProjectId];
@@ -823,10 +903,14 @@ export function App() {
       );
       if (!existing && !project) return current;
       const base = existing ?? createChatDraft(project as Project);
+      const draftContexts = composerContextsForProject(
+        composerContexts,
+        activeDraftProjectId,
+      );
       if (
         base.text === composerText &&
         base.attachments === attachments &&
-        base.contexts === composerContexts
+        sameComposerContextList(base.contexts, draftContexts)
       ) {
         return current;
       }
@@ -836,7 +920,7 @@ export function App() {
           ...base,
           text: composerText,
           attachments,
-          contexts: composerContexts,
+          contexts: draftContexts,
           updatedAt: Date.now(),
         },
       };
@@ -858,6 +942,12 @@ export function App() {
       ).then((listedThreadGroups) => {
         if (!activeProject) return;
         if (activeThreadIdRef.current !== activeThreadIdAtRefreshStart) return;
+        if (
+          activeDraftProjectIdRef.current === activeProject.id ||
+          pendingSendProjectIdRef.current === activeProject.id
+        ) {
+          return;
+        }
         const activeProjectIndex = projectsToRefresh.findIndex(
           (project) => project.id === activeProject.id,
         );
@@ -865,7 +955,9 @@ export function App() {
           activeProjectIndex === -1
             ? []
             : listedThreadGroups[activeProjectIndex];
-        const listedThreadIds = new Set(listedThreads.map((thread) => thread.id));
+        const listedThreadIds = new Set(
+          listedThreads.map((thread) => thread.id),
+        );
         const activeThreadStillExists =
           activeThreadIdAtRefreshStart !== null &&
           (listedThreadIds.has(activeThreadIdAtRefreshStart) ||
@@ -882,8 +974,13 @@ export function App() {
           ? activeThreadIdAtRefreshStart
           : lastThreadStillExists
             ? activeProject.lastActiveThreadId
-            : (listedThreads[0]?.id ?? null);
-        if (activeDraftProjectId === activeProject.id) return;
+            : null;
+        if (
+          activeDraftProjectIdRef.current === activeProject.id ||
+          pendingSendProjectIdRef.current === activeProject.id
+        ) {
+          return;
+        }
         if (
           justStartedThreadIdRef.current &&
           isKnownThreadForCwd(
@@ -909,11 +1006,16 @@ export function App() {
         }
       });
     }
-  }, [activeDraftProjectId, activeProject?.id, activeProject?.path, connectionStatus, refreshThreads, visibleProjects]);
+  }, [
+    activeDraftProjectId,
+    activeProject?.id,
+    activeProject?.path,
+    connectionStatus,
+    refreshThreads,
+    visibleProjects,
+  ]);
 
   function handleTurnCompleted(threadId: string, turn: Turn) {
-    capturePlanCanvasProposal(turn);
-    captureCanvasSuggestion(turn);
     const draft = inFlightDraftsRef.current.get(turn.id);
     if (!draft) return;
     inFlightDraftsRef.current.delete(turn.id);
@@ -923,51 +1025,86 @@ export function App() {
     }
     setSendError(null);
     setRetryDraft((current) => (current === draft ? null : current));
-  }
-
-  function capturePlanCanvasProposal(turn: Turn, retryCount = 0) {
-    const finalText = finalAgentText(turn);
-    if (!finalText.trim()) return;
-    let shouldRetry = false;
-    setDesktop((current) => {
-      const proposal = current.planProposals[turn.id];
-      if (!proposal?.canvasBaseSnapshot) {
-        shouldRetry = retryCount < 8;
-        return current;
-      }
-      return {
-        ...current,
-        planProposals: {
-          ...current.planProposals,
-          [turn.id]: parseCanvasProposalForPlan(proposal, finalText),
-        },
-      };
-    });
-    if (shouldRetry) {
-      window.setTimeout(() => capturePlanCanvasProposal(turn, retryCount + 1), 100);
+    const project = desktopRef.current.projects.find(
+      (candidate) => candidate.id === draft.projectId,
+    );
+    if (project) {
+      void refreshProjectEmptyStatus(project);
     }
-  }
-
-  function captureCanvasSuggestion(turn: Turn, retryCount = 0) {
-    const finalText = finalAgentText(turn);
-    if (!finalText.trim()) return;
-    let shouldRetry = false;
-    setDesktop((current) => {
-      const suggestion = current.canvasSuggestions[turn.id];
-      if (!suggestion?.canvasBaseSnapshot) {
-        shouldRetry = retryCount < 8;
-        return current;
+    if (draft.settings.planMode) {
+      const finalText = finalAgentText(turn);
+      const previewSpec = parsePlanPreviewSpec(finalText);
+      const visiblePrompt = draft.visiblePrompt?.trim() || draft.prompt;
+      setDesktop((current) => {
+        const proposal = current.planProposals[turn.id];
+        if (!proposal) return current;
+        return {
+          ...current,
+          planProposals: {
+            ...current.planProposals,
+            [turn.id]: {
+              ...proposal,
+              prompt: visiblePrompt,
+              previewSpec,
+              previewSelectedVariantId:
+                previewSpec?.variants[0]?.id ??
+                proposal.previewSelectedVariantId ??
+                null,
+              proposalKind: classifyPlanProposalKind(
+                visiblePrompt,
+                finalText,
+              ),
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    }
+    const changedSavedMockups = turnTouchesSavedMockups(turn);
+    const targetProposalSetId = draft.proposalSetId?.trim() || "";
+    const savedMockupArtifactTurn =
+      !isEmptyProjectVisualPlanningPrompt(draft.prompt) &&
+      !isExistingAppVisualDecisionPrompt(draft.prompt) &&
+      isSavedMockupArtifactRequest(draft.prompt);
+    const activatesSavedMockupDecision =
+      draft.openMockupsOnComplete ||
+        isMockupGenerationPrompt(draft.prompt) ||
+        isMockupReviewPrompt(draft.prompt) ||
+        savedMockupArtifactTurn;
+    if (
+      activatesSavedMockupDecision ||
+      isMockupGenerationPrompt(draft.prompt) ||
+      isMockupReviewPrompt(draft.prompt) ||
+      savedMockupArtifactTurn ||
+      changedSavedMockups
+    ) {
+      if (activatesSavedMockupDecision && targetProposalSetId) {
+        setDesktop((current) => ({
+          ...current,
+          mockupActiveProposalSetIdsByThreadId: {
+            ...current.mockupActiveProposalSetIdsByThreadId,
+            [threadId]: targetProposalSetId,
+          },
+          mockupHistoryProposalSetIds: {
+            ...current.mockupHistoryProposalSetIds,
+            [targetProposalSetId]: false,
+          },
+        }));
       }
-      return {
-        ...current,
-        canvasSuggestions: {
-          ...current.canvasSuggestions,
-          [turn.id]: parseCanvasSuggestionForTurn(suggestion, finalText),
-        },
-      };
-    });
-    if (shouldRetry) {
-      window.setTimeout(() => captureCanvasSuggestion(turn, retryCount + 1), 100);
+      void loadMockupsForProject(
+        draft.projectId,
+        targetProposalSetId,
+        activatesSavedMockupDecision,
+        activatesSavedMockupDecision ||
+          isMockupGenerationPrompt(draft.prompt) ||
+          (!isEmptyProjectVisualPlanningPrompt(draft.prompt) &&
+            !isExistingAppVisualDecisionPrompt(draft.prompt) &&
+            isSavedMockupArtifactRequest(draft.prompt)),
+      );
+      return;
+    }
+    if (isExistingAppVisualDecisionPrompt(draft.prompt) && project) {
+      openPreviewInspector(project.id);
     }
   }
 
@@ -1002,7 +1139,7 @@ export function App() {
               ...current.layout,
               inspectorOpen: true,
             },
-      },
+          },
     );
   }
 
@@ -1037,155 +1174,236 @@ export function App() {
     }));
   }
 
-  function setCanvasLayersOpen(projectId: string, open: boolean) {
+  function openPreviewInspector(projectId: string) {
+    setInspector({ type: "appPreview", projectId });
     setDesktop((current) => ({
       ...current,
       layout: {
         ...current.layout,
-        canvasLayersOpenByProject: {
-          ...current.layout.canvasLayersOpenByProject,
-          [projectId]: open,
-        },
+        inspectorOpen: true,
+        inspectorWidth: Math.max(
+          current.layout.inspectorWidth,
+          preferredPreviewInspectorWidth(),
+        ),
       },
     }));
   }
 
-  function selectProjectCanvas(
-    project = activeProject,
-    focusReference: string | null = null,
-  ) {
-    if (!project) {
-      setActionError("Add or select a local project before opening Canvas.");
-      return;
+  function openMockupInspector(projectId: string, proposalSetId: string) {
+    setInspector({ type: "mockupPreview", projectId, proposalSetId });
+    setDesktop((current) => ({
+      ...current,
+      layout: {
+        ...current.layout,
+        inspectorOpen: true,
+        inspectorWidth: Math.max(
+          current.layout.inspectorWidth,
+          preferredPreviewInspectorWidth(),
+        ),
+      },
+    }));
+  }
+
+  async function refreshProjectEmptyStatus(
+    project: Project,
+  ): Promise<ProjectEmptyStatus | null> {
+    try {
+      const status = await desktopInvoke<ProjectEmptyStatus>(
+        "project_empty_status",
+        { projectPath: project.path },
+      );
+      if (!status) return null;
+      setProjectEmptyStatusById((current) => ({
+        ...current,
+        [project.id]: status,
+      }));
+      return status;
+    } catch {
+      return null;
     }
-    const preferredWidth = preferredCanvasInspectorWidth();
-    setActionError(null);
-    setSendError(null);
-    setRetryDraft(null);
-    setInspector({
-      type: "canvas",
-      projectId: project.id,
-      focusReference,
-      focusRequestId: Date.now(),
-    });
-    inspectorRetargetThreadIdRef.current = "canvas";
-    setDesktop((current) => {
-      const canvas =
-        current.canvases[project.id] ?? createProjectCanvas(project);
+  }
+
+  async function loadMockupsForProject(
+    projectId: string,
+    proposalSetId: string,
+    openAfterLoad = false,
+    showMissingError = true,
+  ) {
+    const project =
+      desktop.projects.find((candidate) => candidate.id === projectId) ??
+      activeProject;
+    if (!project || project.id !== projectId) return;
+    try {
+      const result = await desktopInvoke<MockupsListResult>("mockups_list", {
+        projectPath: project.path,
+        proposalSetId,
+      });
+      if (!result) {
+        if (showMissingError) {
+          setSendError(
+            "Codex finished, but saved mockups could not be loaded.",
+          );
+        }
+        return;
+      }
+      const previewSet: MockupPreviewSet = {
+        proposalSetId: result.proposalSetId || proposalSetId,
+        projectId,
+        threadId: result.threadId,
+        artifactKind: result.artifactKind,
+        baseDir: result.baseDir,
+        originalPrompt: result.originalPrompt,
+        depth: result.depth,
+        selectedMockupId: result.selectedMockupId,
+        mockups: result.mockups,
+      };
+      if (previewSet.mockups.length === 0) {
+        setMockupPreviewSets((current) => {
+          if (!current[proposalSetId]) return current;
+          const next = { ...current };
+          delete next[proposalSetId];
+          return next;
+        });
+        if (showMissingError) {
+          setSendError("Codex finished, but no saved mockups were found.");
+        }
+        return;
+      }
+      setMockupPreviewSets((current) => ({
+        ...current,
+        [previewSet.proposalSetId]: {
+          ...previewSet,
+          selectedMockupId: selectedMockupIdForLoadedSet(
+            previewSet,
+            openAfterLoad
+              ? null
+              : current[previewSet.proposalSetId]?.selectedMockupId,
+          ),
+        },
+      }));
+      if (openAfterLoad) {
+        openMockupInspector(projectId, previewSet.proposalSetId);
+      }
+    } catch (error) {
+      if (showMissingError) {
+        setSendError(`Could not load saved mockups: ${errorMessage(error)}`);
+      }
+    }
+  }
+
+  function selectMockup(proposalSetId: string, mockupId: string) {
+    setMockupPreviewSets((current) => {
+      const previewSet = current[proposalSetId];
+      if (!previewSet) return current;
       return {
         ...current,
-        activeProjectId: project.id,
-        canvases: {
-          ...current.canvases,
-          [project.id]: canvas,
-        },
-        layout: {
-          ...current.layout,
-          inspectorOpen: true,
-          inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
+        [proposalSetId]: {
+          ...previewSet,
+          selectedMockupId: mockupId,
         },
       };
     });
   }
 
-  function toggleProjectCanvas(project = activeProject) {
-    const activeDraftCanvas =
-      project &&
-      desktop.layout.inspectorOpen &&
-      (inspector.type === "canvasProposal" ||
-        inspector.type === "canvasSuggestion") &&
-      inspector.projectId === project.id;
-    if (
-      activeDraftCanvas ||
-      (project &&
-      desktop.layout.inspectorOpen &&
-      inspector.type === "canvas" &&
-        inspector.projectId === project.id)
-    ) {
-      closeInspectorPanel();
+  function stageBuildMockup(previewSet: MockupPreviewSet, mockup: SavedMockup) {
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === previewSet.projectId,
+    );
+    if (!project) {
+      setSendError(
+        "That mockup belongs to a project that is no longer available.",
+      );
       return;
     }
-    selectProjectCanvas(project);
+    setVisualDecisionComposerAction(null);
+    setComposerText(`Implement ${mockupVisibleOptionName(mockup)}`);
+    setAttachments([]);
+    updateProject(project.id, (candidate) => ({
+      ...candidate,
+        settings: { ...candidate.settings, planMode: false },
+      }));
+    openMockupInspector(previewSet.projectId, previewSet.proposalSetId);
+    if (!desktop.activeThreadId) {
+      setActiveDraftProjectId(project.id);
+    }
+  }
+
+  function chooseVisualDecisionOption(
+    decision: ActiveVisualDecision,
+    option: VisualDecisionOption,
+  ) {
+    setDismissedVisualDecisionIds((current) => ({
+      ...current,
+      [decision.id]: true,
+    }));
+    setVisualDecisionComposerAction({
+      decisionId: decision.id,
+      option,
+    });
+    setComposerText(visualDecisionComposerText(option));
+    setAttachments([]);
+    if (activeProject) {
+      setComposerContexts((current) =>
+        composerContextsForProject(current, activeProject.id),
+      );
+    }
+    if (activeProject && !desktop.activeThreadId) {
+      setActiveDraftProjectId(activeProject.id);
+    }
+  }
+
+  function dismissVisualDecision(decision: ActiveVisualDecision) {
+    setDismissedVisualDecisionIds((current) => ({
+      ...current,
+      [decision.id]: true,
+    }));
+  }
+
+  function showApprovals() {
+    inspectorRetargetThreadIdRef.current = null;
+    setInspector({ type: "empty" });
+    setDesktop((current) => ({
+      ...current,
+      layout: {
+        ...current.layout,
+        inspectorOpen: true,
+      },
+    }));
   }
 
   function selectAppPreview(project = activeProject) {
     if (!project) {
-      setActionError("Add or select a local project before opening App Preview.");
+      setActionError(
+        "Add or select a local project before opening App Preview.",
+      );
       return;
     }
     setActionError(null);
     setSendError(null);
     setRetryDraft(null);
-    setInspector({
-      type: "appPreview",
-      projectId: project.id,
-    });
-    inspectorRetargetThreadIdRef.current = "canvas";
+    const nextSelection = preferredLivePreviewSelection(
+      project.id,
+      desktop.activeThreadId,
+    );
+    if (nextSelection.type === "mockupPreview") {
+      setMockupPreviewLiveResetToken((value) => value + 1);
+    }
+    setInspector(nextSelection);
+    inspectorRetargetThreadIdRef.current = null;
+    const preferredWidth = preferredPreviewInspectorWidth();
     setDesktop((current) => ({
       ...current,
       activeProjectId: project.id,
       layout: {
         ...current.layout,
         inspectorOpen: true,
-        inspectorWidth: Math.max(current.layout.inspectorWidth, 680),
+        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
       },
     }));
   }
 
   function toggleAppPreview(project = activeProject) {
-    if (
-      project &&
-      desktop.layout.inspectorOpen &&
-      inspector.type === "appPreview" &&
-      inspector.projectId === project.id
-    ) {
-      closeInspectorPanel();
-      return;
-    }
     selectAppPreview(project);
-  }
-
-  function selectPlanProposalCanvas(
-    proposal: PlanProposal,
-    focusReference: string | null = null,
-  ) {
-    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === latestProposal.projectId,
-    );
-    if (!project) {
-      setSendError("That plan belongs to a project that is no longer available.");
-      return;
-    }
-    if (!latestProposal.canvasProposalSnapshot) {
-      setSendError("That plan does not have a Canvas proposal to open.");
-      return;
-    }
-    const preferredWidth = preferredCanvasInspectorWidth();
-    setActionError(null);
-    setSendError(null);
-    setRetryDraft(null);
-    setInspector({
-      type: "canvasProposal",
-      projectId: project.id,
-      proposalTurnId: latestProposal.turnId,
-      focusReference,
-      focusRequestId: Date.now(),
-      readOnly: latestProposal.status !== "pending",
-    });
-    inspectorRetargetThreadIdRef.current = "canvas";
-    setDesktop((current) => {
-      return {
-        ...current,
-        activeProjectId: project.id,
-        activeThreadId: latestProposal.threadId,
-        layout: {
-          ...current.layout,
-          inspectorOpen: true,
-          inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
-        },
-      };
-    });
   }
 
   function showPlanUiImpact(proposal: PlanProposal) {
@@ -1198,7 +1416,9 @@ export function App() {
       (candidate) => candidate.id === latestProposal.projectId,
     );
     if (!project) {
-      setSendError("That plan belongs to a project that is no longer available.");
+      setSendError(
+        "That plan belongs to a project that is no longer available.",
+      );
       return;
     }
     if (!latestProposal.previewSpec) {
@@ -1213,7 +1433,8 @@ export function App() {
       projectId: project.id,
       proposalTurnId: latestProposal.turnId,
     });
-    inspectorRetargetThreadIdRef.current = "canvas";
+    inspectorRetargetThreadIdRef.current = null;
+    const preferredWidth = preferredPreviewInspectorWidth();
     setDesktop((current) => ({
       ...current,
       activeProjectId: project.id,
@@ -1221,7 +1442,7 @@ export function App() {
       layout: {
         ...current.layout,
         inspectorOpen: true,
-        inspectorWidth: Math.max(current.layout.inspectorWidth, 680),
+        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
       },
     }));
   }
@@ -1230,7 +1451,11 @@ export function App() {
     setDesktop((current) => {
       const proposal = current.planProposals[proposalTurnId];
       if (!proposal?.previewSpec) return current;
-      if (!proposal.previewSpec.variants.some((variant) => variant.id === variantId)) {
+      if (
+        !proposal.previewSpec.variants.some(
+          (variant) => variant.id === variantId,
+        )
+      ) {
         return current;
       }
       return {
@@ -1270,185 +1495,28 @@ export function App() {
     });
   }
 
-  function selectCanvasSuggestionCanvas(
-    suggestion: CanvasSuggestion,
-    focusReference: string | null = null,
+  function updatePlanPreviewSession(
+    proposalTurnId: string,
+    session: PlanPreviewSessionState | null,
   ) {
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === suggestion.projectId,
-    );
-    if (!project) {
-      setSendError("That Canvas draft belongs to a project that is no longer available.");
-      return;
-    }
-    if (!suggestion.canvasProposalSnapshot) {
-      setSendError("That response does not have a Canvas draft to open.");
-      return;
-    }
-    if (suggestion.status !== "pending") {
-      setSendError("That Canvas draft is no longer active.");
-      return;
-    }
-    const preferredWidth = preferredCanvasInspectorWidth();
-    setActionError(null);
-    setSendError(null);
-    setRetryDraft(null);
-    setInspector({
-      type: "canvasSuggestion",
-      projectId: project.id,
-      suggestionTurnId: suggestion.turnId,
-      focusReference,
-      focusRequestId: Date.now(),
-    });
-    inspectorRetargetThreadIdRef.current = "canvas";
-    setDesktop((current) => ({
-      ...current,
-      activeProjectId: project.id,
-      activeThreadId: suggestion.threadId,
-      layout: {
-        ...current.layout,
-        inspectorOpen: true,
-        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
-      },
-    }));
-  }
-
-  function updateProjectCanvas(projectId: string, canvas: ProjectCanvas) {
-    setDesktop((current) => ({
-      ...current,
-      canvases: {
-        ...current.canvases,
-        [projectId]: canvas,
-      },
-    }));
-  }
-
-  function updateCanvasSuggestionCanvas(
-    suggestionTurnId: string,
-    canvas: ProjectCanvas,
-  ) {
-    setDesktop((current) => {
-      const suggestion = current.canvasSuggestions[suggestionTurnId];
-      if (!suggestion) return current;
-      const nextCanvas = cloneProjectCanvas({
-        ...canvas,
-        projectId: suggestion.projectId,
-        updatedAt: Date.now(),
-      });
-      const contentChanged = canvasDraftContentChanged(
-        suggestion.canvasProposalSnapshot,
-        nextCanvas,
-      );
-      const nextParseStatus =
-        suggestion.canvasProposalParseStatus === "none" ||
-        suggestion.canvasProposalParseStatus === "pending"
-          ? "parsed"
-          : suggestion.canvasProposalParseStatus;
-      return {
-        ...current,
-        canvasSuggestions: {
-          ...current.canvasSuggestions,
-          [suggestionTurnId]: {
-            ...suggestion,
-            canvasDraftBaseSnapshot: contentChanged
-              ? suggestion.canvasDraftBaseSnapshot ??
-                suggestion.canvasProposalSnapshot ??
-                null
-              : suggestion.canvasDraftBaseSnapshot,
-            canvasProposalSnapshot: nextCanvas,
-            canvasProposalParseStatus: nextParseStatus,
-            canvasUserEditedAt: contentChanged
-              ? Date.now()
-              : suggestion.canvasUserEditedAt,
-            canvasProposalSummary:
-              !contentChanged || suggestion.canvasProposalChangeCount > 0
-                ? suggestion.canvasProposalSummary
-                : "Canvas draft edited manually.",
-            updatedAt: Date.now(),
-          },
-        },
-      };
-    });
-  }
-
-  function updatePlanProposalCanvas(proposalTurnId: string, canvas: ProjectCanvas) {
     setDesktop((current) => {
       const proposal = current.planProposals[proposalTurnId];
       if (!proposal) return current;
-      const nextCanvas = cloneProjectCanvas({
-        ...canvas,
-        projectId: proposal.projectId,
-        updatedAt: Date.now(),
-      });
-      const contentChanged = canvasDraftContentChanged(
-        proposal.canvasProposalSnapshot,
-        nextCanvas,
-      );
-      const nextParseStatus =
-        proposal.canvasProposalParseStatus === "none" ||
-        proposal.canvasProposalParseStatus === "pending"
-          ? "parsed"
-          : proposal.canvasProposalParseStatus;
+      if (samePlanPreviewSession(proposal.previewSession ?? null, session)) {
+        return current;
+      }
       return {
         ...current,
         planProposals: {
           ...current.planProposals,
           [proposalTurnId]: {
             ...proposal,
-            canvasDraftBaseSnapshot: contentChanged
-              ? proposal.canvasDraftBaseSnapshot ??
-                proposal.canvasProposalSnapshot ??
-                null
-              : proposal.canvasDraftBaseSnapshot,
-            canvasProposalSnapshot: nextCanvas,
-            canvasProposalParseStatus: nextParseStatus,
-            canvasUserEditedAt: contentChanged
-              ? Date.now()
-              : proposal.canvasUserEditedAt,
-            canvasProposalSummary:
-              !contentChanged || proposal.canvasProposalChangeCount > 0
-                ? proposal.canvasProposalSummary
-                : "Canvas proposal edited manually.",
+            previewSession: session,
             updatedAt: Date.now(),
           },
         },
       };
     });
-  }
-
-  function addCanvasComposerContext(
-    context: ComposerCanvasContext | null = null,
-    project = activeProject,
-  ) {
-    if (!project) {
-      setSendError("Select a local project before attaching Canvas.");
-      return;
-    }
-    const nextContext =
-      context ??
-      ({
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: { kind: "project" },
-      } satisfies ComposerCanvasContext);
-    setComposerContexts((current) => {
-      if (
-        current.some(
-          (candidate) =>
-            candidate.type === "canvas" &&
-            canvasContextIdentity(candidate) ===
-              canvasContextIdentity(nextContext),
-        )
-      ) {
-        return current;
-      }
-      return [
-        ...current.filter((context) => context.type !== "canvas"),
-        nextContext,
-      ];
-    });
-    setSendError(null);
   }
 
   function attachAppPreviewMark(
@@ -1469,9 +1537,84 @@ export function App() {
         projectName: project.name,
         previewUrl: meta.previewUrl,
         viewport: meta.viewport,
+        markLabel: "App mark 1",
+        markNumber: 1,
         areaMark,
       };
       return [...withoutProjectMark, nextContext];
+    });
+    if (!desktop.activeThreadId) {
+      setActiveDraftProjectId(project.id);
+    }
+    setSendError(null);
+  }
+
+  function attachMockupPreviewMark(
+    previewSet: MockupPreviewSet,
+    mockup: SavedMockup,
+    areaMark: PlanPreviewAreaMark,
+    meta?: {
+      label?: string;
+      source?: ComposerMockupPreviewContext["source"];
+      viewport?: ComposerMockupPreviewContext["viewport"];
+      highlightId?: string;
+    },
+  ) {
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === previewSet.projectId,
+    );
+    if (!project) {
+      setSendError(
+        "That mockup belongs to a project that is no longer available.",
+      );
+      return;
+    }
+    setComposerContexts((current) => {
+      const markNumber = nextMockupMarkNumber(
+        current,
+        previewSet.projectId,
+        previewSet.proposalSetId,
+        mockup.id,
+      );
+      const artifactName = previewArtifactDisplayName(
+        previewSet.artifactKind,
+        1,
+        "title",
+      );
+      const nextContext: ComposerMockupPreviewContext = {
+        type: "mockupPreview",
+        id: `mockup-preview:${previewSet.projectId}:${mockup.id}:${meta?.source ?? "userMark"}:${areaMark.createdAt}`,
+        projectId: previewSet.projectId,
+        projectName: project.name,
+        proposalSetId: previewSet.proposalSetId,
+        artifactKind: previewSet.artifactKind,
+        mockupId: mockup.id,
+        mockupLabel: mockup.label || mockup.id,
+        mockupTitle: mockup.title,
+        markLabel:
+          meta?.source === "proposalHighlight" && meta.label
+            ? `Adjusted change area: ${meta.label}`
+            : `${artifactName} mark ${markNumber}`,
+        markNumber,
+        filePath: mockup.filePath,
+        viewport: meta?.viewport === "mobile" ? "mobile" : "desktop",
+        areaMark,
+        source: meta?.source ?? "userMark",
+        highlightId: meta?.highlightId,
+      };
+      const withoutPreviousProposalHighlight =
+        meta?.source === "proposalHighlight"
+          ? current.filter(
+              (context) =>
+                context.type !== "mockupPreview" ||
+                context.projectId !== previewSet.projectId ||
+                context.proposalSetId !== previewSet.proposalSetId ||
+                context.mockupId !== mockup.id ||
+                context.source !== "proposalHighlight" ||
+                context.highlightId !== nextContext.highlightId,
+            )
+          : current;
+      return [...withoutPreviousProposalHighlight, nextContext];
     });
     if (!desktop.activeThreadId) {
       setActiveDraftProjectId(project.id);
@@ -1484,61 +1627,28 @@ export function App() {
       current.filter(
         (candidate) =>
           candidate.type !== context.type ||
-          canvasContextIdentity(candidate) !== canvasContextIdentity(context),
+          composerContextIdentity(candidate) !==
+            composerContextIdentity(context),
       ),
     );
   }
 
-  function requestCurrentUiMockup(project: Project) {
-    const prompt = [
-      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
-      "",
-      "Focus on interface screens that exist today. Do not design future screens and do not edit files.",
-      "",
-      "Return a short summary, then a parseable fenced ```canvas-proposal block. Use one line per visible UI piece, using create lines with state=current. Prefer grid coordinates when estimating placement.",
-      "Use one Canvas page per distinct route or workflow. Use subPage when one route has meaningfully different states, such as empty chat, active chat, inspector open, auth OTP, onboarding, or settings tabs. Keep coordinates local to that sub-page.",
-      "Use a compact screen-sketch grid for each subPage: x=0..36 and y=0..24. Keep important UI pieces readable inside that frame. Most panels should be 4..14 grid units wide, not page-sized.",
-      "Do not create giant workspace/background/page-shell containers. The Canvas page and subPage already represent the screen frame. Output only visible UI pieces the user should review.",
-      "",
-      'Example: create container title="Main chat" state=current page="Page 1" grid=2,2,12,18 description="Current chat area" noteForCodex="Existing primary conversation surface."',
-      'Example: create container title="Active chat" state=current page="Page 1" subPage="Active" grid=2,2,12,18 description="Thread with messages"',
-      'Example: create button title="Send" state=current page="Page 1" grid=15,19,1.5,1.5 label="Send"',
-      "",
-      "Use Page 1, Page 2, etc. unless the project has obvious named screens. Keep the mockup simple and reviewable; omit uncertain internals rather than inventing them.",
-    ].join("\n");
-    setActionError(null);
-    setSendError(null);
-    setRetryDraft(null);
-    setActiveDraftProjectId(project.id);
-    setComposerText(prompt);
-    setAttachments([]);
-    setComposerContexts([
-      {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: { kind: "project" },
-      },
-    ]);
-    setDesktop((current) => ({
-      ...current,
-      activeProjectId: project.id,
-      activeThreadId:
-        current.activeProjectId === project.id
-          ? current.activeThreadId
-          : project.lastActiveThreadId,
-      projects: current.projects.map((candidate) =>
-        candidate.id === project.id
-          ? {
-              ...candidate,
-              settings: {
-              ...candidate.settings,
-                planMode: false,
-              },
-            }
-          : candidate,
+  function resetMockupProposalHighlights(
+    previewSet: MockupPreviewSet,
+    mockup: SavedMockup,
+    viewport: ComposerMockupPreviewContext["viewport"],
+  ) {
+    setComposerContexts((current) =>
+      current.filter(
+        (context) =>
+          context.type !== "mockupPreview" ||
+          context.projectId !== previewSet.projectId ||
+          context.proposalSetId !== previewSet.proposalSetId ||
+          context.mockupId !== mockup.id ||
+          context.source !== "proposalHighlight" ||
+          context.viewport !== viewport,
       ),
-    }));
+    );
   }
 
   function createChatDraft(project: Project, now = Date.now()): LocalChatDraft {
@@ -1574,11 +1684,11 @@ export function App() {
     setSendError(null);
     setRetryDraft(null);
     setInspector((current) =>
-      current.type === "canvas"
-        ? { type: "canvas", projectId: project.id }
-        : current.type === "appPreview"
-          ? { type: "appPreview", projectId: project.id }
-        : { type: "empty" },
+      current.type === "appPreview"
+        ? { type: "appPreview", projectId: project.id }
+        : current.type === "mockupPreview"
+          ? { type: "empty" }
+          : { type: "empty" },
     );
     setDesktop((current) => ({
       ...current,
@@ -1611,13 +1721,10 @@ export function App() {
       activeProject;
     clearActiveDraftSelection();
     setInspector((current) =>
-      current.type === "canvas" && projectForThread
-        ? { type: "canvas", projectId: projectForThread.id }
-        : current.type === "appPreview" && projectForThread
-          ? { type: "appPreview", projectId: projectForThread.id }
-      : current.type === "canvas"
-        ? current
-        : current.type === "appPreview"
+      (current.type === "appPreview" || current.type === "mockupPreview") &&
+      projectForThread
+        ? preferredLivePreviewSelection(projectForThread.id, threadId)
+        : current.type === "appPreview" || current.type === "mockupPreview"
           ? current
           : { type: "empty" },
     );
@@ -1627,7 +1734,10 @@ export function App() {
     activeThreadIdRef.current = threadId;
     setDesktop((current) => {
       const projectId = projectForThread?.id ?? current.activeProjectId;
-      if (current.activeProjectId === projectId && current.activeThreadId === threadId) {
+      if (
+        current.activeProjectId === projectId &&
+        current.activeThreadId === threadId
+      ) {
         return current;
       }
       return {
@@ -1645,9 +1755,12 @@ export function App() {
     let thread: Thread | null = null;
     try {
       thread = projectForThread
-        ? await resumeThread(threadId, projectForThread, projectForThread.settings, {
-            select: false,
-          })
+        ? await resumeThread(
+            threadId,
+            projectForThread,
+            projectForThread.settings,
+            { select: false },
+          )
         : await syncThread(threadId);
     } catch (error) {
       if (threadSelectionVersionRef.current !== selectionVersion) return;
@@ -1667,8 +1780,8 @@ export function App() {
     setDesktop((current) => {
       const projectId = projectForThread?.id ?? current.activeProjectId;
       const projectAlreadyCurrent = current.projects.some(
-        (project) =>
-          project.id === projectId && project.lastActiveThreadId === thread.id,
+        (stored) =>
+          stored.id === projectId && stored.lastActiveThreadId === thread.id,
       );
       if (
         current.activeProjectId === projectId &&
@@ -1681,10 +1794,10 @@ export function App() {
         ...current,
         activeProjectId: projectId,
         activeThreadId: thread.id,
-        projects: current.projects.map((project) =>
-          project.id === projectId
-            ? { ...project, lastActiveThreadId: thread.id }
-            : project,
+        projects: current.projects.map((stored) =>
+          stored.id === projectId
+            ? { ...stored, lastActiveThreadId: thread.id }
+            : stored,
         ),
       };
     });
@@ -1755,7 +1868,8 @@ export function App() {
     if (!project) return null;
     const response = await client.request<{ thread: Thread }>("thread/start", {
       cwd: project.path,
-      approvalPolicy: settings?.approvalPolicy ?? project.settings.approvalPolicy,
+      approvalPolicy:
+        settings?.approvalPolicy ?? project.settings.approvalPolicy,
       sandbox: settings?.sandbox ?? project.settings.sandbox,
       model: settings?.model ?? project.settings.model,
       serviceTier: settings?.serviceTier ?? project.settings.serviceTier,
@@ -1823,25 +1937,126 @@ export function App() {
 
   async function sendPrompt(event?: FormEvent) {
     event?.preventDefault();
-    const preparedPrompt = preparePromptCanvasMentions(
-      composerText,
-      composerContexts,
-      canvasContextOptions,
-    );
-    const prompt = preparedPrompt.prompt.trim();
     if (!activeProject) {
       setSendError("Add or select a local project before sending.");
       return;
     }
+    const visiblePrompt = composerText.trim();
+    const planModeWasOn = activeProject.settings.planMode;
+    const status = activeProjectEmptyStatus;
+    const liveContext = liveAppReviewContext(
+      activeProject,
+      activeComposerContexts,
+    );
+    const selectedMockupIsHistory = Boolean(
+      selectedMockupPreviewSet &&
+        desktop.mockupHistoryProposalSetIds[
+          selectedMockupPreviewSet.proposalSetId
+        ],
+    );
+    let prompt = visiblePrompt;
+    let settings = { ...activeProject.settings };
+    let contexts = [...activeComposerContexts];
+    let openMockupsOnComplete = false;
+    let proposalSetId: string | null = null;
+    let artifactKind: PreviewArtifactKind | null = null;
+
+    if (visualDecisionComposerAction) {
+      if (visualDecisionOptionCreatesMockups(visualDecisionComposerAction.option)) {
+        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
+        artifactKind = visualDecisionArtifactKind(
+          visualDecisionComposerAction.option,
+        );
+      }
+      prompt = visualDecisionSelectionPrompt(
+        visualDecisionComposerAction,
+        visiblePrompt,
+        proposalSetId,
+        artifactKind,
+        activeThread?.id ?? null,
+      );
+      settings = { ...settings, planMode: false };
+      openMockupsOnComplete = visualDecisionOptionCreatesMockups(
+        visualDecisionComposerAction.option,
+      );
+    } else if (
+      selectedMockupPreviewSet &&
+      inspector.type === "mockupPreview" &&
+      !selectedMockupIsHistory &&
+      visiblePrompt
+    ) {
+      proposalSetId = selectedMockupPreviewSet.proposalSetId;
+      artifactKind = selectedMockupPreviewSet.artifactKind;
+      prompt = savedMockupReviewPrompt(visiblePrompt, selectedMockupPreviewSet);
+      settings = { ...settings, planMode: false };
+      openMockupsOnComplete = true;
+    } else if (
+      status?.empty &&
+      !planModeWasOn &&
+      shouldOfferEmptyProjectVisualPlanning(visiblePrompt)
+    ) {
+      prompt = emptyProjectVisualPlanningPrompt(
+        visiblePrompt,
+        activeProject,
+        status,
+        planModeWasOn,
+      );
+      settings = { ...settings, planMode: false };
+      contexts = [];
+    } else if (
+      status &&
+      !status.empty &&
+      !planModeWasOn &&
+      shouldOfferCurrentAppVisualDecision(visiblePrompt)
+    ) {
+      prompt = existingAppVisualDecisionPrompt(
+        visiblePrompt,
+        activeProject,
+        status,
+        planModeWasOn,
+        liveContext,
+      );
+      settings = { ...settings, planMode: false };
+    } else if (
+      status &&
+      !status.empty &&
+      !planModeWasOn &&
+      (isExplicitPreviewFirstRequest(visiblePrompt) ||
+        isExplicitOptionsRequest(visiblePrompt))
+    ) {
+      proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
+      artifactKind = explicitPreviewArtifactKind(
+        visiblePrompt,
+        isExplicitOptionsRequest(visiblePrompt) ? "mockup" : "preview",
+      );
+      prompt = existingAppPreviewFirstPrompt(
+        visiblePrompt,
+        activeProject,
+        status,
+        isExplicitOptionsRequest(visiblePrompt),
+        planModeWasOn,
+        liveContext,
+        proposalSetId,
+        artifactKind,
+        activeThread?.id ?? null,
+      );
+      settings = { ...settings, planMode: false };
+      openMockupsOnComplete = true;
+    }
+
     const draft: SubmissionDraft = {
       prompt,
+      visiblePrompt,
       projectId: activeProject.id,
-      settings: { ...activeProject.settings },
+      settings,
       attachments: [...attachments],
-      contexts: preparedPrompt.contexts,
+      contexts,
       createdAt: Date.now(),
       localDraftProjectId:
         activeDraftProjectId === activeProject.id ? activeDraftProjectId : null,
+      openMockupsOnComplete,
+      proposalSetId,
+      artifactKind,
     };
     await sendDraft(draft, { clearComposer: true });
   }
@@ -1861,13 +2076,15 @@ export function App() {
   ) {
     const promptDesktop = options.desktopOverride ?? desktop;
     const project =
-      promptDesktop.projects.find((candidate) => candidate.id === draft.projectId) ??
-      activeProject;
+      promptDesktop.projects.find(
+        (candidate) => candidate.id === draft.projectId,
+      ) ?? activeProject;
     const blocked = sendBlockReason({
       activeProject: project,
       connectionStatus,
       missingOpenAiAuth,
-      hasUnsupportedAttachments: unsupportedAttachments(draft.attachments).length > 0,
+      hasUnsupportedAttachments:
+        unsupportedAttachments(draft.attachments).length > 0,
       pendingApprovals,
       promptReady: Boolean(draft.prompt.trim()) || draft.contexts.length > 0,
       sendStarting: sendStartingRef.current || sendStarting,
@@ -1883,7 +2100,8 @@ export function App() {
       return false;
     }
     const sendingLocalDraft =
-      draft.localDraftProjectId === project.id && activeDraftProjectId === project.id;
+      draft.localDraftProjectId === project.id &&
+      activeDraftProjectId === project.id;
     sendStartingRef.current = true;
     setSendStarting(true);
     try {
@@ -1907,58 +2125,12 @@ export function App() {
       if (!targetThread) throw new Error("Could not create a chat thread.");
       const userPrompt =
         draft.prompt.trim() || "Use the attached project context.";
-      const generatedMockupPrompt = isGeneratedCurrentUiMockupPrompt(userPrompt);
-      const explicitCanvasSuggestion = hasCanvasSuggestionContext(draft.contexts);
-      const autoCanvasSuggestion =
-        !draft.settings.planMode &&
-        !generatedMockupPrompt &&
-        !explicitCanvasSuggestion &&
-        shouldAutoCaptureCanvasSuggestionPrompt(userPrompt);
-      const canvasSuggestionContexts = autoCanvasSuggestion
-        ? [
-            ...draft.contexts,
-            {
-              type: "canvas" as const,
-              projectId: project.id,
-              projectName: project.name,
-              target: { kind: "project" as const },
-            },
-          ]
-        : draft.contexts;
-      const planCanvasContext = draft.settings.planMode
-        ? canvasContextForPrompt(
-            draft.contexts,
-            promptDesktop,
-            project,
-            true,
-            userPrompt,
-          )
-        : null;
-      const canvasSuggestionContext = !draft.settings.planMode
-        ? generatedMockupPrompt
-          ? generatedMockupCanvasContext(project)
-          : explicitCanvasSuggestion || autoCanvasSuggestion
-            ? canvasContextForPrompt(
-                canvasSuggestionContexts,
-                promptDesktop,
-                project,
-                false,
-                userPrompt,
-              )
-            : null
-        : null;
-      const promptedWithCanvas = planCanvasContext
-        ? promptWithPlanModeContext(userPrompt, planCanvasContext)
-        : generatedMockupPrompt
-          ? promptWithGeneratedMockupContext(userPrompt)
-          : promptWithComposerContexts(
-              userPrompt,
-              canvasSuggestionContexts,
-              promptDesktop,
-              project,
-            );
+      const visibleUserPrompt = draft.visiblePrompt?.trim() || userPrompt;
+      const promptedWithContext = draft.settings.planMode
+        ? promptWithPlanModeContext(userPrompt)
+        : promptWithComposerContexts(userPrompt, draft.contexts);
       const promptText = promptWithInspectableFiles(
-        promptedWithCanvas,
+        promptedWithContext,
         draft.attachments,
       );
       const input = [
@@ -1987,90 +2159,37 @@ export function App() {
         targetThread = replacementThread;
         response = await startTurn(targetThread, project, draft.settings, input);
       }
+
+      const visibleTurn = turnWithOptimisticUserMessage(
+        response.turn,
+        visibleUserPrompt,
+        draft.attachments,
+      );
+      const now = Date.now();
+      const planProposal: PlanProposal | null = draft.settings.planMode
+        ? {
+            id: `plan:${response.turn.id}`,
+            projectId: project.id,
+            threadId: targetThread.id,
+            turnId: response.turn.id,
+            prompt: visibleUserPrompt,
+            contexts: draft.contexts,
+            previewSpec: null,
+            previewSelectedVariantId: null,
+            previewAreaMark: null,
+            previewSession: null,
+            previewUserEditedAt: undefined,
+            proposalKind: "plan",
+            status: "pending",
+            createdAt: now,
+            updatedAt: now,
+          }
+        : null;
+
       inFlightDraftsRef.current.set(response.turn.id, {
         ...draft,
         localDraftProjectId: null,
       });
-      if (planCanvasContext) {
-        const now = Date.now();
-        const previewSpec = shouldOfferPlanPreview(userPrompt)
-          ? createPlanPreviewSpec(userPrompt)
-          : null;
-        const proposal: PlanProposal = {
-          id: `plan:${response.turn.id}`,
-          projectId: project.id,
-          threadId: targetThread.id,
-          turnId: response.turn.id,
-          prompt: userPrompt,
-          contexts: draft.contexts,
-          canvasStatus: planCanvasContext.status,
-          canvasSummary: planCanvasContext.summary,
-          canvasBaseSnapshot: planCanvasContext.snapshot,
-          canvasDraftBaseSnapshot: null,
-          canvasProposalSnapshot: planCanvasContext.snapshot,
-          canvasProposalParseStatus: planCanvasContext.snapshot
-            ? "pending"
-            : "none",
-          canvasProposalParserVersion: 0,
-          canvasProposalChangeCount: 0,
-          canvasProposalSummary: planCanvasContext.snapshot
-            ? "Canvas proposal snapshot waiting for the plan response."
-            : "No Canvas snapshot for this plan.",
-          canvasProposalErrors: [],
-          canvasUserEditedAt: undefined,
-          previewSpec,
-          previewSelectedVariantId: previewSpec?.variants[0]?.id ?? null,
-          previewAreaMark: null,
-          previewUserEditedAt: undefined,
-          proposalKind: "plan",
-          status: "pending",
-          createdAt: now,
-          updatedAt: now,
-        };
-        setDesktop((current) => ({
-          ...current,
-          planProposals: {
-            ...supersedePendingPlanProposals(
-              current.planProposals,
-              targetThread.id,
-              response.turn.id,
-            ),
-            [response.turn.id]: proposal,
-          },
-        }));
-      } else if (canvasSuggestionContext?.snapshot) {
-        const now = Date.now();
-        const suggestion: CanvasSuggestion = {
-          id: `canvas-suggestion:${response.turn.id}`,
-          projectId: project.id,
-          threadId: targetThread.id,
-          turnId: response.turn.id,
-          prompt: userPrompt,
-          contexts: canvasSuggestionContexts,
-          canvasStatus: canvasSuggestionContext.status,
-          canvasSummary: canvasSuggestionContext.summary,
-          canvasBaseSnapshot: canvasSuggestionContext.snapshot,
-          canvasDraftBaseSnapshot: null,
-          canvasProposalSnapshot: canvasSuggestionContext.snapshot,
-          canvasProposalParseStatus: "pending",
-          canvasProposalParserVersion: 0,
-          canvasProposalChangeCount: 0,
-          canvasProposalSummary:
-            "Canvas draft waiting for the response.",
-          canvasProposalErrors: [],
-          canvasUserEditedAt: undefined,
-          status: "pending",
-          createdAt: now,
-          updatedAt: now,
-        };
-        setDesktop((current) => ({
-          ...current,
-          canvasSuggestions: {
-            ...current.canvasSuggestions,
-            [response.turn.id]: suggestion,
-          },
-        }));
-      }
       runningTurnIdRef.current = response.turn.id;
       setRunningTurnId(response.turn.id);
       sendStartingRef.current = false;
@@ -2088,13 +2207,21 @@ export function App() {
         );
       }
       if (options.clearComposer || sendingLocalDraft) {
+        const preserveDecisionContexts =
+          isExistingAppVisualDecisionPrompt(draft.prompt) ||
+          isEmptyProjectVisualPlanningPrompt(draft.prompt);
         setComposerText("");
         setAttachments([]);
-        setComposerContexts([]);
+        setComposerContexts((current) =>
+          preserveDecisionContexts
+            ? composerContextsForProject(current, project.id)
+            : [],
+        );
+        setVisualDecisionComposerAction(null);
       }
       const targetThreadWithTurn = {
         ...targetThread,
-        turns: ensureTurn(targetThread.turns, response.turn),
+        turns: ensureTurn(targetThread.turns, visibleTurn),
       };
       threadsRef.current = {
         ...threadsRef.current,
@@ -2104,26 +2231,39 @@ export function App() {
         ...current,
         [targetThread.id]: targetThreadWithTurn,
       }));
-      setDesktop((current) => ({
-        ...current,
-        activeProjectId: project.id,
-        activeThreadId: targetThread.id,
-        planProposals: planCanvasContext
-          ? supersedePendingPlanProposals(
-              current.planProposals,
-              targetThread.id,
-              response.turn.id,
-            )
-          : supersedePendingPlanProposals(
-              current.planProposals,
-              targetThread.id,
-            ),
-        projects: current.projects.map((stored) =>
-          stored.id === project.id
-            ? { ...stored, lastActiveThreadId: targetThread.id }
-            : stored,
-        ),
-      }));
+      setDesktop((current) => {
+        const targetProposalSetId = draft.proposalSetId?.trim() || "";
+        return {
+          ...current,
+          activeProjectId: project.id,
+          activeThreadId: targetThread.id,
+          mockupActiveProposalSetIdsByThreadId:
+            draft.openMockupsOnComplete && targetProposalSetId
+              ? {
+                  ...current.mockupActiveProposalSetIdsByThreadId,
+                  [targetThread.id]: targetProposalSetId,
+                }
+              : current.mockupActiveProposalSetIdsByThreadId,
+          planProposals: planProposal
+            ? {
+                ...supersedePendingPlanProposals(
+                  current.planProposals,
+                  targetThread.id,
+                  response.turn.id,
+                ),
+                [response.turn.id]: planProposal,
+              }
+            : supersedePendingPlanProposals(
+                current.planProposals,
+                targetThread.id,
+              ),
+          projects: current.projects.map((stored) =>
+            stored.id === project.id
+              ? { ...stored, lastActiveThreadId: targetThread.id }
+              : stored,
+          ),
+        };
+      });
       void pollTurnUntilSettled(
         targetThread.id,
         response.turn.id,
@@ -2147,17 +2287,17 @@ export function App() {
     const project =
       desktop.projects.find(
         (candidate) => candidate.id === latestProposal.projectId,
-      ) ??
-      activeProject;
+      ) ?? activeProject;
     if (!project) {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
-    const attachedUiEdits = canvasDraftDeltaSummary(latestProposal);
-    const attachedPreview = planPreviewDecisionSummary(latestProposal);
     const accepted = await sendDraft(
       {
-        prompt: planProposalAcceptPrompt(attachedUiEdits, attachedPreview),
+        prompt: planProposalAcceptPrompt(
+          planPreviewDecisionSummary(latestProposal),
+        ),
+        visiblePrompt: "I accept this plan. Implement it now.",
         projectId: project.id,
         settings: {
           ...project.settings,
@@ -2183,7 +2323,6 @@ export function App() {
         current.planProposals,
         latestProposal.turnId,
         "accepted",
-        false,
       ),
       projects: current.projects.map((candidate) =>
         candidate.id === project.id
@@ -2197,54 +2336,6 @@ export function App() {
           : candidate,
       ),
     }));
-    setInspector((current) =>
-      current.type === "canvasProposal" &&
-      current.proposalTurnId === latestProposal.turnId
-        ? { type: "canvas", projectId: project.id }
-        : current,
-    );
-  }
-
-  function editPlanProposalDraft(proposal: PlanProposal) {
-    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === latestProposal.projectId,
-    );
-    if (!project) {
-      setSendError("That plan belongs to a project that is no longer available.");
-      return;
-    }
-    if (!latestProposal.canvasProposalSnapshot) {
-      setSendError("That plan does not have a Canvas draft to edit.");
-      return;
-    }
-    setSendError(null);
-    setActionError(null);
-    setRetryDraft(null);
-    const preferredWidth = preferredCanvasInspectorWidth();
-    setInspector((current) =>
-      current.type === "canvasProposal" &&
-      current.proposalTurnId === latestProposal.turnId
-        ? { ...current, readOnly: false, focusRequestId: Date.now() }
-        : {
-            type: "canvasProposal",
-            projectId: project.id,
-            proposalTurnId: latestProposal.turnId,
-            readOnly: false,
-            focusRequestId: Date.now(),
-          },
-    );
-    inspectorRetargetThreadIdRef.current = "canvas";
-    setDesktop((current) => ({
-      ...current,
-      activeProjectId: project.id,
-      activeThreadId: latestProposal.threadId,
-      layout: {
-        ...current.layout,
-        inspectorOpen: true,
-        inspectorWidth: Math.max(current.layout.inspectorWidth, preferredWidth),
-      },
-    }));
   }
 
   async function modifyPlanProposal(proposal: PlanProposal, feedback = "") {
@@ -2256,28 +2347,24 @@ export function App() {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
-    const revisionSummary = [
-      canvasDraftDeltaSummary(latestProposal),
-      planPreviewDecisionSummary(latestProposal),
-    ]
-      .filter(Boolean)
-      .join("\n\n");
-    const feedbackText = feedback.trim();
-    if (revisionSummary || feedbackText) {
+    const revisionFeedback = feedback.trim();
+    const revisionPreviewContext = planPreviewDecisionSummary(latestProposal);
+    if (revisionFeedback || revisionPreviewContext) {
       const sent = await sendDraft(
         {
           prompt: planProposalRevisionPrompt(
             latestProposal,
-            revisionSummary,
-            feedbackText,
+            revisionFeedback,
+            revisionPreviewContext,
           ),
+          visiblePrompt: feedback.trim() || "Please revise the plan.",
           projectId: project.id,
           settings: {
             ...project.settings,
             planMode: true,
           },
           attachments: [],
-          contexts: planProposalRevisionContexts(latestProposal, project),
+          contexts: latestProposal.contexts,
           createdAt: Date.now(),
           localDraftProjectId: null,
           targetThreadId: latestProposal.threadId,
@@ -2296,7 +2383,6 @@ export function App() {
           current.planProposals,
           latestProposal.turnId,
           "superseded",
-          false,
         ),
         projects: current.projects.map((candidate) =>
           candidate.id === project.id
@@ -2316,9 +2402,9 @@ export function App() {
     setActionError(null);
     setRetryDraft(null);
     setActiveDraftProjectId(null);
-    setComposerText(planProposalRevisionPrompt(latestProposal, revisionSummary));
+    setComposerText(planProposalRevisionPrompt(latestProposal));
     setAttachments([]);
-    setComposerContexts(planProposalRevisionContexts(latestProposal, project));
+    setComposerContexts(latestProposal.contexts);
     window.requestAnimationFrame(() => {
       document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
     });
@@ -2338,17 +2424,12 @@ export function App() {
           : candidate,
       ),
     }));
-    setPlanProposalFeedbackDrafts((current) => {
-      const next = { ...current };
-      delete next[latestProposal.turnId];
-      return next;
-    });
   }
 
   function declinePlanProposal(proposal: PlanProposal) {
     const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
     const closeProposalInspector =
-      inspector.type === "canvasProposal" &&
+      inspector.type === "planPreview" &&
       inspector.proposalTurnId === latestProposal.turnId;
     if (closeProposalInspector) {
       inspectorRetargetThreadIdRef.current = null;
@@ -2359,7 +2440,6 @@ export function App() {
         current.planProposals,
         latestProposal.turnId,
         "declined",
-        true,
       ),
       layout: closeProposalInspector
         ? {
@@ -2378,198 +2458,26 @@ export function App() {
     });
   }
 
-  function applyCanvasSuggestion(suggestion: CanvasSuggestion) {
-    const latestSuggestion =
-      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
-    const project =
-      desktop.projects.find(
-        (candidate) => candidate.id === latestSuggestion.projectId,
-      ) ?? activeProject;
-    if (!project) {
-      setSendError(
-        "That Canvas draft belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    const acceptedCanvas = latestSuggestion.canvasProposalSnapshot
-      ? finalizeAcceptedCanvasProposal(
-          latestSuggestion.canvasProposalSnapshot,
-          latestSuggestion.canvasBaseSnapshot,
-        )
-      : null;
-    const closeSuggestionInspector =
-      inspector.type === "canvasSuggestion" &&
-      inspector.suggestionTurnId === latestSuggestion.turnId;
-    setDesktop((current) => {
-      const nextCanvas =
-        acceptedCanvas && isGeneratedCurrentUiMockupPrompt(latestSuggestion.prompt)
-          ? {
-              ...acceptedCanvas,
-              updatedAt: Date.now(),
-            }
-          : acceptedCanvas;
-      return {
-        ...current,
-        canvases: nextCanvas
-          ? {
-              ...current.canvases,
-              [project.id]: nextCanvas,
-            }
-          : current.canvases,
-        canvasSuggestions: applyCanvasSuggestionAndDismissPeers(
-          current.canvasSuggestions,
-          latestSuggestion.turnId,
-          project.id,
-        ),
-      };
-    });
-    if (closeSuggestionInspector) {
-      setInspector({ type: "canvas", projectId: project.id });
-    }
-  }
-
-  function resetCanvasSuggestionDraft(suggestion: CanvasSuggestion) {
-    const latestSuggestion =
-      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
-    if (!latestSuggestion.canvasDraftBaseSnapshot) {
-      setSendError("That Canvas draft does not have a reset point.");
-      return;
-    }
-    const resetSnapshot = cloneProjectCanvas(latestSuggestion.canvasDraftBaseSnapshot);
-    setDesktop((current) => {
-      const currentSuggestion =
-        current.canvasSuggestions[latestSuggestion.turnId] ?? latestSuggestion;
-      return {
-        ...current,
-        canvasSuggestions: {
-          ...current.canvasSuggestions,
-          [latestSuggestion.turnId]: {
-            ...currentSuggestion,
-            canvasProposalSnapshot: resetSnapshot,
-            canvasUserEditedAt: undefined,
-            canvasProposalSummary: isGeneratedCurrentUiMockupPrompt(
-              latestSuggestion.prompt,
-            )
-              ? generatedCurrentUiDraftSummary(resetSnapshot)
-              : currentSuggestion.canvasProposalSummary,
-            updatedAt: Date.now(),
-          },
-        },
-      };
-    });
-  }
-
-  async function askCodexAboutCanvasSuggestion(suggestion: CanvasSuggestion) {
-    const latestSuggestion =
-      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
-    const project =
-      desktop.projects.find(
-        (candidate) => candidate.id === latestSuggestion.projectId,
-      ) ?? activeProject;
-    if (!project) {
-      setSendError(
-        "That Canvas draft belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    const summary =
-      canvasDraftDeltaSummary(latestSuggestion) ||
-      canvasProposalDeltaSummary(
-        latestSuggestion.canvasBaseSnapshot,
-        latestSuggestion.canvasProposalSnapshot,
-      );
-    const sent = await sendDraft(
+  function requestBaselineApp(project: Project) {
+    void sendDraft(
       {
-        prompt: canvasSuggestionAskPrompt(summary),
+        prompt: [
+          "Create the smallest runnable app baseline for this project so App Preview can start.",
+          "Use the existing project conventions if any are present.",
+          "Keep the result minimal, maintainable, and ready for the desktop App Preview controls.",
+        ].join("\n"),
         projectId: project.id,
         settings: {
           ...project.settings,
           planMode: false,
         },
         attachments: [],
-        contexts: canvasSuggestionHandoffContexts(latestSuggestion, project),
+        contexts: [],
         createdAt: Date.now(),
         localDraftProjectId: null,
-        targetThreadId: latestSuggestion.threadId,
       },
-      { clearComposer: false },
+      { clearComposer: true },
     );
-    if (!sent) return;
-  }
-
-  function updateCanvasFromPlanProposal(proposal: PlanProposal) {
-    const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
-    const project =
-      desktop.projects.find(
-        (candidate) => candidate.id === latestProposal.projectId,
-      ) ?? activeProject;
-    if (!project) {
-      setSendError("That plan belongs to a project that is no longer available.");
-      return;
-    }
-    if (!latestProposal.canvasProposalSnapshot) {
-      setSendError("That plan does not have a Canvas draft to update.");
-      return;
-    }
-    const closeProposalInspector =
-      inspector.type === "canvasProposal" &&
-      inspector.proposalTurnId === latestProposal.turnId;
-    setDesktop((current) => {
-      const currentCanvas =
-        current.canvases[project.id] ?? createProjectCanvas(project);
-      const acceptedCanvas = mergeAcceptedCanvasProposal(
-        currentCanvas,
-        latestProposal.canvasProposalSnapshot as ProjectCanvas,
-        latestProposal.canvasBaseSnapshot,
-      );
-      return {
-        ...current,
-        canvases: {
-          ...current.canvases,
-          [project.id]: acceptedCanvas,
-        },
-        planProposals: {
-          ...current.planProposals,
-          [latestProposal.turnId]: {
-            ...latestProposal,
-            canvasUpdatedAt: Date.now(),
-            updatedAt: Date.now(),
-          },
-        },
-      };
-    });
-    if (closeProposalInspector) {
-      setInspector({ type: "canvas", projectId: project.id });
-    }
-  }
-
-  function dismissCanvasSuggestion(suggestion: CanvasSuggestion) {
-    const latestSuggestion =
-      desktop.canvasSuggestions[suggestion.turnId] ?? suggestion;
-    const closeSuggestionInspector =
-      inspector.type === "canvasSuggestion" &&
-      inspector.suggestionTurnId === latestSuggestion.turnId;
-    if (closeSuggestionInspector) {
-      inspectorRetargetThreadIdRef.current = null;
-    }
-    setDesktop((current) => ({
-      ...current,
-      canvasSuggestions: updateCanvasSuggestionStatus(
-        current.canvasSuggestions,
-        latestSuggestion.turnId,
-        "dismissed",
-        true,
-      ),
-      layout: closeSuggestionInspector
-        ? {
-            ...current.layout,
-            inspectorOpen: false,
-          }
-        : current.layout,
-    }));
-    if (closeSuggestionInspector) {
-      setInspector({ type: "empty" });
-    }
   }
 
   async function startTurn(
@@ -2596,6 +2504,13 @@ export function App() {
 
   async function cancelRun() {
     if (!activeThread || !runningTurnId) return;
+    if (
+      !activeThread.turns.some(
+        (turn) => turn.id === runningTurnId && turn.status === "inProgress",
+      )
+    ) {
+      return;
+    }
     await client.request("turn/interrupt", {
       threadId: activeThread.id,
       turnId: runningTurnId,
@@ -2632,14 +2547,19 @@ export function App() {
       sameRuntimePath(project.path, path, runtime.backendMode),
     );
     const project =
-      existing ?? createProject(path, desktop.projects.length, runtime.backendMode);
+      existing ??
+      createProject(path, desktop.projects.length, runtime.backendMode);
     setInspector((current) =>
-      current.type === "canvas"
-        ? { type: "canvas", projectId: project.id }
-        : current.type === "appPreview"
-          ? { type: "appPreview", projectId: project.id }
-        : current,
+      current.type === "appPreview"
+        ? { type: "appPreview", projectId: project.id }
+        : { type: "empty" },
     );
+    setActiveDraftProjectId(null);
+    setComposerText("");
+    setAttachments([]);
+    setVisualDecisionComposerAction(null);
+    activeThreadIdRef.current = existing?.lastActiveThreadId ?? null;
+    inspectorRetargetThreadIdRef.current = existing?.lastActiveThreadId ?? null;
     setDesktop((current) => ({
       ...current,
       activeProjectId: project.id,
@@ -2647,6 +2567,8 @@ export function App() {
       activeThreadId: existing?.lastActiveThreadId ?? null,
     }));
     setActionError(null);
+    setSendError(null);
+    setRetryDraft(null);
     setProjectPath("");
     return true;
   }
@@ -2666,7 +2588,9 @@ export function App() {
       if (!path) return false;
       return Boolean(addProjectFromPath(path));
     } catch (error) {
-      setActionError(`Could not open the folder picker: ${errorMessage(error)}`);
+      setActionError(
+        `Could not open the folder picker: ${errorMessage(error)}`,
+      );
       return false;
     }
   }
@@ -2710,7 +2634,9 @@ export function App() {
       delete next[projectId];
       return next;
     });
-    setActiveDraftProjectId((current) => (current === projectId ? null : current));
+    setActiveDraftProjectId((current) =>
+      current === projectId ? null : current,
+    );
     setThreads((current) => {
       if (removedThreadIds.size === 0) return current;
       const next = { ...current };
@@ -2723,17 +2649,26 @@ export function App() {
       for (const threadId of removedThreadIds) delete next[threadId];
       return next;
     });
+    setMockupPreviewSets((current) => {
+      const nextEntries = Object.entries(current).filter(
+        ([, previewSet]) => previewSet.projectId !== projectId,
+      );
+      return nextEntries.length === Object.keys(current).length
+        ? current
+        : Object.fromEntries(nextEntries);
+    });
     setDesktop((current) => {
       const remainingProjects = current.projects.filter(
         (item) => item.id !== projectId,
       );
       const nextActiveProject =
         current.activeProjectId === projectId
-          ? remainingProjects
+          ? (remainingProjects
               .filter((item) => !item.hidden && !item.archived)
               .sort(
-                (a, b) => Number(b.pinned) - Number(a.pinned) || a.order - b.order,
-              )[0] ?? null
+                (a, b) =>
+                  Number(b.pinned) - Number(a.pinned) || a.order - b.order,
+              )[0] ?? null)
           : null;
       return {
         ...current,
@@ -2751,6 +2686,21 @@ export function App() {
         ),
         pinnedThreadIds: current.pinnedThreadIds.filter(
           (id) => !removedThreadIds.has(id),
+        ),
+        mockupActiveProposalSetIdsByThreadId: Object.fromEntries(
+          Object.entries(current.mockupActiveProposalSetIdsByThreadId).filter(
+            ([threadId]) => !removedThreadIds.has(threadId),
+          ),
+        ),
+        mockupHistoryProposalSetIds: Object.fromEntries(
+          Object.entries(current.mockupHistoryProposalSetIds).filter(
+            ([proposalSetId]) =>
+              !Object.values(mockupPreviewSets).some(
+                (previewSet) =>
+                  previewSet.projectId === projectId &&
+                  previewSet.proposalSetId === proposalSetId,
+              ),
+          ),
         ),
       };
     });
@@ -2791,7 +2741,8 @@ export function App() {
           (id) => !archivedIds.has(id),
         ),
         projects: current.projects.map((item) =>
-          item.id === project.id || archivedIds.has(item.lastActiveThreadId ?? "")
+          item.id === project.id ||
+          archivedIds.has(item.lastActiveThreadId ?? "")
             ? { ...item, lastActiveThreadId: null }
             : item,
         ),
@@ -2832,11 +2783,19 @@ export function App() {
 
   function beginInspectorResize(event: PointerEvent<HTMLButtonElement>) {
     event.preventDefault();
+    const resizeTarget = event.currentTarget;
+    const pointerId = event.pointerId;
+    try {
+      resizeTarget.setPointerCapture(pointerId);
+    } catch {
+      // The resize shield below still keeps embedded previews from stealing drags.
+    }
     const startX = event.clientX;
     const startWidth = desktop.layout.inspectorWidth;
     const shellBounds = shellRef.current?.getBoundingClientRect();
     const maxWidth = maxInspectorWidthForShell(
       Math.round(shellBounds?.width ?? window.innerWidth),
+      previewFocused,
     );
 
     function handlePointerMove(pointerEvent: globalThis.PointerEvent) {
@@ -2856,12 +2815,23 @@ export function App() {
     function handlePointerUp() {
       window.removeEventListener("pointermove", handlePointerMove);
       window.removeEventListener("pointerup", handlePointerUp);
+      window.removeEventListener("pointercancel", handlePointerUp);
+      window.removeEventListener("blur", handlePointerUp);
+      try {
+        if (resizeTarget.hasPointerCapture(pointerId)) {
+          resizeTarget.releasePointerCapture(pointerId);
+        }
+      } catch {
+        // The pointer can already be released when the window loses focus.
+      }
       document.body.classList.remove("resizing-inspector");
     }
 
     document.body.classList.add("resizing-inspector");
     window.addEventListener("pointermove", handlePointerMove);
     window.addEventListener("pointerup", handlePointerUp, { once: true });
+    window.addEventListener("pointercancel", handlePointerUp, { once: true });
+    window.addEventListener("blur", handlePointerUp, { once: true });
   }
 
   function updateActiveSettings(patch: Partial<ProjectSettings>) {
@@ -3221,8 +3191,8 @@ export function App() {
         try {
           thread = await syncThread(threadId);
         } catch (error) {
-          if (isStaleThreadError(error)) continue;
-          throw error;
+          console.warn("Turn status refresh failed; waiting for events", error);
+          continue;
         }
         const turn = thread?.turns.find((candidate) => candidate.id === turnId);
         if (turn && turn.status !== "inProgress") {
@@ -3237,19 +3207,24 @@ export function App() {
       }
       setRunningTurnId((current) => (current === turnId ? null : current));
       if (inFlightDraftsRef.current.has(turnId)) {
-        setSendError(
-          "Codex started this turn, but the app did not receive a completion update. Refresh the chat or retry.",
+        console.warn(
+          "Codex turn did not settle before the local poll timeout.",
+          { threadId, turnId },
         );
       }
     } catch (error) {
       console.error("Failed to reconcile Codex turn", error);
-      setRunningTurnId((current) => (current === turnId ? null : current));
       if (justStartedThreadIdRef.current === threadId) {
         justStartedThreadIdRef.current = null;
       }
       if (inFlightDraftsRef.current.has(turnId)) {
-        setSendError(
-          "Codex started this turn, but the app could not refresh its status. Check the backend logs and retry.",
+        console.warn(
+          "Codex turn reconciliation failed while still in flight.",
+          {
+            threadId,
+            turnId,
+            error,
+          },
         );
       }
     } finally {
@@ -3270,7 +3245,10 @@ export function App() {
     return visibleProjects
       .map((project): ProjectThreadGroup | null => {
         const projectThreads = threadsByProject.get(project.id) ?? [];
-        const draft = visibleDraftForProject(chatDrafts[project.id], activeDraftProjectId);
+        const draft = visibleDraftForProject(
+          chatDrafts[project.id],
+          activeDraftProjectId,
+        );
         if (!query) return { project, threads: projectThreads, draft };
         const projectMatches =
           project.name.toLowerCase().includes(query) ||
@@ -3286,15 +3264,9 @@ export function App() {
               attachment.name.toLowerCase().includes(query),
             ) ||
             draft.contexts.some((context) =>
-              ["canvas", canvasContextSearchLabel(context).toLowerCase()].some(
-                (value) => value.includes(query),
-              ),
+              composerContextSearchLabel(context).toLowerCase().includes(query),
             ));
-        if (
-          !projectMatches &&
-          matchingThreads.length === 0 &&
-          !draftMatches
-        )
+        if (!projectMatches && matchingThreads.length === 0 && !draftMatches)
           return null;
         return {
           project,
@@ -3303,88 +3275,95 @@ export function App() {
         };
       })
       .filter((group): group is ProjectThreadGroup => group !== null);
-  }, [activeDraftProjectId, chatDrafts, threadSearch, threadsByProject, visibleProjects]);
+  }, [
+    activeDraftProjectId,
+    chatDrafts,
+    threadSearch,
+    threadsByProject,
+    visibleProjects,
+  ]);
 
   const projectThreads = activeProject
     ? (threadsByProject.get(activeProject.id) ?? [])
     : [];
-  const canvasProject =
-    activeCanvasProjectId
-      ? (desktop.projects.find((project) => project.id === activeCanvasProjectId) ??
-        null)
+  const activeThreadMockupPreviewSet =
+    activeThreadProposalSetId
+      ? (mockupPreviewSets[activeThreadProposalSetId] ?? null)
       : null;
-  const selectedPlanProposal =
-    inspector.type === "canvasProposal"
-      ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
-      : null;
+  const previewProject = activePreviewProjectId
+    ? (desktop.projects.find(
+        (project) => project.id === activePreviewProjectId,
+      ) ?? null)
+    : null;
   const selectedPlanPreviewProposal =
     inspector.type === "planPreview"
       ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
       : null;
   const selectedAppPreviewContext =
-    inspector.type === "appPreview"
-      ? (composerContexts.find(
+    inspector.type === "appPreview" || inspector.type === "mockupPreview"
+      ? (activeComposerContexts.find(
           (context): context is ComposerAppPreviewContext =>
             context.type === "appPreview" &&
             context.projectId === inspector.projectId,
         ) ?? null)
       : null;
-  const selectedCanvasSuggestion =
-    inspector.type === "canvasSuggestion"
-      ? (desktop.canvasSuggestions[inspector.suggestionTurnId] ?? null)
-      : null;
-  const selectedCanvas =
-    canvasProject && inspector.type === "canvasProposal"
-      ? (selectedPlanProposal?.canvasProposalSnapshot ?? null)
-      : canvasProject && inspector.type === "canvasSuggestion"
-        ? (selectedCanvasSuggestion?.canvasProposalSnapshot ?? null)
-        : canvasProject
-          ? (desktop.canvases[canvasProject.id] ?? createProjectCanvas(canvasProject))
-          : null;
-  const canvasContextOptions = activeProject
-    ? buildCanvasContextOptions(activeProject, desktop)
-    : [];
-  const canvasReadOnly = canvasProject
-    ? (threadsByProject.get(canvasProject.id) ?? []).some(
-        (thread) => thread.status.type === "active",
-      ) ||
-      (inspector.type === "canvasProposal" &&
-        Boolean(inspector.readOnly) &&
-        selectedPlanProposal?.status !== "pending")
-    : false;
-  const activeCanvasState =
-    desktop.layout.inspectorOpen && activeProject
-      ? inspector.type === "canvas" && inspector.projectId === activeProject.id
-        ? "project"
-        : (inspector.type === "canvasProposal" ||
-              inspector.type === "canvasSuggestion" ||
-              inspector.type === "planPreview") &&
-            inspector.projectId === activeProject.id
-          ? "draft"
-          : "none"
-      : "none";
+  const selectedMockupPreviewSet =
+    inspector.type === "mockupPreview"
+      ? (mockupPreviewSets[inspector.proposalSetId] ?? null)
+      : activeThreadMockupPreviewSet;
+  const composerMockupPreviewSet = activeThreadMockupPreviewSet;
+  const selectedMockupHistoryMode = Boolean(
+    selectedMockupPreviewSet &&
+      desktop.mockupHistoryProposalSetIds[
+        selectedMockupPreviewSet.proposalSetId
+      ],
+  );
+  const selectedMockupCanShowLive = Boolean(
+    selectedMockupPreviewSet &&
+      !selectedMockupHistoryMode &&
+      projectEmptyStatusById[selectedMockupPreviewSet.projectId] &&
+      !projectEmptyStatusById[selectedMockupPreviewSet.projectId].empty,
+  );
+  const mockupPreviewMarks = composerContexts.filter(
+    (context): context is ComposerMockupPreviewContext =>
+      context.type === "mockupPreview" &&
+      Boolean(
+        selectedMockupPreviewSet &&
+          context.projectId === selectedMockupPreviewSet.projectId &&
+          context.proposalSetId === selectedMockupPreviewSet.proposalSetId,
+      ),
+  );
   const activeAppPreviewSelected = Boolean(
     desktop.layout.inspectorOpen &&
       activeProject &&
-      inspector.type === "appPreview" &&
-      inspector.projectId === activeProject.id,
+      ((inspector.type === "appPreview" &&
+        inspector.projectId === activeProject.id) ||
+        (inspector.type === "mockupPreview" &&
+          inspector.projectId === activeProject.id &&
+          inspector.proposalSetId === activeThreadProposalSetId)),
   );
-  const canvasLayersOpen = canvasProject
-    ? (desktop.layout.canvasLayersOpenByProject[canvasProject.id] ?? false)
-    : false;
+  const activeThreadRunning = Boolean(
+    runningTurnId &&
+      activeThread?.turns.some(
+        (turn) => turn.id === runningTurnId && turn.status === "inProgress",
+      ),
+  );
 
   return (
     <div
       ref={shellRef}
       className={`app-shell ${
         desktop.layout.inspectorOpen ? "inspector-open" : "inspector-closed"
-      } ${sidebarDrawerMode ? "sidebar-drawer-mode" : ""} ${
+      } ${previewFocused ? "preview-focused" : ""} ${
+        sidebarDrawerMode ? "sidebar-drawer-mode" : ""
+      } ${
         sidebarDrawerOpen ? "sidebar-drawer-open" : ""
       } ${chatPhoneLayout ? "chat-phone-layout" : ""}`}
       style={
         {
           "--inspector-width": `${desktop.layout.inspectorWidth}px`,
           "--inspector-min-width": `${INSPECTOR_MIN_WIDTH}px`,
+          "--preview-chat-min-width": `${PREVIEW_CHAT_MIN_WIDTH}px`,
         } as CSSProperties
       }
     >
@@ -3401,34 +3380,33 @@ export function App() {
         onOpenAuth={openAuthDialog}
         onProjectPathChange={setProjectPath}
         onArchiveProjectChats={(project) => void archiveProjectChats(project)}
-        onArchiveThread={(threadId, project) => void archiveThread(threadId, project)}
+        onArchiveThread={(threadId, project) =>
+          void archiveThread(threadId, project)
+        }
         onRenameThread={(threadId, name) => void renameThread(threadId, name)}
         onRemoveProject={removeProject}
         onRenameProject={renameProject}
-        onSelectProject={(project) =>
-          {
-            setSidebarDrawerOpen(false);
-            setActionError(null);
-            setRetryDraft(null);
-            setActiveDraftProjectId(null);
-            setInspector((current) =>
-              current.type === "canvas"
-                ? { type: "canvas", projectId: project.id }
-                : current.type === "appPreview"
-                  ? { type: "appPreview", projectId: project.id }
-                : { type: "empty" },
-            );
-            inspectorRetargetThreadIdRef.current = project.lastActiveThreadId;
-            setComposerText("");
-            setAttachments([]);
-            setComposerContexts([]);
-            setDesktop((current) => ({
-              ...current,
-              activeProjectId: project.id,
-              activeThreadId: project.lastActiveThreadId,
-            }));
-          }
-        }
+        onSelectProject={(project) => {
+          setSidebarDrawerOpen(false);
+          setActionError(null);
+          setRetryDraft(null);
+          setActiveDraftProjectId(null);
+          setVisualDecisionComposerAction(null);
+          setInspector((current) =>
+            current.type === "appPreview"
+              ? { type: "appPreview", projectId: project.id }
+              : { type: "empty" },
+          );
+          inspectorRetargetThreadIdRef.current = project.lastActiveThreadId;
+          setComposerText("");
+          setAttachments([]);
+          setSendError(null);
+          setDesktop((current) => ({
+            ...current,
+            activeProjectId: project.id,
+            activeThreadId: project.lastActiveThreadId,
+          }));
+        }}
         onSelectThread={(threadId, project) => {
           setSidebarDrawerOpen(false);
           void readThread(threadId, project);
@@ -3464,8 +3442,6 @@ export function App() {
       <main className="workspace">
         <WorkspaceHeader
           activeProject={activeProject}
-          activeCanvasSelected={activeCanvasState !== "none"}
-          activeCanvasDraft={activeCanvasState === "draft"}
           activeAppPreviewSelected={activeAppPreviewSelected}
           activeThread={activeThread}
           hasActiveProject={Boolean(activeProject)}
@@ -3474,7 +3450,6 @@ export function App() {
           backendLabel={runtime.backendLabel}
           inspectorOpen={desktop.layout.inspectorOpen}
           onOpenAppPreview={() => toggleAppPreview()}
-          onOpenCanvas={() => toggleProjectCanvas()}
           onOpenSidebar={() => setSidebarDrawerOpen(true)}
           onToggleInspector={toggleInspectorPanel}
         />
@@ -3484,16 +3459,12 @@ export function App() {
             activeProject={activeProject}
             activeDraft={activeDraft}
             activeThread={activeThread}
-            onAcceptPlanProposal={(proposal) => void acceptPlanProposal(proposal)}
-            onApplyCanvasSuggestion={applyCanvasSuggestion}
-            onAskCanvasSuggestion={(suggestion) =>
-              void askCodexAboutCanvasSuggestion(suggestion)
+            activeWorkspaceProgress={activeWorkspaceProgress}
+            onAcceptPlanProposal={(proposal) =>
+              void acceptPlanProposal(proposal)
             }
             onDeclinePlanProposal={declinePlanProposal}
-            onDismissCanvasSuggestion={dismissCanvasSuggestion}
             onModifyPlanProposal={modifyPlanProposal}
-            onOpenCanvasSuggestion={selectCanvasSuggestionCanvas}
-            onOpenPlanProposalCanvas={selectPlanProposalCanvas}
             onPlanProposalFeedbackChange={(turnId, value) =>
               setPlanProposalFeedbackDrafts((current) => ({
                 ...current,
@@ -3501,37 +3472,50 @@ export function App() {
               }))
             }
             onShowPlanUiImpact={showPlanUiImpact}
-            onResetCanvasSuggestion={resetCanvasSuggestionDraft}
-            onUpdateCanvasFromPlanProposal={updateCanvasFromPlanProposal}
             onSelect={selectInspector}
-            canvasSuggestions={desktop.canvasSuggestions}
             planProposalFeedbackDrafts={planProposalFeedbackDrafts}
             planProposals={desktop.planProposals}
           />
         </section>
 
-        {activePendingCanvasSuggestion && (
-          <div className="composer-review-strip">
-            <CanvasSuggestionReview
-              suggestion={activePendingCanvasSuggestion}
-              onApply={applyCanvasSuggestion}
-              onAskCodex={(suggestion) =>
-                void askCodexAboutCanvasSuggestion(suggestion)
-              }
-              onDismiss={dismissCanvasSuggestion}
-              onOpenCanvas={selectCanvasSuggestionCanvas}
-              onReset={resetCanvasSuggestionDraft}
-              surface="strip"
-            />
-          </div>
+        {activeVisualDecision && (
+          <VisualDecisionStripView
+            decision={activeVisualDecision.decision}
+            onDismiss={() => dismissVisualDecision(activeVisualDecision)}
+            onSelect={(option) =>
+              chooseVisualDecisionOption(activeVisualDecision, option)
+            }
+          />
         )}
+
+        {composerMockupPreviewSet &&
+          composerMockupPreviewSet.mockups.length > 0 &&
+          !selectedMockupHistoryMode &&
+          !activeVisualDecision && (
+            <MockupOptionStrip
+              previewSet={composerMockupPreviewSet}
+              onOpen={() =>
+                openMockupInspector(
+                  composerMockupPreviewSet.projectId,
+                  composerMockupPreviewSet.proposalSetId,
+                )
+              }
+              onSelect={(mockupId) =>
+                selectMockup(composerMockupPreviewSet.proposalSetId, mockupId)
+              }
+            />
+          )}
+
+        <ActiveTurnProgressPill
+          active={activeTurnState?.status === "inProgress"}
+          progress={activeTurnProgress}
+          startedAt={activeTurnState?.startedAt ?? null}
+          onReview={(item) => selectInspector({ type: "fileChange", item })}
+        />
 
         <Composer
           attachments={attachments}
-          contexts={composerContexts}
-          canUseCanvasContext={Boolean(activeProject)}
-          canvasContextOptions={canvasContextOptions}
-          canvasContextProjectName={activeProject?.name ?? null}
+          contexts={activeComposerContexts}
           canSend={
             connectionStatus === "connected" &&
             Boolean(activeProject) &&
@@ -3547,25 +3531,28 @@ export function App() {
           modelDisplay={resolveModelDisplay(snapshot, currentSettings)}
           models={snapshot.models}
           onAddAttachmentPaths={addAttachmentPaths}
-          onAddCanvasContext={(context) => addCanvasComposerContext(context)}
+
           onAttachmentError={setSendError}
           onCancel={cancelRun}
+          onShowApprovals={showApprovals}
           onRemoveAttachment={removeAttachment}
           onRemoveContext={removeComposerContext}
           onRetry={() => void retryPrompt()}
           onSend={sendPrompt}
           onSettingsChange={updateActiveSettings}
           pendingApprovals={pendingApprovals}
-          running={Boolean(runningTurnId)}
+          running={activeThreadRunning}
           sendDisabledReason={sendDisabledReason}
           sendError={sendError}
           text={composerText}
           onTextChange={(value) => {
             setComposerText(value);
+            if (!value.trim()) {
+              setVisualDecisionComposerAction(null);
+            }
             if (sendError) setSendError(null);
           }}
         />
-
       </main>
 
       {desktop.layout.inspectorOpen && (
@@ -3576,32 +3563,35 @@ export function App() {
           fileChanges={fileChangeItems}
           activeProject={activeProject}
           activeThread={activeThread}
-          canvas={selectedCanvas}
-          canvasProject={canvasProject}
-          canvasLayersOpen={canvasLayersOpen}
-          canvasProposal={selectedPlanProposal}
+          previewProject={previewProject}
           planPreviewProposal={selectedPlanPreviewProposal}
           appPreviewContext={selectedAppPreviewContext}
-          canvasSuggestion={selectedCanvasSuggestion}
-          canvasReadOnly={canvasReadOnly}
-          canvasSaveStatus={saveStatus}
+          mockupPreviewSet={selectedMockupPreviewSet}
+          mockupCanShowLive={selectedMockupCanShowLive}
+          mockupPreviewLiveResetToken={mockupPreviewLiveResetToken}
+          mockupPreviewMarks={mockupPreviewMarks}
+          mockupPreviewMode={selectedMockupHistoryMode ? "history" : "active"}
           onAnswerApproval={answerApproval}
           onOpenDocument={(path) => selectInspector({ type: "document", path })}
           onResizePointerDown={beginInspectorResize}
-          onRequestGenerateMockup={requestCurrentUiMockup}
+
           onReviewChanges={() => void reviewChanges()}
           onRollback={() => void rollbackChat()}
           onSelect={selectInspector}
-          onSetCanvasLayersOpen={setCanvasLayersOpen}
-          onUpdateCanvas={updateProjectCanvas}
-          onUpdateCanvasProposal={updatePlanProposalCanvas}
-          onUpdateCanvasSuggestion={updateCanvasSuggestionCanvas}
           onUpdatePlanPreviewAreaMark={updatePlanPreviewAreaMark}
+          onUpdatePlanPreviewSession={updatePlanPreviewSession}
           onAttachAppPreviewMark={attachAppPreviewMark}
+          onAttachMockupPreviewMark={attachMockupPreviewMark}
+          onBuildBaselineApp={requestBaselineApp}
+          onBuildMockup={(previewSet, mockup) =>
+            stageBuildMockup(previewSet, mockup)
+          }
+          onResetMockupProposalHighlights={resetMockupProposalHighlights}
+          onSelectMockup={selectMockup}
           onUpdatePlanPreviewVariant={updatePlanPreviewVariant}
-          onEditPlanProposalDraft={editPlanProposalDraft}
+
           selection={inspector}
-          activeTurn={activeTurn(activeThread)}
+          activeTurn={activeTurnState}
         />
       )}
 
@@ -3624,6 +3614,121 @@ export function App() {
   );
 }
 
+function ActiveTurnProgressPill(props: {
+  active: boolean;
+  progress: TurnProgressSummary;
+  startedAt: number | null;
+  onReview: (item: Extract<ThreadItem, { type: "fileChange" }>) => void;
+}) {
+  const [tick, setTick] = useState(0);
+
+  useEffect(() => {
+    if (!props.active) {
+      setTick(0);
+      return;
+    }
+    setTick(0);
+    const timer = window.setInterval(
+      () => setTick((value) => value + 1),
+      WORKSPACE_PROGRESS_POLL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [props.active, props.startedAt]);
+
+  if (!props.active) return null;
+  const elapsedMs = props.startedAt
+    ? Math.max(0, Date.now() - props.startedAt * 1000)
+    : tick * WORKSPACE_PROGRESS_POLL_MS;
+  const elapsed = formatDuration(
+    Math.max(elapsedMs, tick * WORKSPACE_PROGRESS_POLL_MS),
+  );
+  const reviewItem = props.progress.reviewItem;
+  const hasFiles = props.progress.fileCount > 0;
+
+  return (
+    <div
+      className={`active-turn-progress-pill ${
+        hasFiles ? "has-files" : "is-working"
+      }`}
+      data-testid="active-turn-progress-pill"
+    >
+      <span className="active-turn-progress-pulse" aria-hidden="true" />
+      <span className="active-turn-progress-copy">
+        <strong>
+          {hasFiles
+            ? `${props.progress.fileCount} file${
+                props.progress.fileCount === 1 ? "" : "s"
+              } changed`
+            : liveProgressHeadline(props.progress)}
+        </strong>
+        <small>
+          {hasFiles ? (
+            <>
+              <span className="addition">
+                +{props.progress.additions.toLocaleString()}
+              </span>{" "}
+              <span className="deletion">
+                -{props.progress.deletions.toLocaleString()}
+              </span>
+            </>
+          ) : (
+            liveProgressDetail(props.progress, elapsed, elapsedMs)
+          )}
+        </small>
+      </span>
+      {hasFiles && props.progress.files[0] && (
+        <span className="active-turn-progress-file">
+          {props.progress.files[0].label}{" "}
+          {formatShortLineDelta(
+            props.progress.files[0].additions,
+            props.progress.files[0].deletions,
+          )}
+        </span>
+      )}
+      {hasFiles && reviewItem && (
+        <button type="button" onClick={() => props.onReview(reviewItem)}>
+          Review
+        </button>
+      )}
+    </div>
+  );
+}
+
+function turnWithOptimisticUserMessage(
+  turn: Turn,
+  visibleUserPrompt: string,
+  attachments: ComposerAttachment[],
+): Turn {
+  if (turn.items.some((item) => item.type === "userMessage")) return turn;
+  const text = visibleUserPrompt.trim() || "Use the attached project context.";
+  const content: Extract<ThreadItem, { type: "userMessage" }>["content"] = [
+    { type: "text", text, text_elements: [] },
+    ...attachments
+      .filter((attachment) => attachment.kind === "image")
+      .map((attachment) => ({
+        type: "localImage" as const,
+        path: attachment.path,
+      })),
+  ];
+  return {
+    ...turn,
+    items: [
+      {
+        type: "userMessage",
+        id: `optimistic-user:${turn.id}`,
+        content,
+      },
+      ...turn.items,
+    ],
+  };
+}
+
+function shouldPreserveLocalThreadDuringRefresh(thread: Thread) {
+  return thread.turns.some(
+    (turn) => turn.status === "inProgress" || Boolean(turn.error),
+  );
+}
+
 function sendBlockReason(args: {
   activeProject: Project | null;
   connectionStatus: string;
@@ -3637,7 +3742,8 @@ function sendBlockReason(args: {
   if (args.connectionStatus !== "connected") {
     return "Codex is still connecting. Try again when the status says Connected.";
   }
-  if (!args.activeProject) return "Add or select a local project before sending.";
+  if (!args.activeProject)
+    return "Add or select a local project before sending.";
   if (args.missingOpenAiAuth) {
     return "Sign in before sending prompts to OpenAI-hosted models.";
   }
@@ -3650,18 +3756,10 @@ function sendBlockReason(args: {
   if (args.pendingApprovals.length > 0) {
     return "Answer the pending approval before sending another message.";
   }
-  if (args.hasUnsupportedAttachments) return "Remove unsupported files before sending.";
+  if (args.hasUnsupportedAttachments)
+    return "Remove unsupported files before sending.";
   if (!args.promptReady) return "Type a message to send.";
   return null;
-}
-
-function shouldSurfaceCanvasDraft(suggestion: CanvasSuggestion) {
-  return (
-    suggestion.status === "pending" &&
-    suggestion.canvasProposalParseStatus === "parsed" &&
-    (suggestion.canvasProposalChangeCount > 0 || Boolean(suggestion.canvasUserEditedAt)) &&
-    Boolean(suggestion.canvasProposalSnapshot)
-  );
 }
 
 function finalAgentText(turn: Turn) {
@@ -3675,19 +3773,663 @@ function finalAgentText(turn: Turn) {
     .join("\n\n");
 }
 
+type VisualDecisionValidityContext = {
+  projectEmptyStatus: ProjectEmptyStatus | null;
+  hasSavedMockups: boolean;
+};
+
+function latestVisualDecision(
+  thread: Thread | null,
+  dismissed: Record<string, true>,
+  context: VisualDecisionValidityContext,
+): ActiveVisualDecision | null {
+  if (!thread) return null;
+  for (const turn of [...thread.turns].reverse()) {
+    if (turn.status === "inProgress") continue;
+    const decision = parseVisualDecisionStrip(finalAgentText(turn));
+    if (!decision) continue;
+    const id = `${thread.id}:${turn.id}`;
+    if (dismissed[id]) return null;
+    if (!visualDecisionStillValid(decision, context)) continue;
+    return { id, turnId: turn.id, decision };
+  }
+  return null;
+}
+
+function visualDecisionStillValid(
+  decision: VisualDecisionStrip,
+  context: VisualDecisionValidityContext,
+) {
+  if (!visualDecisionLooksEmptyProjectOnly(decision)) return true;
+  if (!context.projectEmptyStatus) return false;
+  return context.projectEmptyStatus.empty && !context.hasSavedMockups;
+}
+
+function visualDecisionLooksEmptyProjectOnly(decision: VisualDecisionStrip) {
+  const text = [
+    decision.title,
+    decision.summary,
+    ...decision.options.flatMap((option) => [
+      option.id,
+      option.label,
+      option.description,
+      option.prompt,
+    ]),
+  ]
+    .join(" ")
+    .toLowerCase();
+  return (
+    text.includes("project is empty") ||
+    text.includes("empty project") ||
+    text.includes("empty-project") ||
+    text.includes("no app structure")
+  );
+}
+
+const DISMISSED_VISUAL_DECISIONS_STORAGE_KEY =
+  "codex.visualDecision.dismissed.v1";
+
+function loadDismissedVisualDecisionIds(): Record<string, true> {
+  if (typeof window === "undefined") return {};
+  try {
+    const parsed = JSON.parse(
+      window.localStorage.getItem(DISMISSED_VISUAL_DECISIONS_STORAGE_KEY) ||
+        "{}",
+    );
+    if (!parsed || typeof parsed !== "object") return {};
+    const record: Record<string, true> = {};
+    for (const [key, value] of Object.entries(parsed)) {
+      if (value === true) record[key] = true;
+    }
+    return record;
+  } catch {
+    return {};
+  }
+}
+
+function saveDismissedVisualDecisionIds(dismissed: Record<string, true>) {
+  if (typeof window === "undefined") return;
+  try {
+    window.localStorage.setItem(
+      DISMISSED_VISUAL_DECISIONS_STORAGE_KEY,
+      JSON.stringify(dismissed),
+    );
+  } catch {
+    // Ignore storage failures; state validity still prevents stale decisions.
+  }
+}
+
 function isAcceptedPlanImplementationTurn(turn: Turn) {
   return turn.items.some((item) => {
     if (item.type !== "userMessage") return false;
     return item.content.some(
       (part) =>
-        part.type === "text" &&
-        isAcceptedPlanImplementationPrompt(part.text),
+        part.type === "text" && isAcceptedPlanImplementationPrompt(part.text),
     );
   });
 }
 
 function isAcceptedPlanImplementationPrompt(prompt: string) {
   return prompt.trim().startsWith("I accept this plan. Implement it now");
+}
+
+const MOCKUP_TASK_SENTINEL = "[Codex Mockup Artifact Task]";
+const EMPTY_PROJECT_VISUAL_PLANNING_SENTINEL =
+  "[Codex Empty Project Visual Planning Context]";
+const EXISTING_APP_VISUAL_DECISION_SENTINEL =
+  "[Codex Existing App Visual Decision Context]";
+const EXISTING_APP_PREVIEW_FIRST_SENTINEL =
+  "[Codex Existing App Preview First Context]";
+const SAVED_MOCKUP_REVIEW_SENTINEL = "[Codex Saved Mockup Review Context]";
+const VISUAL_DECISION_SELECTION_SENTINEL = "[Codex Visual Decision Selection]";
+
+function proposalSetRelativeDir(proposalSetId: string) {
+  return `.codex/mockups/${proposalSetId}`;
+}
+
+function previewArtifactStorageRules(
+  proposalSetId: string,
+  artifactKind: PreviewArtifactKind,
+  threadId: string | null,
+) {
+  const baseDir = proposalSetRelativeDir(proposalSetId);
+  const filePrefix = previewArtifactFilePrefix(artifactKind);
+  const artifactName = previewArtifactDisplayName(artifactKind, 2, "lower");
+  return [
+    `- Save standalone HTML files under ${baseDir}.`,
+    `- Save ${baseDir}/manifest.json with version 1, proposalSetId "${proposalSetId}", threadId "${threadId ?? "unknown"}", artifactKind "${artifactKind}", originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.`,
+    `- Use labels "Preview" for a single preview, or A/B/C for multi-option ${artifactName}.`,
+    `- Use file names such as ${filePrefix}-a.html, ${filePrefix}-b.html, and ${filePrefix}-c.html inside ${baseDir}.`,
+    "- Keep every updated artifact for this turn inside the same proposalSetId folder instead of writing to the root .codex/mockups folder.",
+  ].join("\n");
+}
+
+function isMockupGenerationPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(MOCKUP_TASK_SENTINEL);
+}
+
+function isEmptyProjectVisualPlanningPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(EMPTY_PROJECT_VISUAL_PLANNING_SENTINEL);
+}
+
+function isExistingAppVisualDecisionPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(EXISTING_APP_VISUAL_DECISION_SENTINEL);
+}
+
+function isExistingAppPreviewFirstPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(EXISTING_APP_PREVIEW_FIRST_SENTINEL);
+}
+
+function isMockupReviewPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(SAVED_MOCKUP_REVIEW_SENTINEL);
+}
+
+function isVisualDecisionSelectionPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(VISUAL_DECISION_SELECTION_SENTINEL);
+}
+
+function isSavedMockupArtifactRequest(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (!text.includes(".codex/mockups")) return false;
+  return /\b(mockup|mockups|wireframe|wireframes|preview|previews|concept|concepts|visual direction|visual directions)\b/.test(
+    text,
+  );
+}
+
+function turnTouchesSavedMockups(turn: Turn) {
+  return turn.items.some((item) => {
+    if (item.type !== "fileChange") return false;
+    return item.changes.some((change) => {
+      const path = change.path.replace(/\\/g, "/").toLowerCase();
+      return path.includes("/.codex/mockups/");
+    });
+  });
+}
+
+function isExplicitDirectBuildRequest(prompt: string) {
+  return /\b(build|implement|change|apply|do)\s+(?:it\s+)?(?:directly|now|right away)\b/i.test(
+    prompt,
+  );
+}
+
+function isExplicitPreviewFirstRequest(prompt: string) {
+  return (
+    /\b(?:view|see|preview|review|show)\s+(?:it\s+)?first\b/i.test(prompt) ||
+    /\b(?:preview|wireframe|mockup|review)\s+(?:it\s+)?first\b/i.test(prompt) ||
+    /\bfirst\s+(?:create|make|show|sketch|draft)\s+(?:a\s+|one\s+)?(?:wireframe|mockup|preview)\b/i.test(
+      prompt,
+    ) ||
+    /\bbefore\s+(?:implementation|implementing|building|changing)\b/i.test(
+      prompt,
+    )
+  );
+}
+
+function isExplicitOptionsRequest(prompt: string) {
+  return /\b(?:show|create|give|make|generate)\s+(?:me\s+)?(?:\d+(?:\s*-\s*\d+)?|two|three|2|3)?\s*(?:options|directions|variants|mockups|wireframes)\b/i.test(
+    prompt,
+  );
+}
+
+function isExplicitQuickPreviewRequest(prompt: string) {
+  return /\b(?:show|create|give|make|generate)\s+(?:me\s+)?(?:(?:one|1|a|single)\s+)?(?:quick\s+)?(?:review\s+)?preview\b/i.test(
+    prompt,
+  );
+}
+
+function isPreviewFirstDecisionRequest(prompt: string) {
+  if (isExplicitOptionsRequest(prompt) || isExplicitQuickPreviewRequest(prompt)) {
+    return false;
+  }
+  return /\b(?:first|before|wireframe|mockup|preview|review)\b/i.test(
+    prompt,
+  ) && isExplicitPreviewFirstRequest(prompt);
+}
+
+function shouldOfferCurrentAppVisualDecision(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (/\b(no|without)\s+(ui|visual|preview|mockup|wireframe)\b/i.test(text)) {
+    return false;
+  }
+  if (isExplicitDirectBuildRequest(prompt)) {
+    return false;
+  }
+  if (isPreviewFirstDecisionRequest(prompt)) {
+    return true;
+  }
+  if (isClearSmallCurrentAppChange(prompt)) {
+    return false;
+  }
+  if (
+    /\b(api|backend|server|database|schema|migration|cli|rust|go\s+package|unit\s+test|parser|protocol|auth\s+token|rate\s+limit)\b/i.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  if (isBroadCurrentAppDesignQuestion(prompt)) return true;
+  return shouldOfferPlanPreview(prompt);
+}
+
+function isClearSmallCurrentAppChange(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (/\b(how should|what should|what is the best|what's the best|explore|compare|options|directions|variants)\b/.test(text)) {
+    return false;
+  }
+  return (
+    text.length <= 180 &&
+    /\b(change|rename|move|make|resize|align|replace|color|colour|hide|show|remove)\b/.test(
+      text,
+    ) &&
+    /\b(marked|this|that|button|card|modal|dialog|label|text|copy|top|bottom|left|right|smaller|larger|compact|dense)\b/.test(
+      text,
+    )
+  );
+}
+
+function isBroadCurrentAppDesignQuestion(prompt: string) {
+  return /\b(how should|how would|what(?:'s| is) the best|where should|what workflow|fit into|fit in|best workflow|best way|which direction)\b/i.test(
+    prompt,
+  );
+}
+
+function shouldOfferEmptyProjectVisualPlanning(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (/\b(no|without)\s+(ui|visual|preview|mockup|wireframe)\b/i.test(text)) {
+    return false;
+  }
+  if (
+    /\b(api|backend|server|database|schema|migration|cli|rust|go\s+package|unit\s+test|parser|protocol|auth\s+token|rate\s+limit|script|command|terminal|shell|powershell|bash|node|python|wait|sleep)\b/i.test(
+      text,
+    ) ||
+    /\b(reply exactly|do not edit files|no file edits?)\b/i.test(text)
+  ) {
+    return false;
+  }
+  return (
+    shouldOfferPlanPreview(prompt) ||
+    isExplicitPreviewFirstRequest(prompt) ||
+    isExplicitOptionsRequest(prompt)
+  );
+}
+
+function visualDecisionComposerText(option: VisualDecisionOption) {
+  return option.description
+    ? `${option.label}: ${option.description}`
+    : option.label;
+}
+
+function visualDecisionOptionCreatesMockups(option: VisualDecisionOption) {
+  const text = [option.id, option.label, option.description, option.prompt]
+    .join(" ")
+    .toLowerCase();
+  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
+  return /\b(mockup|mockups|wireframe|wireframes|preview|previews|layout option|layout options|visual option|visual options|visual direction|visual directions|direction|directions|concept|concepts)\b/.test(
+    text,
+  );
+}
+
+function visualDecisionArtifactKind(option: VisualDecisionOption) {
+  return previewArtifactKindFromText(
+    [option.id, option.label, option.description, option.prompt].join(" "),
+    "mockup",
+  );
+}
+
+function explicitPreviewArtifactKind(
+  prompt: string,
+  fallback: PreviewArtifactKind,
+) {
+  return previewArtifactKindFromText(prompt, fallback);
+}
+
+function selectedMockupIdForLoadedSet(
+  previewSet: MockupPreviewSet,
+  preferredId: string | null | undefined,
+) {
+  if (
+    preferredId &&
+    previewSet.mockups.some((mockup) => mockup.id === preferredId)
+  ) {
+    return preferredId;
+  }
+  if (
+    previewSet.selectedMockupId &&
+    previewSet.mockups.some(
+      (mockup) => mockup.id === previewSet.selectedMockupId,
+    )
+  ) {
+    return previewSet.selectedMockupId;
+  }
+  return previewSet.mockups[0]?.id ?? null;
+}
+
+function visualDecisionSelectionPrompt(
+  action: VisualDecisionComposerAction,
+  visiblePrompt: string,
+  proposalSetId: string | null,
+  artifactKind: PreviewArtifactKind | null,
+  threadId: string | null,
+) {
+  const storageRules =
+    proposalSetId && artifactKind
+      ? `\n\nPreview artifact target:\n${previewArtifactStorageRules(
+          proposalSetId,
+          artifactKind,
+          threadId,
+        )}`
+      : "";
+  return `${VISUAL_DECISION_SELECTION_SENTINEL}
+
+Selected desktop decision option:
+- Decision id: ${action.decisionId}
+- Option id: ${action.option.id}
+- Label: ${action.option.label}
+- Description: ${action.option.description || "none"}
+
+Selected option prompt for supporting context:
+${action.option.prompt}
+
+The selected option is supporting context. The user-visible composer text below is authoritative if it differs from that context.
+${storageRules}
+
+User-visible composer text:
+${visiblePrompt.trim() || visualDecisionComposerText(action.option)}`;
+}
+
+function liveAppReviewContext(
+  project: Project,
+  contexts: ComposerContextReference[],
+) {
+  const rememberedPreviewUrl = rememberedPreviewUrlForProject(project.id);
+  const appMarks = contexts.filter(
+    (context): context is ComposerAppPreviewContext =>
+      context.type === "appPreview" && context.projectId === project.id,
+  );
+  const lines = [
+    "",
+    "Current Live app context:",
+    `- Remembered Live preview URL: ${
+      rememberedPreviewUrl || "not remembered in this desktop session"
+    }`,
+  ];
+  if (appMarks.length === 0) {
+    lines.push("- Attached Live marks: none");
+  } else {
+    lines.push("- Attached Live marks:");
+    for (const mark of appMarks) {
+      const area = mark.areaMark;
+      lines.push(
+        `  - ${mark.markLabel || "Live mark"} route=${quotePromptValue(
+          area.route ?? mark.previewUrl,
+          180,
+        )} viewport=${mark.viewport} rect=${Math.round(area.x)},${Math.round(
+          area.y,
+        )},${Math.round(area.width)},${Math.round(
+          area.height,
+        )} size=${Math.round(area.viewportWidth)}x${Math.round(
+          area.viewportHeight,
+        )}`,
+      );
+    }
+  }
+  return lines.join("\n");
+}
+
+function rememberedPreviewUrlForProject(projectId: string) {
+  if (typeof window === "undefined") return "";
+  try {
+    return window.localStorage.getItem(`codex.preview.url.${projectId}`) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function emptyProjectVisualPlanningPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus,
+  planModeWasOn: boolean,
+) {
+  const entries = status.meaningfulEntries.length
+    ? status.meaningfulEntries.join(", ")
+    : "none";
+  return `${EMPTY_PROJECT_VISUAL_PLANNING_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project folder is effectively empty: yes
+- Empty-project reason: ${status.reason || "no app structure detected"}
+- Meaningful entries: ${entries}
+- Live app preview: unavailable because no runnable app exists yet
+- Saved mockups: load from .codex/mockups if you create them in this turn
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- This first empty-project turn is planning-only. Do not run commands, edit files, or create mockup artifacts in this turn.
+
+Desktop visual-planning capabilities:
+- You can return a \`\`\`codex-decision-strip JSON block and the desktop will render those choices above the composer.
+- After the user chooses, you can save up to three local HTML concept mockups or wireframes under .codex/mockups and the desktop will show them in Mockup preview.
+- You can let the user revise a selected mockup, add another option, or build the selected mockup later.
+- When a real app exists, the desktop can show live preview variants and App Mark context.
+
+Decision policy:
+- If the user request is for a broad user-facing app, site, product, page, workflow, dashboard, or interface and does not explicitly ask to build directly, return a decision strip first. Do not create files yet.
+- If the user request explicitly asks to build directly, still do not edit files in this first guarded turn; offer or describe the direct build path so the next user action can approve it.
+- If the request is backend-only, a script/library/CLI, a small direct task, or explicitly asks to build directly without mockups/previews, proceed normally.
+- Because this first turn is planning-only, "proceed normally" means answer or plan without file edits. The next user turn can implement.
+- Enforce consideration, not mockup creation. Give the user a real choice.
+- For broad UI/app requests, your final answer should be a short product-facing sentence plus the fenced decision strip. Do not use tools.
+
+Decision strip format:
+- Include a short normal sentence before the block.
+- Then include exactly one fenced \`\`\`codex-decision-strip block containing JSON.
+- The JSON shape is:
+{
+  "title": "How should I start?",
+  "summary": "This project is empty, so I can either build directly or show visual options first.",
+  "options": [
+    {
+      "id": "build-direct",
+      "label": "Build directly",
+      "description": "Create the runnable app now.",
+      "prompt": "Build the runnable app now from this request: ..."
+    },
+    {
+      "id": "wireframes",
+      "label": "Show wireframes",
+      "description": "Create lightweight layout options before implementation.",
+      "prompt": "Create 2 lightweight saved HTML wireframe options under .codex/mockups before implementation for this request: ..."
+    },
+    {
+      "id": "mockups",
+      "label": "Show mockups",
+      "description": "Create polished visual directions before implementation.",
+      "prompt": "Create 3 polished saved HTML mockup options under .codex/mockups before implementation for this request: ..."
+    }
+  ]
+}
+- Make each option prompt self-contained. For wireframe/mockup prompts, include the .codex/mockups manifest rules below.
+
+Mockup/wireframe artifact rules to include in visual option prompts:
+- Save standalone HTML files under .codex/mockups.
+- Save .codex/mockups/manifest.json with version 1, originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.
+- Use ids such as mockup-a, mockup-b, mockup-c and labels A, B, C.
+- For full demo or wireframe choices, include small local JavaScript interactions where useful: tabs switch, drawers/dialogs open, filters visibly change, forms accept text, and selected rows/cards can show a simple detail state. Keep it standalone; do not fake backend routes.
+- Do not build, scaffold, or implement the final app yet.
+- Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, fake backend routes, or platform-specific hardcoded user-app logic.
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function existingAppVisualDecisionPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus,
+  planModeWasOn: boolean,
+  liveContext: string,
+) {
+  const entries = status.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  return `${EXISTING_APP_VISUAL_DECISION_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project already has app files: yes
+- Meaningful entries: ${entries}
+- Existing saved mockups from earlier work are history/reference unless this turn creates fresh current-app proposals.
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- This turn is decision-only. Do not run commands, edit files, or create mockup artifacts in this turn.
+${liveContext}
+
+Desktop visual-planning capabilities:
+- You can return a \`\`\`codex-decision-strip JSON block and the desktop will render those choices above the composer.
+- For current apps, use current-app wording. Do not say the project is empty.
+- The user can build directly, ask for one review preview, or ask for two/three visual directions.
+- Review previews should be saved under .codex/mockups and opened by the desktop after the next turn.
+
+Decision policy:
+- If the request is a broad UX/UI/product/workflow change and the user did not explicitly ask to build directly or view first, return a current-app decision strip.
+- If the request is backend-only, a small direct fix, or explicitly direct, answer normally without a decision strip.
+- Enforce consideration, not mockup creation. Give the user a real choice.
+- Your final answer should be one short product-facing sentence plus the fenced decision strip. Do not use tools.
+
+Decision strip format:
+{
+  "title": "How should I approach this?",
+  "summary": "I can change the current app directly, or show you a preview direction first.",
+  "options": [
+    {
+      "id": "build-direct",
+      "label": "Build directly",
+      "description": "Apply the change to the real app now.",
+      "prompt": "Implement this change directly in the current app: ..."
+    },
+    {
+      "id": "quick-preview",
+      "label": "Show quick preview",
+      "description": "Create one review-only preview before implementation.",
+      "prompt": "Create one saved HTML review preview under .codex/mockups for this current-app change, without changing real app implementation files: ..."
+    },
+    {
+      "id": "preview-directions",
+      "label": "Show 2-3 directions",
+      "description": "Compare a few possible UX directions first.",
+      "prompt": "Create 2 or 3 saved HTML preview directions under .codex/mockups for this current-app change, without changing real app implementation files: ..."
+    }
+  ]
+}
+
+Review artifact rules to include in preview option prompts:
+- Save standalone HTML files under .codex/mockups.
+- Save .codex/mockups/manifest.json with version 1, originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.
+- For one preview, use label "Preview". For multiple directions, use labels A, B, C.
+- Name proposed options after user-facing workflow concepts from the plan, not after placement or component buckets.
+- Reflect the existing app's visible style, layout language, density, palette, typography, and likely current route. Do not pretend a nonexistent page is live.
+- If a Live/App mark is attached below, scope the preview direction to that area unless the user text says otherwise.
+- For each proposal, add a highlights array to its manifest entry when useful. Each highlight should name a changed visual area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. Highlights are soft review overlays only, not implementation chrome.
+- Keep it standalone and review-only. Do not change app implementation files yet.
+- Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, fake backend routes, or platform-specific hardcoded user-app logic.
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function existingAppPreviewFirstPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus,
+  wantsOptions: boolean,
+  planModeWasOn: boolean,
+  liveContext: string,
+  proposalSetId: string,
+  artifactKind: PreviewArtifactKind,
+  threadId: string | null,
+) {
+  const entries = status.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  return `${EXISTING_APP_PREVIEW_FIRST_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project already has app files: yes
+- Meaningful entries: ${entries}
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- The user asked to review visual direction before implementation.
+${liveContext}
+
+Task:
+- Create ${wantsOptions ? "2 or 3" : "one"} saved HTML review preview${wantsOptions ? " directions" : ""} under .codex/mockups for the requested current-app change.
+- Do not change real app implementation files in this turn.
+- Stop after the review artifact is ready; the desktop will open it automatically.
+
+Rules:
+${previewArtifactStorageRules(proposalSetId, artifactKind, threadId)}
+- Name proposed options after user-facing workflow concepts from the plan, not after placement or component buckets.
+- Read the current project enough to reflect existing UI, brand, layout, route shape, palette, typography, and density. Do not overbuild platform logic or fake backend routes.
+- If a Live/App mark is attached below, scope the review preview to that area unless the user text says otherwise.
+- Add a highlights array to each manifest mockup entry when useful. Each highlight should name a visual area added or changed and include x, y, width, height, viewportWidth, viewportHeight, and a short note. These are review overlays only; they must not appear in accepted app UI.
+- Include small local interactions where useful: toggles, filters, dialogs, selected rows/cards, or simple edit states.
+- Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, and CSS-property inspectors.
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function savedMockupReviewPrompt(
+  userPrompt: string,
+  previewSet: MockupPreviewSet,
+) {
+  const selected =
+    previewSet.mockups.find(
+      (mockup) => mockup.id === previewSet.selectedMockupId,
+    ) ?? previewSet.mockups[0];
+  const optionLines = previewSet.mockups.map(
+    (mockup) =>
+      `- ${mockup.label || mockup.id}: ${mockup.title} — ${
+        mockup.summary || "No summary saved."
+      } (${mockup.filePath})${mockup.id === selected?.id ? " [selected]" : ""}`,
+  );
+  return `${SAVED_MOCKUP_REVIEW_SENTINEL}
+
+Desktop state:
+- The user is reviewing saved local ${previewArtifactDisplayName(
+    previewSet.artifactKind,
+    previewSet.mockups.length,
+    "lower",
+  )} for this project.
+- Proposal set folder: ${previewSet.baseDir}
+- Selected option: ${selected ? `${selected.label || selected.id} — ${selected.title}` : "none"}
+- Original request: ${previewSet.originalPrompt || "Not saved; use the saved manifest and chat context only as supporting context."}
+
+Saved options:
+${optionLines.join("\n")}
+
+Decision policy:
+- Let the user's request drive the next step; do not show or ask a fixed questionnaire.
+- If they ask to combine, change, improve, or explore options, update or create saved ${previewArtifactDisplayName(
+    previewSet.artifactKind,
+    2,
+    "lower",
+  )} inside ${previewSet.baseDir} and stop before real implementation.
+- If they explicitly ask to build or implement, implement the real app from the selected or described ${previewArtifactActionName(
+    previewSet.artifactKind,
+  )} direction.
+- If their intent is ambiguous between revising the ${previewArtifactActionName(
+    previewSet.artifactKind,
+  )} and implementing, ask one concise product-facing question in the response.
+- Avoid debug text, DOM tag editing UI, CSS property panels, fake backend routes, and platform-specific hardcoded user-app logic.
+
+User request:
+${userPrompt.trim()}`;
+}
+
+function mockupVisibleOptionName(mockup: SavedMockup) {
+  const label = (mockup.label || "").trim();
+  if (/^[A-Z]$/i.test(label)) return `option ${label.toUpperCase()}`;
+  return "selected preview";
 }
 
 function latestAcceptedPlanProposalForThread(
@@ -3704,18 +4446,10 @@ function latestAcceptedPlanProposalForThread(
   );
 }
 
-type PlanCanvasPromptContext = {
-  status: PlanCanvasStatus;
-  summary: string;
-  serialized: string | null;
-  snapshot: ProjectCanvas | null;
-};
-
 function updatePlanProposalStatus(
   proposals: Record<string, PlanProposal>,
   turnId: string,
   status: PlanProposal["status"],
-  clearSnapshots = false,
 ) {
   const proposal = proposals[turnId];
   if (!proposal) return proposals;
@@ -3724,83 +4458,9 @@ function updatePlanProposalStatus(
     [turnId]: {
       ...proposal,
       status,
-      canvasBaseSnapshot: clearSnapshots ? null : proposal.canvasBaseSnapshot,
-      canvasDraftBaseSnapshot: clearSnapshots
-        ? null
-        : proposal.canvasDraftBaseSnapshot,
-      canvasProposalSnapshot: clearSnapshots
-        ? null
-        : proposal.canvasProposalSnapshot,
-      canvasProposalParserVersion: clearSnapshots
-        ? undefined
-        : proposal.canvasProposalParserVersion,
-      canvasUserEditedAt: clearSnapshots ? undefined : proposal.canvasUserEditedAt,
       updatedAt: Date.now(),
     },
   };
-}
-
-function updateCanvasSuggestionStatus(
-  suggestions: Record<string, CanvasSuggestion>,
-  turnId: string,
-  status: CanvasSuggestion["status"],
-  clearSnapshots = false,
-) {
-  const suggestion = suggestions[turnId];
-  if (!suggestion) return suggestions;
-  return {
-    ...suggestions,
-    [turnId]: {
-      ...suggestion,
-      status,
-      canvasBaseSnapshot: clearSnapshots ? null : suggestion.canvasBaseSnapshot,
-      canvasDraftBaseSnapshot: clearSnapshots
-        ? null
-        : suggestion.canvasDraftBaseSnapshot,
-      canvasProposalSnapshot: clearSnapshots
-        ? null
-        : suggestion.canvasProposalSnapshot,
-      canvasProposalParserVersion: clearSnapshots
-        ? undefined
-        : suggestion.canvasProposalParserVersion,
-      canvasUserEditedAt: clearSnapshots
-        ? undefined
-        : suggestion.canvasUserEditedAt,
-      updatedAt: Date.now(),
-    },
-  };
-}
-
-function applyCanvasSuggestionAndDismissPeers(
-  suggestions: Record<string, CanvasSuggestion>,
-  appliedTurnId: string,
-  projectId: string,
-) {
-  const applied = updateCanvasSuggestionStatus(
-    suggestions,
-    appliedTurnId,
-    "applied",
-    true,
-  );
-  let changed = applied !== suggestions;
-  const next: Record<string, CanvasSuggestion> = {};
-  for (const [turnId, suggestion] of Object.entries(applied)) {
-    if (
-      turnId !== appliedTurnId &&
-      suggestion.projectId === projectId &&
-      suggestion.status === "pending"
-    ) {
-      changed = true;
-      next[turnId] = {
-        ...suggestion,
-        status: "dismissed",
-        updatedAt: Date.now(),
-      };
-      continue;
-    }
-    next[turnId] = suggestion;
-  }
-  return changed ? next : applied;
 }
 
 function supersedePendingPlanProposals(
@@ -3829,50 +4489,11 @@ function supersedePendingPlanProposals(
   return changed ? next : proposals;
 }
 
-function parseCanvasProposalForPlan(
-  proposal: PlanProposal,
-  finalText: string,
-): PlanProposal {
-  if (!proposal.canvasBaseSnapshot) return proposal;
-  const parsed = applyCanvasProposalText(proposal.canvasBaseSnapshot, finalText);
-  const parseStatus =
-    parsed.changeCount > 0
-      ? "parsed"
-      : parsed.errors.length > 0
-        ? "failed"
-        : "empty";
-  const previewSpec = shouldOfferPlanPreview(proposal.prompt, finalText)
-    ? createPlanPreviewSpec(proposal.prompt, finalText, proposal.previewSpec)
-    : null;
-  const selectedVariant =
-    previewSpec?.variants.find(
-      (variant) => variant.id === proposal.previewSelectedVariantId,
-    ) ?? previewSpec?.variants[0] ?? null;
-  return {
-    ...proposal,
-    canvasDraftBaseSnapshot:
-      parsed.changeCount > 0 ? cloneProjectCanvas(parsed.canvas) : null,
-    canvasProposalSnapshot: parsed.canvas,
-    canvasProposalParseStatus: parseStatus,
-    canvasProposalParserVersion: CANVAS_PROPOSAL_PARSER_VERSION,
-    canvasProposalChangeCount: parsed.changeCount,
-    canvasProposalSummary: parsed.summary,
-    canvasProposalErrors: parsed.errors,
-    canvasUserEditedAt: undefined,
-    previewSpec,
-    previewSelectedVariantId: selectedVariant?.id ?? null,
-    previewAreaMark: previewSpec ? proposal.previewAreaMark ?? null : null,
-    proposalKind: classifyPlanProposalKind(proposal.prompt, finalText, parsed.changeCount),
-    updatedAt: Date.now(),
-  };
-}
-
 function classifyPlanProposalKind(
   prompt: string,
   finalText: string,
-  changeCount: number,
 ): PlanProposal["proposalKind"] {
-  if (changeCount <= 0 || isNoPlanProposalRequest(prompt)) return "plan";
+  if (isNoPlanProposalRequest(prompt)) return "plan";
   const text = finalText.toLowerCase();
   if (/\bsafer\s+(alternative|plan|path|shape)\b/.test(text)) {
     return "safer_alternative";
@@ -3881,9 +4502,13 @@ function classifyPlanProposalKind(
     return "safer_alternative";
   }
   if (
-    /\b(?:would|should)\s+not\s+(?:build|implement|create|accept|recommend)\b/.test(text) ||
+    /\b(?:would|should)\s+not\s+(?:build|implement|create|accept|recommend)\b/.test(
+      text,
+    ) ||
     /\bnot\s+(?:recommend|build|implement|create|accept)\b/.test(text) ||
-    /\b(?:reject|decline)\s+(?:the\s+)?(?:requested|request|literal)\b/.test(text)
+    /\b(?:reject|decline)\s+(?:the\s+)?(?:requested|request|literal)\b/.test(
+      text,
+    )
   ) {
     return "safer_alternative";
   }
@@ -3895,7 +4520,9 @@ function classifyPlanProposalKind(
     /\b(instead|rather than|keep(?:ing)?\s+it|recommend(?:ed)?|safer|simpler|reuse)\b/.test(
       text,
     );
-  return warnsAboutDuplicate && offersAlternative ? "safer_alternative" : "plan";
+  return warnsAboutDuplicate && offersAlternative
+    ? "safer_alternative"
+    : "plan";
 }
 
 function isNoPlanProposalRequest(prompt: string) {
@@ -3912,654 +4539,112 @@ function isNoPlanProposalRequest(prompt: string) {
   );
 }
 
-function shouldAutoCaptureCanvasSuggestionPrompt(prompt: string) {
-  const text = prompt.toLowerCase();
-  const referencesCanvas =
-    /\b(canvas|project map|map|ui reference|visual reference|coordinates?|xywh|position|layout)\b/.test(
-      text,
-    ) || /\b[bcgdtm][1-9]\d*\b/.test(text);
-  if (!referencesCanvas) return false;
-  return /\b(see|show|save|update|move|shift|center|align|resize|place|draw|create|add|adjust|change|apply)\b/.test(
-    text,
-  );
-}
-
-function parseCanvasSuggestionForTurn(
-  suggestion: CanvasSuggestion,
-  finalText: string,
-): CanvasSuggestion {
-  if (!suggestion.canvasBaseSnapshot) return suggestion;
-  const parsed = applyCanvasProposalText(suggestion.canvasBaseSnapshot, finalText);
-  const parsedCanvas = isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
-    ? polishGeneratedCurrentUiDraft(parsed.canvas)
-    : parsed.canvas;
-  const parseStatus =
-    parsed.changeCount > 0
-      ? "parsed"
-      : parsed.errors.length > 0
-        ? "failed"
-        : "empty";
-  return {
-    ...suggestion,
-    canvasDraftBaseSnapshot:
-      parsed.changeCount > 0 ? cloneProjectCanvas(parsedCanvas) : null,
-    canvasProposalSnapshot: parsedCanvas,
-    canvasProposalParseStatus: parseStatus,
-    canvasProposalParserVersion: CANVAS_PROPOSAL_PARSER_VERSION,
-    canvasProposalChangeCount: parsed.changeCount,
-    canvasProposalSummary: isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
-      ? generatedCurrentUiDraftSummary(parsedCanvas)
-      : parsed.summary,
-    canvasProposalErrors: parsed.errors,
-    canvasUserEditedAt: undefined,
-    updatedAt: Date.now(),
-  };
-}
-
-function polishGeneratedCurrentUiDraft(canvas: ProjectCanvas): ProjectCanvas {
-  const items = canvas.items
-    .filter((item) => !isOversizedGeneratedShell(item))
-    .map((item) => ({
-      ...item,
-      state: item.state === "deleted" ? item.state : ("proposed" as const),
-      locked: false,
-      updatedAt: Date.now(),
-    }));
-  const itemIds = new Set(items.map((item) => item.id));
-  const visibleItemIds = new Set(items.map((item) => item.id));
-  const cleanedCanvas = {
-    ...canvas,
-    items,
-    groups: canvas.groups
-      .map((group) => ({
-        ...group,
-        itemIds: group.itemIds.filter((itemId) => visibleItemIds.has(itemId)),
-        state: group.state === "deleted" ? group.state : ("proposed" as const),
-        locked: false,
-        updatedAt: Date.now(),
-      }))
-      .filter(
-        (group) =>
-          group.itemIds.length > 1 &&
-          group.itemIds.every((itemId) => itemIds.has(itemId)),
-      ),
-    updatedAt: Date.now(),
-  };
-  return pruneEmptyGeneratedUiViews(cleanedCanvas);
-}
-
-function pruneEmptyGeneratedUiViews(canvas: ProjectCanvas): ProjectCanvas {
-  const visibleItems = canvas.items.filter(
-    (item) => item.visible !== false && item.pageId && item.subPageId,
-  );
-  if (visibleItems.length === 0) return canvas;
-
-  const subPageIdsByPage = new Map<string, Set<string>>();
-  for (const item of visibleItems) {
-    if (!item.pageId || !item.subPageId) continue;
-    const subPageIds = subPageIdsByPage.get(item.pageId) ?? new Set<string>();
-    subPageIds.add(item.subPageId);
-    subPageIdsByPage.set(item.pageId, subPageIds);
-  }
-
-  const pages = canvas.pages
-    .filter((page) => subPageIdsByPage.has(page.id))
-    .map((page) => {
-      const subPageIds = subPageIdsByPage.get(page.id) ?? new Set<string>();
-      const subPages = page.subPages.filter((subPage) => subPageIds.has(subPage.id));
-      return {
-        ...page,
-        subPages: subPages.length > 0 ? subPages : page.subPages,
-      };
-    });
-
-  if (pages.length === 0) return canvas;
-
-  const sortedPages = [...pages].sort((left, right) => left.order - right.order);
-  const firstPage = sortedPages[0];
-  const firstSubPage = [...firstPage.subPages].sort(
-    (left, right) => left.order - right.order,
-  )[0];
-  return {
-    ...canvas,
-    pages,
-    activePageId: firstPage.id,
-    activeSubPageId: firstSubPage?.id ?? canvas.activeSubPageId,
-    updatedAt: Date.now(),
-  };
-}
-
-function isOversizedGeneratedShell(item: CanvasItem) {
-  const area = item.width * item.height;
-  const worldArea = CANVAS_WORLD_WIDTH * CANVAS_WORLD_HEIGHT;
-  const coversMostWorld =
-    item.width >= CANVAS_WORLD_WIDTH * 0.72 ||
-    item.height >= CANVAS_WORLD_HEIGHT * 0.72 ||
-    area >= worldArea * 0.42;
-  if (!coversMostWorld) return false;
-  const text = `${item.title} ${item.body} ${item.comment}`.toLowerCase();
-  return /\b(shell|workspace|background|desktop|screen|page|canvas|app frame|layout frame)\b/.test(
-    text,
-  );
-}
-
-function generatedCurrentUiDraftSummary(canvas: ProjectCanvas) {
-  const visibleItems = canvas.items.filter((item) => item.visible !== false);
-  const pageIds = new Set(
-    visibleItems
-      .map((item) => item.pageId)
-      .filter((pageId): pageId is string => Boolean(pageId)),
-  );
-  const pages = pageIds.size > 0 ? pageIds.size : canvas.pages.length;
-  return `Draft ready: ${visibleItems.length} item${
-    visibleItems.length === 1 ? "" : "s"
-  } across ${pages} page${pages === 1 ? "" : "s"}.`;
-}
-
 function planProposalRevisionPrompt(
   proposal: PlanProposal,
-  summary = canvasProposalDeltaSummary(
-    proposal.canvasBaseSnapshot,
-    proposal.canvasProposalSnapshot,
-  ),
   feedback = "",
+  attachedPreview = "",
 ) {
+  void proposal;
   const feedbackText = feedback.trim();
-  if (!summary && !feedbackText) {
-    return "Please revise the plan: ";
-  }
-  if (feedbackText && !summary) {
-    return [
-      "Please revise the previous plan using this feedback.",
-      "Do not edit files yet.",
-      "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
-      "If the feedback mentions menu, submenu, dropdown, filter, sort, expand, open, close, panel, drawer, hover, or a click consequence, consider a same-page interaction frame instead of a new sub-page.",
-      "",
-      "User feedback:",
-      feedbackText,
-    ].join("\n");
-  }
-  if (feedbackText && summary) {
-    return [
-      "Please revise the previous plan using this feedback and the attached visual guidance.",
-      "Do not edit files yet.",
-      "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
-      "If the feedback mentions menu, submenu, dropdown, filter, sort, expand, open, close, panel, drawer, hover, or a click consequence, consider a same-page interaction frame instead of a new sub-page.",
-      "",
-      "User feedback:",
-      feedbackText,
-      "",
-      "Attached visual guidance:",
-      summary,
-    ].join("\n");
+  const visibleRequest = feedbackText || "Please revise the plan.";
+  const contextLines = [
+    "Plan revision rules:",
+    "- Revise the previous plan; do not edit files yet.",
+    "- Return a revised product-facing plan.",
+    "- If visual changes still matter, keep the written plan and proposed visual option names aligned.",
+    "- For menus, filters, drawers, hover states, and similar click consequences, describe the same-screen state clearly instead of inventing separate pages.",
+  ];
+  const previewText = attachedPreview.trim();
+  if (previewText) {
+    contextLines.push("", "Selected preview context:", previewText);
   }
   return [
-    "Please revise the previous plan using the attached visual guidance.",
-    "Do not edit files yet.",
-    "Return a revised product-facing plan. If visual changes still matter, describe the updated live app preview direction plainly.",
+    visibleRequest,
     "",
-    "Attached visual guidance:",
-    summary,
+    "Project context explicitly attached by the user:",
+    ...contextLines,
   ].join("\n");
 }
 
-function planProposalAcceptPrompt(attachedUiEdits: string, attachedPreview = "") {
+function planProposalAcceptPrompt(attachedPreview = "") {
   const previewText = attachedPreview.trim();
-  if (!attachedUiEdits.trim() && !previewText) {
+  if (!previewText) {
     return "I accept this plan. Implement it now.";
   }
-  if (!attachedUiEdits.trim() && previewText) {
-    return [
-      "I accept this plan. Implement it now using the selected live app preview as guidance.",
-      "",
-      "Selected preview context:",
-      previewText,
-    ].join("\n");
-  }
-  if (attachedUiEdits.trim() && !previewText) {
-    return [
-      "I accept this plan. Implement it now using my latest UI draft edits as guidance.",
-      "Do not save the UI draft into Project Canvas memory as part of implementation; the app will offer Update Canvas after code changes.",
-      "",
-      "Latest attached UI draft edits:",
-      attachedUiEdits,
-    ].join("\n");
-  }
   return [
-    "I accept this plan. Implement it now using the selected live app preview and my latest UI draft edits as guidance.",
-    "Do not save the UI draft into Project Canvas memory as part of implementation; the app will offer Update Canvas after code changes.",
+    "I accept this plan. Implement it now.",
     "",
-    "Selected preview context:",
+    "Project context explicitly attached by the user:",
+    "Selected live app preview guidance. This supports the accepted plan; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
+    "",
     previewText,
-    "",
-    "Latest attached UI draft edits:",
-    attachedUiEdits,
   ].join("\n");
 }
 
-function canvasDraftDeltaSummary(
-  record: Pick<
-    PlanProposal | CanvasSuggestion,
-    "canvasDraftBaseSnapshot" | "canvasBaseSnapshot" | "canvasProposalSnapshot"
-  >,
+function samePlanPreviewSession(
+  left: PlanPreviewSessionState | null,
+  right: PlanPreviewSessionState | null,
 ) {
-  return canvasProposalDeltaSummary(
-    record.canvasDraftBaseSnapshot ?? record.canvasBaseSnapshot,
-    record.canvasProposalSnapshot,
-  );
-}
-
-function canvasDraftContentChanged(
-  previous: ProjectCanvas | null,
-  next: ProjectCanvas,
-) {
-  if (!previous) return true;
+  if (!left || !right) return left === right;
   return (
-    JSON.stringify(canvasDraftComparableContent(previous)) !==
-    JSON.stringify(canvasDraftComparableContent(next))
+    left.previewUrl === right.previewUrl &&
+    left.route === right.route &&
+    left.viewport === right.viewport &&
+    left.interactionState === right.interactionState &&
+    left.cleanupStatus === right.cleanupStatus
   );
 }
 
-function canvasDraftComparableContent(canvas: ProjectCanvas) {
-  return {
-    pages: canvas.pages,
-    items: canvas.items,
-    groups: canvas.groups,
-    interactionPreviews: canvas.interactionPreviews,
-  };
-}
-
-function canvasSuggestionAskPrompt(summary: string) {
-  if (!summary.trim()) {
-    return "Please review this Canvas draft and tell me the next best step. Do not apply Canvas memory or edit files unless I ask.";
-  }
-  return [
-    "Please review this Canvas draft and tell me the next best step.",
-    "Do not apply Canvas memory or edit files unless I ask.",
-    "",
-    "Latest Canvas draft edits:",
-    summary,
-  ].join("\n");
-}
-
-function canvasSuggestionHandoffContexts(
-  suggestion: CanvasSuggestion,
-  project: Project,
-): ComposerContextReference[] {
-  if (
-    suggestion.contexts.some(
-      (context) =>
-        context.type === "canvas" && context.projectId === suggestion.projectId,
-    )
-  ) {
-    return suggestion.contexts;
-  }
-  return [
-    ...suggestion.contexts,
-    {
-      type: "canvas",
-      projectId: project.id,
-      projectName: project.name,
-      target: { kind: "project" },
-    },
-  ];
-}
-
-function planProposalRevisionContexts(
-  proposal: PlanProposal,
-  project: Project,
-): ComposerContextReference[] {
-  if (
-    proposal.contexts.some(
-      (context) =>
-        context.type === "canvas" && context.projectId === proposal.projectId,
-    )
-  ) {
-    return proposal.contexts;
-  }
-  if (!proposal.canvasBaseSnapshot && !proposal.canvasProposalSnapshot) {
-    return proposal.contexts;
-  }
-  return [
-    ...proposal.contexts,
-    {
-      type: "canvas",
-      projectId: project.id,
-      projectName: project.name,
-      target: { kind: "project" },
-    },
-  ];
-}
-
-function canvasContextIdentity(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${context.projectId}:app-preview`;
-  }
-  const target = context.target ?? { kind: "project" as const };
-  if (target.kind === "project") return `${context.projectId}:project`;
-  if (target.kind === "page") {
-    return `${context.projectId}:page:${target.pageId ?? "canvas"}:${
-      target.subPageId ?? "all"
-    }`;
-  }
-  if (target.kind === "item") {
-    return `${context.projectId}:item:${target.itemId}`;
-  }
-  return `${context.projectId}:group:${target.groupId}`;
-}
-
-function canvasContextSearchLabel(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${context.projectName} App Preview App Mark ${context.previewUrl}`;
-  }
-  const target = context.target;
-  if (!target || target.kind === "project") return context.projectName;
-  if (target.kind === "page") {
-    return `${context.projectName} ${target.pageName} ${
-      target.subPageName ?? ""
-    }`;
-  }
-  return `${context.projectName} ${target.reference} ${target.label}`;
-}
-
-function preparePromptCanvasMentions(
-  prompt: string,
-  contexts: ComposerContextReference[],
-  options: ComposerCanvasContextOption[],
-) {
-  const aliases: string[] = [];
-  const strippedPrompt = prompt
-    .replace(
-      /(^|\s)@(canvas)(?=$|\s|[.,;:!?])/gi,
-      (match, leading: string, alias: string) => {
-        aliases.push(alias.toLowerCase());
-        return leading;
-      },
-    )
-    .replace(/[ \t]{2,}/g, " ")
-    .trimStart();
-
-  if (aliases.length === 0) {
-    return { prompt, contexts: [...contexts] };
-  }
-
-  const selectedContext = canvasContextForMentionAlias(
-    aliases[aliases.length - 1] ?? "canvas",
-    options,
-  );
-  if (!selectedContext) {
-    return { prompt: strippedPrompt, contexts: [...contexts] };
-  }
-
-  return {
-    prompt: strippedPrompt,
-    contexts: [
-      ...contexts.filter((context) => context.type !== "canvas"),
-      selectedContext,
-    ],
-  };
-}
-
-function canvasContextForMentionAlias(
-  alias: string,
-  options: ComposerCanvasContextOption[],
-): ComposerCanvasContext | null {
-  if (alias.toLowerCase() !== "canvas") return null;
-  return options.find((option) => option.id.endsWith(":project"))?.context ?? null;
-}
-
-function canvasProposalDeltaSummary(
-  baseCanvas: ProjectCanvas | null,
-  proposalCanvas: ProjectCanvas | null,
-) {
-  if (!baseCanvas || !proposalCanvas) return "";
-  const baseByReference = new Map(
-    baseCanvas.items.map((item) => [item.reference.toUpperCase(), item]),
-  );
-  const proposalReferences = new Set(
-    proposalCanvas.items.map((item) => item.reference.toUpperCase()),
-  );
-  const changes: string[] = [];
-  const proposalItems = [...proposalCanvas.items].sort(
-    (left, right) => left.numericId - right.numericId,
-  );
-  for (const item of proposalItems) {
-    const base = baseByReference.get(item.reference.toUpperCase()) ?? null;
-    if (!base) {
-      changes.push(
-        `- ${item.reference} created: ${item.state} ${item.kind}; xywh=${formatCanvasRect(item)}`,
-      );
-      continue;
-    }
-    const parts: string[] = [];
-    if (item.state !== base.state) {
-      parts.push(`state ${base.state} -> ${item.state}`);
-    }
-    if (!sameCanvasRect(item, base)) {
-      parts.push(
-        `xywh ${formatCanvasRect(base)} -> ${formatCanvasRect(item)}`,
-      );
-    }
-    if (item.title !== base.title) {
-      parts.push(
-        `name "${quotePromptValue(base.title, 40)}" -> "${quotePromptValue(
-          item.title,
-          40,
-        )}"`,
-      );
-    }
-    if (item.body !== base.body) {
-      parts.push("label changed");
-    }
-    if (item.comment !== base.comment) {
-      parts.push("note changed");
-    }
-    if (parts.length > 0) {
-      changes.push(`- ${item.reference}: ${parts.join("; ")}`);
-    }
-  }
-  for (const item of baseCanvas.items) {
-    if (!proposalReferences.has(item.reference.toUpperCase())) {
-      changes.push(`- ${item.reference} removed from proposal snapshot`);
-    }
-  }
-  const basePreviewByKey = new Map(
-    baseCanvas.interactionPreviews.map((preview) => [
-      interactionPreviewKey(preview),
-      preview,
-    ]),
-  );
-  const proposalPreviewKeys = new Set<string>();
-  for (const preview of proposalCanvas.interactionPreviews) {
-    const key = interactionPreviewKey(preview);
-    proposalPreviewKeys.add(key);
-    const basePreview = basePreviewByKey.get(key) ?? null;
-    for (const frame of preview.frames) {
-      const baseFrame = basePreview?.frames.find(
-        (candidate) => candidate.frame === frame.frame,
-      );
-      if (baseFrame && sameInteractionFrame(baseFrame, frame)) continue;
-      changes.push(
-        `- ${preview.triggerReference} frame ${frame.frame}: ${interactionFrameSummary(
-          frame,
-        )}`,
-      );
-    }
-  }
-  for (const preview of baseCanvas.interactionPreviews) {
-    if (!proposalPreviewKeys.has(interactionPreviewKey(preview))) {
-      changes.push(`- ${preview.triggerReference} interaction preview removed`);
-    }
-  }
-  if (changes.length === 0) return "";
-  const clipped = changes.slice(0, 16);
-  if (changes.length > clipped.length) {
-    clipped.push(`- ${changes.length - clipped.length} more changes`);
-  }
-  return clipped.join("\n");
-}
-
-function interactionPreviewKey(
-  preview: ProjectCanvas["interactionPreviews"][number],
-) {
-  return `${preview.triggerKind}:${preview.triggerReference.toUpperCase()}`;
-}
-
-function sameInteractionFrame(
-  left: ProjectCanvas["interactionPreviews"][number]["frames"][number],
-  right: ProjectCanvas["interactionPreviews"][number]["frames"][number],
-) {
-  return (
-    left.sticky === right.sticky &&
-    left.holdMs === right.holdMs &&
-    JSON.stringify(left.affected) === JSON.stringify(right.affected)
-  );
-}
-
-function interactionFrameSummary(
-  frame: ProjectCanvas["interactionPreviews"][number]["frames"][number],
-) {
-  const affected = frame.affected
-    .slice(0, 5)
-    .map((delta) => {
-      const parts = [delta.reference];
-      if (
-        delta.x != null &&
-        delta.y != null &&
-        delta.width != null &&
-        delta.height != null
-      ) {
-        parts.push(`xywh=${formatCanvasRect({
-          x: delta.x,
-          y: delta.y,
-          width: delta.width,
-          height: delta.height,
-        })}`);
-      }
-      if (typeof delta.visible === "boolean") {
-        parts.push(`visible=${delta.visible}`);
-      }
-      return parts.join(" ");
-    })
-    .join("; ");
-  const timing = frame.sticky
-    ? "sticky until Stop"
-    : `hold ${frame.holdMs ?? 900}ms`;
-  return `${timing}; ${frame.affected.length} affected item${
-    frame.affected.length === 1 ? "" : "s"
-  }${affected ? ` (${affected})` : ""}`;
-}
-
-function sameCanvasRect(left: CanvasItem, right: CanvasItem) {
-  return (
-    left.x === right.x &&
-    left.y === right.y &&
-    left.width === right.width &&
-    left.height === right.height
-  );
-}
-
-function isGeneratedCurrentUiMockupPrompt(prompt: string) {
-  return prompt
-    .trimStart()
-    .startsWith(
-      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
-    );
-}
-
-function generatedMockupCanvasContext(project: Project): PlanCanvasPromptContext {
-  const snapshot = createProjectCanvas(project);
-  return {
-    status: "empty",
-    summary: "Generated current interface draft",
-    serialized: null,
-    snapshot,
-  };
-}
-
-function promptWithGeneratedMockupContext(prompt: string) {
-  return [
-    prompt,
-    "",
-    "Canvas generation mode:",
-    "The attached Canvas is only the destination for a generated current-interface draft. Do not treat existing Canvas items as accepted interface truth for this generation run.",
-    "Create a fresh reviewable Canvas draft that represents existing screens only. Use state=current for interface pieces that exist today, but remember the draft is not accepted until the user applies it.",
-    "Prefer readable pages and sub-pages over one large workspace map. Keep one sub-page visible/readable at a time by using page and subPage fields.",
-    "Use a compact screen-sketch grid per subPage: x=0..36 and y=0..24. The Canvas page/subPage is the screen frame; do not output giant workspace/background/page-shell containers as items.",
-    "Only output visible UI pieces the user should review. Omit decorative backgrounds and uncertain internals.",
-  ].join("\n");
-}
-
-function promptWithPlanModeContext(
-  prompt: string,
-  canvasContext: PlanCanvasPromptContext,
-) {
+function promptWithPlanModeContext(prompt: string) {
   const rules = [
     "Plan Mode: investigate and propose the plan first.",
-    "Do not edit files, run implementation commands, or mutate the accepted Canvas unless the user accepts the plan.",
+    "Do not edit app implementation files or run implementation commands unless the user accepts the plan.",
+    "When visual review is the plan itself, you may create review-only artifacts under .codex/mockups; these are preview records, not app implementation.",
+    "For an existing running app, prefer temporary live preview variants when enough context exists. Use .codex/mockups for blank projects, missing surfaces, or when a saved review artifact is clearer.",
     "If the user later accepts the plan, implementation can proceed in a separate turn.",
     "Return a clear product-facing plan. Keep source-level details only where they make the plan accurate.",
-  ];
-
-  if (canvasContext.status === "not_attached" || canvasContext.status === "empty") {
-    rules.push(
-      "Canvas status: empty. There are no accepted Canvas items yet. Do not invent existing Canvas item references or exact current coordinates; if visual planning matters, propose new gold/proposed Canvas items for user review.",
-    );
-  } else if (canvasContext.status === "sparse") {
-    rules.push(
-      "Canvas status: sparse. Use available Canvas references as rough user context, not as complete application truth.",
-    );
-  } else {
-    rules.push(
-      "Canvas status: usable. Use Canvas reference codes, coordinates, groups, and states when the plan affects layout or workflow.",
-    );
-  }
-
-  rules.push(
     "If the request creates hidden prompt/message state, parallel recovery paths, duplicated ownership, or estimate-vs-observed confusion, challenge the risky literal request and offer a safer plan in product language before implementation steps.",
-    "When Canvas changes are relevant, include a compact Canvas proposal section that uses existing reference codes and the states current, proposed, and deleted. Canvas proposal text is a draft overlay, not accepted Canvas memory.",
-    "For a small same-page click consequence such as a menu, submenu, dropdown, filter, sort control, panel, drawer, expand, open, or close behavior, prefer an interaction frame over a new sub-page.",
-    'Use this parseable format in a fenced ```canvas-proposal block when possible: `C5 state=deleted`, `C4 xywh=120,80,220,132 state=current`, `C4 grid=4.29,2.86,7.86,4.71 state=current`, or `create container title="Settings panel" state=proposed page="Page 1" subPage="Active" xywh=360,80,220,132`. Keep one canvas change per line.',
-    "For interaction frames, use `interaction trigger=B3 frame=2 target=C12 xywh=120,80,220,132 visible=true sticky=true`. Frames stay on the same page/sub-page and are limited to frame 2 and optional frame 3.",
-  );
-
-  const canvasBlock = canvasContext.serialized
-    ? `\n\nProject Canvas for this plan:\n${canvasContext.serialized}`
-    : "";
-
-  return `${rules.join("\n")}\n\nUser request:\n${prompt}${canvasBlock}`;
+    "If you create .codex/mockups artifacts in Plan Mode, summarize them as review previews and stop before app implementation. The user can mark, revise, or accept from the preview surface.",
+    "When you create .codex/mockups review artifacts, include manifest highlights for important added or changed areas when useful. Highlights are review overlays only and must not become accepted app UI chrome.",
+    "When visual review of an existing running app would make the plan clearer, include one fenced ```codex-plan-preview JSON block after the written plan. The desktop strips this block from chat and uses it only for Live preview comparison.",
+    "The plan-preview JSON must have version 1, summary, and one to three variants with ids A/B/C, title, tradeoff, placement (topbar, sidePanel, or modal), summary, and components. Components need kind, label, body, and optional actionLabel.",
+    "Use option titles that name user-facing workflow concepts from the written plan, not placement buckets. The written plan and visual variants must use the same option names and tradeoffs.",
+    "Do not include a plan-preview block for backend-only or direct non-visual plans.",
+  ];
+  return `${rules.join("\n")}\n\nUser request:\n${prompt}`;
 }
 
 function promptWithComposerContexts(
   prompt: string,
   contexts: ComposerContextReference[],
-  desktop: DesktopState,
-  fallbackProject: Project,
 ) {
   if (contexts.length === 0) return prompt;
   const blocks = contexts
     .map((context) => {
-      if (context.type === "canvas") {
-        return serializeCanvasContext(context, desktop, fallbackProject, prompt);
-      }
       if (context.type === "appPreview") {
         return serializeAppPreviewContext(context);
+      }
+      if (context.type === "mockupPreview") {
+        return serializeMockupPreviewContext(context);
       }
       return null;
     })
     .filter((block): block is string => Boolean(block));
   if (blocks.length === 0) return prompt;
-  const hasCanvas = contexts.some((context) => context.type === "canvas");
   const hasAppPreview = contexts.some(
     (context) => context.type === "appPreview",
   );
+  const hasMockupPreview = contexts.some(
+    (context) => context.type === "mockupPreview",
+  );
   const guidance = [
+    "The user-visible request remains authoritative. Use the attached context only as supporting visual guidance.",
     "Use only the attached context unless the user asks you to inspect more.",
-    hasCanvas
-      ? "Use the included Canvas visual reference codes when discussing layout changes. If you propose a concrete Canvas change, include a compact suggestion in a fenced ```canvas-proposal block using one change per line, such as `C6 xywh=720,75,220,132 state=proposed`, `C6 grid=25.71,2.68,7.86,4.71 state=proposed`, or `create container title=\"Inspector\" page=\"Page 1\" subPage=\"Inspector\" state=proposed grid=18,2,8,18`. For small same-page click consequences such as menus, filters, sort controls, dropdowns, panels, or drawers, use `interaction trigger=B3 frame=2 target=C12 xywh=120,80,220,132 visible=true sticky=true` when useful."
-      : null,
     hasAppPreview
       ? "For @AppMark context, treat the rectangle as a user-marked area in the live app preview. Use it as visual intent for placement, hierarchy, or UX feedback; do not claim exact DOM nodes unless you inspect the project."
+      : null,
+    hasMockupPreview
+      ? "For @MockupMark context, treat each named rectangle as user feedback on a saved mockup option. Proposal highlights are adjustable suggested areas, while user marks are explicit user-drawn areas. Use mark names, option labels, selected files, and rectangles to revise, combine, or build the desired direction; do not claim exact DOM nodes unless you inspect the saved mockup file."
       : null,
     "Do not assume this context is attached to future prompts unless the user attaches it again.",
   ].filter((line): line is string => Boolean(line));
@@ -4572,11 +4657,13 @@ function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
   const mark = context.areaMark;
   const lines = [
     `@AppMark project="${quotePromptValue(context.projectName, 80)}"`,
+    `mark=${quotePromptValue(context.markLabel || "Live mark 1", 80)}`,
     `previewUrl=${quotePromptValue(context.previewUrl, 160)}`,
+    `route=${quotePromptValue(mark.route ?? context.previewUrl, 180)}`,
     `viewport=${context.viewport}`,
-    `area=xywh(${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
+    `areaRect=${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
       mark.width,
-    )},${Math.round(mark.height)})`,
+    )},${Math.round(mark.height)}`,
     `previewSize=${Math.round(mark.viewportWidth)}x${Math.round(
       mark.viewportHeight,
     )}`,
@@ -4588,640 +4675,42 @@ function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
   return lines.join("\n");
 }
 
-function canvasContextForPrompt(
-  contexts: ComposerContextReference[],
-  desktop: DesktopState,
-  fallbackProject: Project,
-  allowImplicit: boolean,
-  requestPrompt: string,
-): PlanCanvasPromptContext | null {
-  const explicitContext = contexts.find(
-    (candidate): candidate is ComposerCanvasContext =>
-      candidate.type === "canvas",
-  );
-  if (!explicitContext && !allowImplicit) return null;
-  const project =
-    (explicitContext
-      ? desktop.projects.find((candidate) => candidate.id === explicitContext.projectId)
-      : null) ??
-    fallbackProject;
-  const context =
-    explicitContext ??
-    ({
-      type: "canvas",
-      projectId: project.id,
-      projectName: project.name,
-      target: { kind: "project" },
-    } satisfies ComposerCanvasContext);
-  const canvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
-  const visibleItems = canvas.items.filter((item) => item.visible);
-  const visibleGroups = canvas.groups.filter((group) =>
-    group.itemIds.some((itemId) =>
-      visibleItems.some((item) => item.id === itemId),
-    ),
-  );
-  const visualCount = visibleItems.length + visibleGroups.length;
-  const status: PlanCanvasStatus =
-    visualCount === 0 ? "empty" : visualCount < 3 ? "sparse" : "usable";
-  const summary =
-    status === "empty"
-      ? "Canvas has no items yet"
-      : status === "sparse"
-        ? `Canvas available, sparse (${visibleItems.length} item${
-            visibleItems.length === 1 ? "" : "s"
-          })`
-        : `Canvas available (${visibleItems.length} item${
-            visibleItems.length === 1 ? "" : "s"
-          }, ${visibleGroups.length} group${
-            visibleGroups.length === 1 ? "" : "s"
-          })`;
-  return {
-    status,
-    summary,
-    serialized: serializeCanvasContext(
-      context,
-      desktop,
-      fallbackProject,
-      requestPrompt,
-    ),
-    snapshot: cloneProjectCanvas(canvas),
-  };
-}
-
-function hasCanvasSuggestionContext(contexts: ComposerContextReference[]) {
-  const context = contexts.find((candidate) => candidate.type === "canvas");
-  if (!context) return false;
-  return true;
-}
-
-function canvasPromptSnapshotForProject(desktop: DesktopState, project: Project) {
-  const savedCanvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
-  const draftCanvas = activeCanvasDraftSnapshotForProject(desktop, project.id);
-  return draftCanvas ?? savedCanvas;
-}
-
-function activeCanvasDraftSnapshotForProject(
-  desktop: DesktopState,
-  projectId: string,
-) {
-  const candidates = [
-    ...Object.values(desktop.planProposals).filter(
-      (proposal) =>
-        proposal.projectId === projectId &&
-        proposal.canvasProposalSnapshot &&
-        (proposal.status === "pending" ||
-          (proposal.status === "accepted" && !proposal.canvasUpdatedAt)),
-    ),
-    ...Object.values(desktop.canvasSuggestions).filter(
-      (suggestion) =>
-        suggestion.projectId === projectId &&
-        suggestion.status === "pending" &&
-        suggestion.canvasProposalSnapshot,
-    ),
-  ].sort((left, right) => right.updatedAt - left.updatedAt);
-  return candidates[0]?.canvasProposalSnapshot
-    ? cloneProjectCanvas(candidates[0].canvasProposalSnapshot)
-    : null;
-}
-
-function serializeCanvasContext(
-  context: ComposerCanvasContext,
-  desktop: DesktopState,
-  fallbackProject: Project,
-  requestPrompt = "",
-) {
-  const project =
-    desktop.projects.find((candidate) => candidate.id === context.projectId) ??
-    fallbackProject;
-  const hasActiveDraft = Boolean(
-    activeCanvasDraftSnapshotForProject(desktop, project.id),
-  );
-  const canvas = canvasPromptSnapshotForProject(desktop, project);
-  const pages = [...canvas.pages].sort((left, right) => left.order - right.order);
-  const pageName = (pageId: string | null) =>
-    pageId
-      ? (pages.find((page) => page.id === pageId)?.name ?? pageId)
-      : "Canvas";
-  const subPageLabelFor = (pageId: string | null, subPageId: string | null) =>
-    pageId && subPageId
-      ? canvasSubPageDisplay(pages, pageId, subPageId)
-      : null;
-  const groupById = new Map(canvas.groups.map((group) => [group.id, group]));
-  const scoped = scopedCanvasReferences(canvas, context);
-  const items = scoped.items.sort(
-    (left, right) =>
-      pageName(left.pageId).localeCompare(pageName(right.pageId)) ||
-      left.zIndex - right.zIndex ||
-      left.numericId - right.numericId,
-  );
-  const groups = scoped.groups.sort(
-    (left, right) => left.numericId - right.numericId,
-  );
-  const scopedItemIds = new Set(scoped.items.map((item) => item.id));
-  const scopedGroupIds = new Set(scoped.groups.map((group) => group.id));
-  const interactionPreviews = canvas.interactionPreviews.filter((preview) =>
-    preview.triggerKind === "group"
-      ? scopedGroupIds.has(preview.triggerId)
-      : scopedItemIds.has(preview.triggerId),
-  );
+function serializeMockupPreviewContext(context: ComposerMockupPreviewContext) {
+  const mark = context.areaMark;
   const lines = [
-    `@Canvas project="${quotePromptValue(project.name, 80)}"`,
-    `canvasState=${hasActiveDraft ? "saved current plus active draft overlay" : "saved current"}`,
-    hasActiveDraft
-      ? "draftRule=items marked proposed/deleted and interaction previews are active draft guidance, not saved project truth"
-      : "draftRule=no active draft overlay attached",
-    `target=${canvasContextTargetDescription(context, pageName)}`,
-    `coordinates=local sub-page canvas xywh in raw units; grid unit=${CANVAS_GRID_UNIT}px; norm=${CANVAS_NORMALIZED_UNITS} units over ${CANVAS_WORLD_WIDTH}x${CANVAS_WORLD_HEIGHT}`,
-    "interactionPreviewProposal=use interaction trigger=B3 frame=2 target=C12 xywh=x,y,w,h visible=true sticky=true; frames are same-page temporary previews, max frame 2 and 3",
-    `activePage=${quotePromptValue(
-      pageName(canvas.activePageId),
-      40,
-    )}; activeDevice=${canvas.activeDevice}; updatedAt=${canvas.updatedAt}`,
-    `pages=${pages
-      .map(
-        (page, pageIndex) =>
-          `${page.name}:${page.id} subPages=${page.subPages
-            .map(
-              (subPage, subPageIndex) =>
-                `P${pageIndex + 1}.${subPageIndex + 1}:${subPage.name}:${subPage.id}`,
-            )
-            .join("|")}`,
-      )
-      .join(", ")}`,
+    `@MockupMark project="${quotePromptValue(context.projectName, 80)}"`,
+    `mark=${quotePromptValue(context.markLabel, 80)}`,
+    `source=${context.source === "proposalHighlight" ? "proposal-highlight" : "user-mark"}`,
+    `proposalSetId=${quotePromptValue(context.proposalSetId, 120)}`,
+    `artifactKind=${context.artifactKind}`,
+    `option=${quotePromptValue(context.mockupLabel, 40)}`,
+    `mockupId=${quotePromptValue(context.mockupId, 80)}`,
+    `title="${quotePromptValue(context.mockupTitle, 120)}"`,
+    `file=${quotePromptValue(context.filePath, 180)}`,
+    `viewport=${context.viewport}`,
+    `areaRect=${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
+      mark.width,
+    )},${Math.round(mark.height)}`,
+    `previewSize=${Math.round(mark.viewportWidth)}x${Math.round(
+      mark.viewportHeight,
+    )}`,
+    `createdAt=${mark.createdAt}`,
   ];
-
-  if (groups.length > 0) {
-    lines.push("groups:");
-    for (const group of groups.slice(0, 40)) {
-      lines.push(serializeCanvasGroup(group, pageName, subPageLabelFor));
-    }
-    if (groups.length > 40) {
-      lines.push(`- ${groups.length - 40} more groups omitted`);
-    }
+  if (context.highlightId) {
+    lines.push(`highlightId=${quotePromptValue(context.highlightId, 80)}`);
   }
-
-  lines.push("items:");
-  for (const item of items.slice(0, 120)) {
-    lines.push(serializeCanvasItem(item, pageName, subPageLabelFor, groupById));
-  }
-  if (items.length > 120) {
-    lines.push(`- ${items.length - 120} more items omitted`);
-  }
-  if (interactionPreviews.length > 0) {
-    lines.push("interaction-previews:");
-    for (const preview of interactionPreviews.slice(0, 20)) {
-      lines.push(serializeInteractionPreview(preview));
-    }
-    if (interactionPreviews.length > 20) {
-      lines.push(`- ${interactionPreviews.length - 20} more previews omitted`);
-    }
+  if (mark.note.trim()) {
+    lines.push(`note="${quotePromptValue(mark.note.trim(), 180)}"`);
   }
   return lines.join("\n");
-}
-
-function buildCanvasContextOptions(
-  project: Project,
-  desktop: DesktopState,
-): ComposerCanvasContextOption[] {
-  const canvas = desktop.canvases[project.id] ?? createProjectCanvas(project);
-  const pages = [...canvas.pages].sort((left, right) => left.order - right.order);
-  const pageName = (pageId: string | null) =>
-    pageId
-      ? (pages.find((page) => page.id === pageId)?.name ?? pageId)
-      : "Canvas";
-  const subPageName = (pageId: string | null, subPageId: string | null) =>
-    pageId && subPageId
-      ? canvasSubPageDisplay(pages, pageId, subPageId)
-      : null;
-  const itemCountByPage = new Map<string, number>();
-  const itemCountBySubPage = new Map<string, number>();
-  for (const item of canvas.items.filter((item) => item.visible)) {
-    const key = item.pageId ?? canvas.activePageId;
-    itemCountByPage.set(key, (itemCountByPage.get(key) ?? 0) + 1);
-    if (item.pageId && item.subPageId) {
-      const subPageKey = `${item.pageId}:${item.subPageId}`;
-      itemCountBySubPage.set(
-        subPageKey,
-        (itemCountBySubPage.get(subPageKey) ?? 0) + 1,
-      );
-    }
-  }
-  const options: ComposerCanvasContextOption[] = [
-    {
-      id: `${project.id}:project`,
-      label: "Canvas",
-      detail: `${canvas.items.filter((item) => item.visible).length} item${
-        canvas.items.filter((item) => item.visible).length === 1 ? "" : "s"
-      }`,
-      context: {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: { kind: "project" },
-      },
-    },
-  ];
-
-  for (const page of pages) {
-    const count = itemCountByPage.get(page.id) ?? 0;
-    options.push({
-      id: `${project.id}:page:${page.id}`,
-      label: page.name,
-      detail: `Page · ${count} item${count === 1 ? "" : "s"}`,
-      context: {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: {
-          kind: "page",
-          pageId: page.id,
-          pageName: page.name,
-          subPageId: null,
-          subPageName: null,
-        },
-      },
-    });
-    if (page.subPages.length > 1) {
-      for (const subPage of page.subPages) {
-        const count = itemCountBySubPage.get(`${page.id}:${subPage.id}`) ?? 0;
-        options.push({
-          id: `${project.id}:page:${page.id}:subpage:${subPage.id}`,
-          label: canvasSubPageDisplay(pages, page.id, subPage.id),
-          detail: `${page.name} · ${count} item${count === 1 ? "" : "s"}`,
-          context: {
-            type: "canvas",
-            projectId: project.id,
-            projectName: project.name,
-            target: {
-              kind: "page",
-              pageId: page.id,
-              pageName: page.name,
-              subPageId: subPage.id,
-              subPageName: subPage.name,
-            },
-          },
-        });
-      }
-    }
-  }
-
-  const groups = [...canvas.groups].sort((left, right) => {
-    return (
-      pageName(left.pageId).localeCompare(pageName(right.pageId)) ||
-      left.numericId - right.numericId
-    );
-  });
-  for (const group of groups) {
-    options.push({
-      id: `${project.id}:group:${group.id}`,
-      label: `${group.reference} ${group.title}`,
-      detail: `${pageName(group.pageId)} · group · ${group.state}`,
-      context: {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: {
-          kind: "group",
-          pageId: group.pageId ?? canvas.activePageId,
-          pageName: pageName(group.pageId),
-          subPageId: group.subPageId,
-          subPageName: subPageName(group.pageId, group.subPageId),
-          groupId: group.id,
-          reference: group.reference,
-          label: group.title,
-        },
-      },
-    });
-  }
-
-  const items = [...canvas.items]
-    .filter((item) => item.visible)
-    .sort((left, right) => {
-      return (
-        pageName(left.pageId).localeCompare(pageName(right.pageId)) ||
-        left.numericId - right.numericId
-      );
-    });
-  for (const item of items) {
-    options.push({
-      id: `${project.id}:item:${item.id}`,
-      label: `${item.reference} ${item.title}`,
-      detail: `${pageName(item.pageId)} · ${item.state} ${item.kind}`,
-      context: {
-        type: "canvas",
-        projectId: project.id,
-        projectName: project.name,
-        target: {
-          kind: "item",
-          pageId: item.pageId ?? canvas.activePageId,
-          pageName: pageName(item.pageId),
-          subPageId: item.subPageId,
-          subPageName: subPageName(item.pageId, item.subPageId),
-          itemId: item.id,
-          reference: item.reference,
-          label: item.title,
-        },
-      },
-    });
-  }
-
-  return options.slice(0, 180);
-}
-
-function scopedCanvasReferences(
-  canvas: ProjectCanvas,
-  context: ComposerCanvasContext,
-) {
-  const target = context.target;
-  const allItems = [...canvas.items];
-  const allGroups = [...canvas.groups];
-  if (!target || target.kind === "project") {
-    return { items: allItems, groups: allGroups };
-  }
-  if (target.kind === "page") {
-    if (target.pageId === null) {
-      return {
-        items: allItems,
-        groups: allGroups,
-      };
-    }
-    return {
-      items: allItems.filter(
-        (item) =>
-          item.pageId === target.pageId &&
-          (!target.subPageId || item.subPageId === target.subPageId),
-      ),
-      groups: allGroups.filter(
-        (group) =>
-          group.pageId === target.pageId &&
-          (!target.subPageId || group.subPageId === target.subPageId),
-      ),
-    };
-  }
-  if (target.kind === "item") {
-    const item = allItems.find((candidate) => candidate.id === target.itemId);
-    const groups = item?.groupId
-      ? allGroups.filter((group) => group.id === item.groupId)
-      : [];
-    return { items: item ? [item] : [], groups };
-  }
-  const group = allGroups.find((candidate) => candidate.id === target.groupId);
-  const memberIds = new Set(group?.itemIds ?? []);
-  return {
-    items: allItems.filter((item) => memberIds.has(item.id)),
-    groups: group ? [group] : [],
-  };
-}
-
-function canvasContextTargetDescription(
-  context: ComposerCanvasContext,
-  pageName: (pageId: string | null) => string,
-) {
-  const target = context.target;
-  if (!target || target.kind === "project") return "whole-canvas";
-  if (target.kind === "page") {
-    if (target.pageId === null) return "whole-canvas";
-    return `page:${quotePromptValue(target.pageName || pageName(target.pageId), 60)}${
-      target.subPageName
-        ? `; subPage=${quotePromptValue(target.subPageName, 60)}`
-        : ""
-    }`;
-  }
-  if (target.kind === "item") {
-    return `item:${target.reference}; page=${quotePromptValue(
-      target.pageName || pageName(target.pageId),
-      60,
-    )}${
-      target.subPageName
-        ? `; subPage=${quotePromptValue(target.subPageName, 60)}`
-        : ""
-    }`;
-  }
-  return `group:${target.reference}; page=${quotePromptValue(
-    target.pageName || pageName(target.pageId),
-    60,
-  )}${
-    target.subPageName
-      ? `; subPage=${quotePromptValue(target.subPageName, 60)}`
-      : ""
-  }`;
-}
-
-function canvasSubPageDisplay(
-  pages: CanvasPage[],
-  pageId: string,
-  subPageId: string,
-) {
-  const pageIndex = pages.findIndex((page) => page.id === pageId);
-  const page = pages[pageIndex];
-  if (!page) return subPageId;
-  const subPages = [...page.subPages].sort((left, right) => left.order - right.order);
-  const subPageIndex = subPages.findIndex((subPage) => subPage.id === subPageId);
-  const subPage = subPages[subPageIndex];
-  if (!subPage) return subPageId;
-  return `P${pageIndex + 1}.${subPageIndex + 1} ${subPage.name}`;
-}
-
-function serializeCanvasGroup(
-  group: CanvasGroup,
-  pageName: (pageId: string | null) => string,
-  subPageLabelFor: (pageId: string | null, subPageId: string | null) => string | null,
-) {
-  return [
-    `- ${group.reference} "${quotePromptValue(group.title, 80)}"`,
-    `state=${group.state}`,
-    `page=${quotePromptValue(pageName(group.pageId), 40)}`,
-    ...(subPageLabelFor(group.pageId, group.subPageId)
-      ? [
-          `subPage=${quotePromptValue(
-            subPageLabelFor(group.pageId, group.subPageId) ?? "",
-            60,
-          )}`,
-        ]
-      : []),
-    `locked=${group.locked}`,
-    `items=${group.itemIds.join(",")}`,
-    `xywh=${formatCanvasRect(group.bounds)}`,
-    `bounds=${formatCanvasBounds(group.bounds)}`,
-    `grid=${formatCanvasDerivedRect(gridRectFromCanvasRect(group.bounds))}`,
-    `norm=${formatCanvasDerivedRect(normalizedRectFromCanvasRect(group.bounds))}`,
-  ].join("; ");
-}
-
-function serializeCanvasItem(
-  item: CanvasItem,
-  pageName: (pageId: string | null) => string,
-  subPageLabelFor: (pageId: string | null, subPageId: string | null) => string | null,
-  groupById: Map<string, CanvasGroup>,
-) {
-  const parts = [
-    `- ${item.reference} ${item.kind} "${quotePromptValue(item.title, 80)}"`,
-    `state=${item.state}`,
-    `page=${quotePromptValue(pageName(item.pageId), 40)}`,
-    ...(subPageLabelFor(item.pageId, item.subPageId)
-      ? [
-          `subPage=${quotePromptValue(
-            subPageLabelFor(item.pageId, item.subPageId) ?? "",
-            60,
-          )}`,
-        ]
-      : []),
-    `locked=${item.locked}`,
-    `visible=${item.visible}`,
-    `z=${item.zIndex}`,
-    `xywh=${formatCanvasRect(item)}`,
-    `bounds=${formatCanvasBounds(item.bounds)}`,
-    `grid=${formatCanvasDerivedRect(gridRectFromCanvasRect(item))}`,
-    `norm=${formatCanvasDerivedRect(normalizedRectFromCanvasRect(item))}`,
-  ];
-  if (item.groupId) {
-    parts.push(`group=${groupById.get(item.groupId)?.reference ?? item.groupId}`);
-  }
-  if (hasOriginalGeometry(item)) {
-    parts.push(
-      `original=${formatCanvasRect({
-        x: item.originalX ?? item.x,
-        y: item.originalY ?? item.y,
-        width: item.originalWidth ?? item.width,
-        height: item.originalHeight ?? item.height,
-      })}`,
-      `originalGrid=${formatCanvasDerivedRect(
-        gridRectFromCanvasRect({
-          x: item.originalX ?? item.x,
-          y: item.originalY ?? item.y,
-          width: item.originalWidth ?? item.width,
-          height: item.originalHeight ?? item.height,
-        }),
-      )}`,
-      `originalNorm=${formatCanvasDerivedRect(
-        normalizedRectFromCanvasRect({
-          x: item.originalX ?? item.x,
-          y: item.originalY ?? item.y,
-          width: item.originalWidth ?? item.width,
-          height: item.originalHeight ?? item.height,
-        }),
-      )}`,
-    );
-  }
-  if (item.body.trim()) {
-    const bodyField =
-      item.kind === "container" || item.kind === "modal" || item.kind === "divider"
-        ? "description"
-        : "label";
-    parts.push(`${bodyField}="${quotePromptValue(item.body, 140)}"`);
-  }
-  if (item.comment.trim()) {
-    parts.push(`noteForCodex="${quotePromptValue(item.comment, 180)}"`);
-  }
-  return parts.join("; ");
-}
-
-function serializeInteractionPreview(
-  preview: ProjectCanvas["interactionPreviews"][number],
-) {
-  const parts = [
-    `- trigger=${preview.triggerReference}`,
-    `kind=${preview.triggerKind}`,
-    `frames=${preview.frames.map((frame) => frame.frame).join(",")}`,
-  ];
-  for (const frame of preview.frames) {
-    const affected = frame.affected
-      .slice(0, 12)
-      .map((delta) => formatInteractionDelta(delta))
-      .join(" | ");
-    parts.push(
-      `frame${frame.frame}=sticky:${frame.sticky}; holdMs:${
-        frame.holdMs ?? "none"
-      }; affected:${affected || "none"}`,
-    );
-  }
-  return parts.join("; ");
-}
-
-function formatInteractionDelta(
-  delta: ProjectCanvas["interactionPreviews"][number]["frames"][number]["affected"][number],
-) {
-  const parts = [delta.reference];
-  if (
-    delta.x != null &&
-    delta.y != null &&
-    delta.width != null &&
-    delta.height != null
-  ) {
-    parts.push(
-      `xywh=${formatCanvasRect({
-        x: delta.x,
-        y: delta.y,
-        width: delta.width,
-        height: delta.height,
-      })}`,
-    );
-  }
-  if (typeof delta.visible === "boolean") {
-    parts.push(`visible=${delta.visible}`);
-  }
-  if (delta.sourceGroupReference) {
-    parts.push(`group=${delta.sourceGroupReference}`);
-  }
-  if (delta.createdItem) {
-    parts.push("created=true");
-  }
-  return parts.join(" ");
-}
-
-function hasOriginalGeometry(item: CanvasItem) {
-  return (
-    item.originalX != null ||
-    item.originalY != null ||
-    item.originalWidth != null ||
-    item.originalHeight != null
-  );
-}
-
-function formatCanvasRect(rect: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}) {
-  return `${formatCanvasNumber(rect.x)},${formatCanvasNumber(
-    rect.y,
-  )},${formatCanvasNumber(rect.width)},${formatCanvasNumber(rect.height)}`;
-}
-
-function formatCanvasBounds(bounds: CanvasBounds) {
-  return `${formatCanvasNumber(bounds.left)},${formatCanvasNumber(
-    bounds.top,
-  )},${formatCanvasNumber(bounds.right)},${formatCanvasNumber(bounds.bottom)}`;
-}
-
-function formatCanvasDerivedRect(rect: {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-}) {
-  return `${formatDerivedCanvasNumber(rect.x)},${formatDerivedCanvasNumber(
-    rect.y,
-  )},${formatDerivedCanvasNumber(rect.width)},${formatDerivedCanvasNumber(
-    rect.height,
-  )}`;
-}
-
-function formatCanvasNumber(value: number) {
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(1).replace(/\.0$/, "");
-}
-
-function formatDerivedCanvasNumber(value: number) {
-  if (Number.isInteger(value)) return String(value);
-  return value.toFixed(2).replace(/\.?0+$/, "");
 }
 
 function quotePromptValue(value: string, maxLength: number) {
   const compact = value.replace(/\s+/g, " ").trim();
   const clipped =
-    compact.length > maxLength ? `${compact.slice(0, maxLength - 1)}...` : compact;
+    compact.length > maxLength
+      ? `${compact.slice(0, maxLength - 1)}...`
+      : compact;
   return clipped.replace(/"/g, "'");
 }
 
@@ -5233,6 +4722,68 @@ function visibleDraftForProject(
   return draft.projectId === activeDraftProjectId || hasDraftContent(draft)
     ? draft
     : null;
+}
+
+function composerContextsForProject(
+  contexts: ComposerContextReference[],
+  projectId: string,
+) {
+  return contexts.filter((context) => context.projectId === projectId);
+}
+
+function nextMockupMarkNumber(
+  contexts: ComposerContextReference[],
+  projectId: string,
+  proposalSetId: string,
+  mockupId: string,
+) {
+  return (
+    contexts.reduce((max, context) => {
+      if (
+        context.type !== "mockupPreview" ||
+        context.projectId !== projectId ||
+        context.proposalSetId !== proposalSetId ||
+        context.mockupId !== mockupId
+      ) {
+        return max;
+      }
+      return Math.max(max, context.markNumber || 0);
+    }, 0) + 1
+  );
+}
+
+function composerContextIdentity(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    return `${context.projectId}:app-preview:${context.id}`;
+  }
+  return `${context.projectId}:mockup-preview:${context.id}`;
+}
+
+function composerContextSearchLabel(context: ComposerContextReference) {
+  if (context.type === "appPreview") {
+    return `${context.projectName} App Preview ${
+      context.markLabel || "Live mark 1"
+    } ${context.previewUrl}`;
+  }
+  return `${context.projectName} ${context.markLabel} ${previewArtifactDisplayName(
+    context.artifactKind,
+    1,
+    "title",
+  )} ${context.mockupLabel} ${context.mockupTitle} ${context.filePath}`;
+}
+
+function sameComposerContextList(
+  left: ComposerContextReference[],
+  right: ComposerContextReference[],
+) {
+  if (left.length !== right.length) return false;
+  return left.every((context, index) => {
+    const other = right[index];
+    return other
+      ? other.type === context.type &&
+          composerContextIdentity(other) === composerContextIdentity(context)
+      : false;
+  });
 }
 
 function firstMarkdownChangeSelection(
@@ -5273,32 +4824,15 @@ function sameInspectorSelection(
     case "command":
       return right.type === "command" && left.item.id === right.item.id;
     case "approval":
-      return right.type === "approval" && left.approval.id === right.approval.id;
-    case "canvas":
       return (
-        right.type === "canvas" &&
-        left.projectId === right.projectId &&
-        left.focusReference === right.focusReference &&
-        left.focusRequestId === right.focusRequestId
-      );
-    case "canvasProposal":
-      return (
-        right.type === "canvasProposal" &&
-        left.projectId === right.projectId &&
-        left.proposalTurnId === right.proposalTurnId &&
-        left.focusReference === right.focusReference &&
-        left.focusRequestId === right.focusRequestId
-      );
-    case "canvasSuggestion":
-      return (
-        right.type === "canvasSuggestion" &&
-        left.projectId === right.projectId &&
-        left.suggestionTurnId === right.suggestionTurnId &&
-        left.focusReference === right.focusReference &&
-        left.focusRequestId === right.focusRequestId
+        right.type === "approval" && left.approval.id === right.approval.id
       );
     case "appPreview":
       return right.type === "appPreview" && left.projectId === right.projectId;
+    case "mockupPreview":
+      return (
+        right.type === "mockupPreview" && left.projectId === right.projectId
+      );
     case "planPreview":
       return (
         right.type === "planPreview" &&
@@ -5310,16 +4844,21 @@ function sameInspectorSelection(
   }
 }
 
-function preferredCanvasInspectorWidth() {
-  if (typeof window === "undefined") return 620;
-  return Math.min(
-    maxInspectorWidthForShell(window.innerWidth),
-    Math.max(560, Math.round(window.innerWidth * 0.55)),
+function preferredPreviewInspectorWidth() {
+  if (typeof window === "undefined") return 760;
+  const sidebarWidth = sidebarWidthForShell(window.innerWidth);
+  return clamp(
+    window.innerWidth - sidebarWidth - CHAT_COMFORT_WIDTH,
+    720,
+    maxInspectorWidthForShell(window.innerWidth, true),
   );
 }
 
-function maxInspectorWidthForShell(shellWidth: number) {
-  return Math.max(INSPECTOR_MIN_WIDTH, shellWidth - CHAT_COMFORT_WIDTH);
+function maxInspectorWidthForShell(shellWidth: number, previewFocused = false) {
+  const reservedChatWidth = previewFocused
+    ? PREVIEW_CHAT_MIN_WIDTH
+    : CHAT_COMFORT_WIDTH;
+  return Math.max(INSPECTOR_MIN_WIDTH, shellWidth - reservedChatWidth);
 }
 
 function sidebarWidthForShell(shellWidth: number) {
@@ -5367,36 +4906,6 @@ function sendFailureMessage(error: unknown) {
   return `Send failed: ${message}`;
 }
 
-function mergeThreadWithLocalFailureState(
-  incoming: Thread,
-  local: Thread | undefined,
-) {
-  if (!local || incoming.turns.length === 0) return incoming;
-  const localTurns = new Map(local.turns.map((turn) => [turn.id, turn]));
-  return {
-    ...incoming,
-    turns: incoming.turns.map((turn) => {
-      const localTurn = localTurns.get(turn.id);
-      if (!localTurn?.error || turn.error || hasAgentOutput(turn)) return turn;
-      return {
-        ...turn,
-        status: localTurn.status === "failed" ? "failed" : turn.status,
-        error: localTurn.error,
-        items: localTurn.items.length > turn.items.length ? localTurn.items : turn.items,
-      };
-    }),
-  };
-}
-
-function hasAgentOutput(turn: Turn) {
-  return turn.items.some(
-    (item) =>
-      item.type === "agentMessage" ||
-      item.type === "commandExecution" ||
-      item.type === "fileChange",
-  );
-}
-
 type ModelDisplay = {
   label: string;
   title: string;
@@ -5418,7 +4927,8 @@ function resolveModelDisplay(
   if (snapshot.modelsError || snapshot.configError) {
     return {
       label: "Model unavailable",
-      title: snapshot.modelsError ?? snapshot.configError ?? "Model unavailable",
+      title:
+        snapshot.modelsError ?? snapshot.configError ?? "Model unavailable",
       tone: "error",
     };
   }
@@ -5479,7 +4989,9 @@ function isKnownThreadForCwd(
   backendMode: BackendMode,
 ) {
   const thread = threads[threadId];
-  return Boolean(thread && cwd && sameRuntimePath(thread.cwd, cwd, backendMode));
+  return Boolean(
+    thread && cwd && sameRuntimePath(thread.cwd, cwd, backendMode),
+  );
 }
 
 function isThreadNotFound(error: unknown) {

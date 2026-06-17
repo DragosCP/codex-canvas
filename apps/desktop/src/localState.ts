@@ -1,27 +1,21 @@
 import type {
   ComposerContextReference,
   DesktopState,
-  CanvasProposalParseStatus,
-  CanvasSuggestion,
-  CanvasSuggestionStatus,
-  ComposerCanvasContextTarget,
-  PlanCanvasStatus,
   PlanProposal,
   PlanProposalKind,
   PlanProposalStatus,
   PlanPreviewAreaMark,
+  PlanPreviewCleanupStatus,
   PlanPreviewComponentKind,
+  PlanPreviewSessionState,
   PlanPreviewSpec,
-  ProjectCanvas,
+  PreviewArtifactKind,
   Project,
   ProjectSettings,
   BackendMode,
   SandboxMode,
 } from "./types";
-import {
-  normalizeCanvasMap,
-  normalizeProjectCanvasSnapshot,
-} from "./canvasState";
+import { normalizePreviewArtifactKind } from "./mockupArtifacts";
 import { normalizeProjectPathForRuntime, runtimeInfo } from "./runtime";
 
 const STORAGE_KEY = "codex.desktop.v1";
@@ -66,15 +60,14 @@ export function createDefaultState(): DesktopState {
     activeThreadId: null,
     pinnedThreadIds: [],
     expandedProjectIds: [],
-    canvases: {},
     planProposals: {},
-    canvasSuggestions: {},
+    mockupActiveProposalSetIdsByThreadId: {},
+    mockupHistoryProposalSetIds: {},
     layout: {
       inspectorWidth: 420,
       commandSurfaceHeight: 220,
       inspectorOpen: true,
       commandSurfaceOpen: true,
-      canvasLayersOpenByProject: {},
     },
   };
 }
@@ -91,23 +84,41 @@ export function loadDesktopState(): DesktopState {
     const activeProject = projects.find(
       (project) => project.id === parsed.activeProjectId,
     );
+    const rawLayout =
+      parsed.layout && typeof parsed.layout === "object" ? parsed.layout : {};
     return {
-      ...fallback,
-      ...parsed,
+      version: 1,
       appServerUrl: runtimeInfo.appServerUrl,
       projects,
+      activeProjectId: activeProject?.id ?? null,
       activeThreadId: activeProject?.lastActiveThreadId ?? null,
       pinnedThreadIds: stringArray(parsed.pinnedThreadIds),
       expandedProjectIds: stringArray(parsed.expandedProjectIds),
-      canvases: normalizeCanvasMap(parsed.canvases, projects),
       planProposals: normalizePlanProposals(parsed.planProposals),
-      canvasSuggestions: normalizeCanvasSuggestions(parsed.canvasSuggestions),
+      mockupActiveProposalSetIdsByThreadId: stringRecord(
+        parsed.mockupActiveProposalSetIdsByThreadId,
+      ),
+      mockupHistoryProposalSetIds: booleanRecord(
+        parsed.mockupHistoryProposalSetIds,
+      ),
       layout: {
-        ...fallback.layout,
-        ...parsed.layout,
-        canvasLayersOpenByProject: booleanRecord(
-          parsed.layout?.canvasLayersOpenByProject,
-        ),
+        inspectorWidth:
+          positiveNumber((rawLayout as DesktopState["layout"]).inspectorWidth) ||
+          fallback.layout.inspectorWidth,
+        commandSurfaceHeight:
+          positiveNumber(
+            (rawLayout as DesktopState["layout"]).commandSurfaceHeight,
+          ) || fallback.layout.commandSurfaceHeight,
+        inspectorOpen:
+          typeof (rawLayout as DesktopState["layout"]).inspectorOpen ===
+          "boolean"
+            ? (rawLayout as DesktopState["layout"]).inspectorOpen
+            : fallback.layout.inspectorOpen,
+        commandSurfaceOpen:
+          typeof (rawLayout as DesktopState["layout"]).commandSurfaceOpen ===
+          "boolean"
+            ? (rawLayout as DesktopState["layout"]).commandSurfaceOpen
+            : fallback.layout.commandSurfaceOpen,
       },
     };
   } catch {
@@ -126,6 +137,15 @@ function booleanRecord(value: unknown): Record<string, boolean> {
   return Object.fromEntries(
     Object.entries(value).filter(
       (entry): entry is [string, boolean] => typeof entry[1] === "boolean",
+    ),
+  );
+}
+
+function stringRecord(value: unknown): Record<string, string> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  return Object.fromEntries(
+    Object.entries(value).filter(
+      (entry): entry is [string, string] => typeof entry[1] === "string" && entry[1].trim().length > 0,
     ),
   );
 }
@@ -149,44 +169,14 @@ function normalizePlanProposals(value: unknown): Record<string, PlanProposal> {
       turnId: stringValue(rawProposal.turnId) || turnId,
       prompt,
       contexts: normalizeComposerContexts(rawProposal.contexts),
-      canvasStatus: planCanvasStatus(rawProposal.canvasStatus),
-      canvasSummary:
-        stringValue(rawProposal.canvasSummary) || "Canvas status unknown",
-      canvasBaseSnapshot: normalizeProposalCanvasSnapshot(
-        rawProposal.canvasBaseSnapshot,
-        projectId,
-      ),
-      canvasDraftBaseSnapshot: normalizeProposalCanvasSnapshot(
-        rawProposal.canvasDraftBaseSnapshot,
-        projectId,
-      ),
-      canvasProposalSnapshot: normalizeProposalCanvasSnapshot(
-        rawProposal.canvasProposalSnapshot,
-        projectId,
-      ),
-      canvasProposalParseStatus: canvasProposalParseStatus(
-        rawProposal.canvasProposalParseStatus,
-      ),
-      canvasProposalParserVersion: positiveNumber(
-        rawProposal.canvasProposalParserVersion,
-      ),
-      canvasProposalChangeCount: positiveNumber(
-        rawProposal.canvasProposalChangeCount,
-      ),
-      canvasProposalSummary:
-        stringValue(rawProposal.canvasProposalSummary) ||
-        "No canvas proposal snapshot.",
-      canvasProposalErrors: stringArray(rawProposal.canvasProposalErrors),
-      canvasUserEditedAt:
-        positiveNumber(rawProposal.canvasUserEditedAt) || undefined,
       previewSpec: normalizePlanPreviewSpec(rawProposal.previewSpec),
       previewSelectedVariantId:
         stringValue(rawProposal.previewSelectedVariantId) || null,
       previewAreaMark: normalizePlanPreviewAreaMark(rawProposal.previewAreaMark),
+      previewSession: normalizePlanPreviewSession(rawProposal.previewSession),
       previewUserEditedAt:
         positiveNumber(rawProposal.previewUserEditedAt) || undefined,
       proposalKind: planProposalKind(rawProposal.proposalKind),
-      canvasUpdatedAt: positiveNumber(rawProposal.canvasUpdatedAt) || undefined,
       status,
       createdAt: numberValue(rawProposal.createdAt),
       updatedAt: numberValue(rawProposal.updatedAt),
@@ -264,9 +254,36 @@ function normalizePlanPreviewAreaMark(value: unknown): PlanPreviewAreaMark | nul
     height,
     viewportWidth,
     viewportHeight,
+    route: stringValue(raw.route) || undefined,
     note: stringValue(raw.note),
     createdAt: numberValue(raw.createdAt),
   };
+}
+
+function normalizePlanPreviewSession(value: unknown): PlanPreviewSessionState | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<PlanPreviewSessionState>;
+  const previewUrl = stringValue(raw.previewUrl);
+  const route = stringValue(raw.route) || previewUrl;
+  if (!previewUrl && !route) return null;
+  return {
+    previewUrl,
+    route,
+    viewport: raw.viewport === "mobile" ? "mobile" : "desktop",
+    interactionState: stringValue(raw.interactionState) || "No temporary interaction recorded.",
+    cleanupStatus: planPreviewCleanupStatus(raw.cleanupStatus),
+    updatedAt: numberValue(raw.updatedAt),
+  };
+}
+
+function planPreviewCleanupStatus(value: unknown): PlanPreviewCleanupStatus {
+  return value === "clean" ||
+    value === "injected" ||
+    value === "reset" ||
+    value === "failed" ||
+    value === "unavailable"
+    ? value
+    : "idle";
 }
 
 function planPreviewComponentKind(value: unknown): PlanPreviewComponentKind | null {
@@ -280,71 +297,6 @@ function planPreviewComponentKind(value: unknown): PlanPreviewComponentKind | nu
     : null;
 }
 
-function normalizeCanvasSuggestions(
-  value: unknown,
-): Record<string, CanvasSuggestion> {
-  if (!value || typeof value !== "object") return {};
-  const normalized: Record<string, CanvasSuggestion> = {};
-  for (const [turnId, rawSuggestion] of Object.entries(
-    value as Record<string, Partial<CanvasSuggestion>>,
-  )) {
-    if (!rawSuggestion || typeof rawSuggestion !== "object") continue;
-    const projectId = stringValue(rawSuggestion.projectId);
-    const threadId = stringValue(rawSuggestion.threadId);
-    const prompt = stringValue(rawSuggestion.prompt);
-    if (!projectId || !threadId) continue;
-    normalized[turnId] = {
-      id: stringValue(rawSuggestion.id) || `canvas-suggestion:${turnId}`,
-      projectId,
-      threadId,
-      turnId: stringValue(rawSuggestion.turnId) || turnId,
-      prompt,
-      contexts: normalizeComposerContexts(rawSuggestion.contexts),
-      canvasStatus: planCanvasStatus(rawSuggestion.canvasStatus),
-      canvasSummary:
-        stringValue(rawSuggestion.canvasSummary) || "Canvas status unknown",
-      canvasBaseSnapshot: normalizeProposalCanvasSnapshot(
-        rawSuggestion.canvasBaseSnapshot,
-        projectId,
-      ),
-      canvasDraftBaseSnapshot: normalizeProposalCanvasSnapshot(
-        rawSuggestion.canvasDraftBaseSnapshot,
-        projectId,
-      ),
-      canvasProposalSnapshot: normalizeProposalCanvasSnapshot(
-        rawSuggestion.canvasProposalSnapshot,
-        projectId,
-      ),
-      canvasProposalParseStatus: canvasProposalParseStatus(
-        rawSuggestion.canvasProposalParseStatus,
-      ),
-      canvasProposalParserVersion: positiveNumber(
-        rawSuggestion.canvasProposalParserVersion,
-      ),
-      canvasProposalChangeCount: positiveNumber(
-        rawSuggestion.canvasProposalChangeCount,
-      ),
-      canvasProposalSummary:
-        stringValue(rawSuggestion.canvasProposalSummary) ||
-        "No canvas suggestion snapshot.",
-      canvasProposalErrors: stringArray(rawSuggestion.canvasProposalErrors),
-      canvasUserEditedAt:
-        positiveNumber(rawSuggestion.canvasUserEditedAt) || undefined,
-      status: canvasSuggestionStatus(rawSuggestion.status),
-      createdAt: numberValue(rawSuggestion.createdAt),
-      updatedAt: numberValue(rawSuggestion.updatedAt),
-    };
-  }
-  return normalized;
-}
-
-function normalizeProposalCanvasSnapshot(
-  value: unknown,
-  projectId: string,
-): ProjectCanvas | null {
-  return normalizeProjectCanvasSnapshot(value, projectId);
-}
-
 function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
   if (!Array.isArray(value)) return [];
   const contexts: ComposerContextReference[] = [];
@@ -354,17 +306,6 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
     const projectId = stringValue(rawContext.projectId);
     const projectName = stringValue(rawContext.projectName);
     if (!projectId || !projectName) continue;
-
-    if (rawContext.type === "canvas") {
-      const target = normalizeCanvasContextTarget(rawContext.target);
-      contexts.push({
-        type: "canvas",
-        projectId,
-        projectName,
-        ...(target ? { target } : {}),
-      });
-      continue;
-    }
 
     if (rawContext.type === "appPreview") {
       const areaMark = normalizePlanPreviewAreaMark(rawContext.areaMark);
@@ -379,61 +320,54 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
         projectName,
         previewUrl,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
+        markLabel: stringValue(rawContext.markLabel) || "Live mark 1",
+        markNumber: positiveNumber(rawContext.markNumber) || 1,
         areaMark,
+      });
+      continue;
+    }
+
+    if (rawContext.type === "mockupPreview") {
+      const areaMark = normalizePlanPreviewAreaMark(rawContext.areaMark);
+      const mockupId = stringValue(rawContext.mockupId);
+      const mockupLabel = stringValue(rawContext.mockupLabel);
+      const mockupTitle = stringValue(rawContext.mockupTitle);
+      const markNumber = positiveNumber(rawContext.markNumber) || 1;
+      const filePath = stringValue(rawContext.filePath);
+      const proposalSetId = stringValue(rawContext.proposalSetId);
+      const artifactKind = normalizeArtifactKind(rawContext.artifactKind);
+      if (!areaMark || !mockupId || !filePath) continue;
+      const fallbackMarkLabel = `Area ${mockupLabel || mockupId} mark ${markNumber}`;
+      contexts.push({
+        type: "mockupPreview",
+        id:
+          stringValue(rawContext.id) ||
+          `mockup-preview:${projectId}:${mockupId}:${areaMark.createdAt}`,
+        projectId,
+        projectName,
+        proposalSetId: proposalSetId || `legacy:${projectId}:${mockupId}`,
+        artifactKind,
+        mockupId,
+        mockupLabel: mockupLabel || mockupId,
+        mockupTitle: mockupTitle || mockupLabel || mockupId,
+        markLabel: stringValue(rawContext.markLabel) || fallbackMarkLabel,
+        markNumber,
+        filePath,
+        viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
+        areaMark,
+        source:
+          rawContext.source === "proposalHighlight"
+            ? "proposalHighlight"
+            : "userMark",
+        highlightId: stringValue(rawContext.highlightId) || undefined,
       });
     }
   }
   return contexts;
 }
 
-function normalizeCanvasContextTarget(
-  value: unknown,
-): ComposerCanvasContextTarget | null {
-  if (!value || typeof value !== "object") return null;
-  const target = value as Partial<ComposerCanvasContextTarget>;
-  if (target.kind === "project") {
-    return { kind: "project" };
-  }
-  if (target.kind === "page") {
-    return {
-      kind: "page",
-      pageId: typeof target.pageId === "string" ? target.pageId : null,
-      pageName: stringValue(target.pageName) || "Canvas",
-      subPageId: typeof target.subPageId === "string" ? target.subPageId : null,
-      subPageName: stringValue(target.subPageName) || null,
-    };
-  }
-  if (target.kind === "item") {
-    const itemId = stringValue(target.itemId);
-    const reference = stringValue(target.reference);
-    if (!itemId || !reference) return null;
-    return {
-      kind: "item",
-      pageId: typeof target.pageId === "string" ? target.pageId : null,
-      pageName: stringValue(target.pageName) || "Canvas",
-      subPageId: typeof target.subPageId === "string" ? target.subPageId : null,
-      subPageName: stringValue(target.subPageName) || null,
-      itemId,
-      reference,
-      label: stringValue(target.label) || reference,
-    };
-  }
-  if (target.kind === "group") {
-    const groupId = stringValue(target.groupId);
-    const reference = stringValue(target.reference);
-    if (!groupId || !reference) return null;
-    return {
-      kind: "group",
-      pageId: typeof target.pageId === "string" ? target.pageId : null,
-      pageName: stringValue(target.pageName) || "Canvas",
-      subPageId: typeof target.subPageId === "string" ? target.subPageId : null,
-      subPageName: stringValue(target.subPageName) || null,
-      groupId,
-      reference,
-      label: stringValue(target.label) || reference,
-    };
-  }
-  return null;
+function normalizeArtifactKind(value: unknown): PreviewArtifactKind {
+  return normalizePreviewArtifactKind(value, "mockup");
 }
 
 function stringValue(value: unknown) {
@@ -452,12 +386,6 @@ function positiveNumber(value: unknown) {
     : 0;
 }
 
-function planCanvasStatus(value: unknown): PlanCanvasStatus {
-  return value === "empty" || value === "sparse" || value === "usable"
-    ? value
-    : "not_attached";
-}
-
 function planProposalStatus(value: unknown): PlanProposalStatus {
   return value === "accepted" ||
     value === "declined" ||
@@ -468,19 +396,6 @@ function planProposalStatus(value: unknown): PlanProposalStatus {
 
 function planProposalKind(value: unknown): PlanProposalKind {
   return value === "safer_alternative" ? "safer_alternative" : "plan";
-}
-
-function canvasSuggestionStatus(value: unknown): CanvasSuggestionStatus {
-  return value === "applied" || value === "dismissed" ? value : "pending";
-}
-
-function canvasProposalParseStatus(value: unknown): CanvasProposalParseStatus {
-  return value === "pending" ||
-    value === "parsed" ||
-    value === "empty" ||
-    value === "failed"
-    ? value
-    : "none";
 }
 
 export function saveDesktopState(state: DesktopState) {
@@ -515,88 +430,10 @@ function compactDesktopStateForStorage(
   state: DesktopState,
   level: StorageCompactionLevel = "normal",
 ): DesktopState {
-  const canvases = Object.fromEntries(
-    Object.entries(state.canvases).map(([projectId, canvas]) => [
-      projectId,
-      compactProjectCanvasForStorage(
-        canvas,
-        projectId === state.activeProjectId,
-        level,
-      ),
-    ]),
-  );
-  const planProposals = Object.fromEntries(
-    Object.entries(state.planProposals).map(([turnId, proposal]) => [
-      turnId,
-      {
-        ...proposal,
-        canvasBaseSnapshot: proposal.canvasBaseSnapshot
-          ? compactProjectCanvasForStorage(
-              proposal.canvasBaseSnapshot,
-              proposal.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-        canvasDraftBaseSnapshot: proposal.canvasDraftBaseSnapshot
-          ? compactProjectCanvasForStorage(
-              proposal.canvasDraftBaseSnapshot,
-              proposal.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-        canvasProposalSnapshot: proposal.canvasProposalSnapshot
-          ? compactProjectCanvasForStorage(
-              proposal.canvasProposalSnapshot,
-              proposal.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-      },
-    ]),
-  );
-  const canvasSuggestions = Object.fromEntries(
-    Object.entries(state.canvasSuggestions).map(([turnId, suggestion]) => [
-      turnId,
-      {
-        ...suggestion,
-        canvasBaseSnapshot: suggestion.canvasBaseSnapshot
-          ? compactProjectCanvasForStorage(
-              suggestion.canvasBaseSnapshot,
-              suggestion.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-        canvasDraftBaseSnapshot: suggestion.canvasDraftBaseSnapshot
-          ? compactProjectCanvasForStorage(
-              suggestion.canvasDraftBaseSnapshot,
-              suggestion.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-        canvasProposalSnapshot: suggestion.canvasProposalSnapshot
-          ? compactProjectCanvasForStorage(
-              suggestion.canvasProposalSnapshot,
-              suggestion.projectId === state.activeProjectId,
-              level,
-            )
-          : null,
-      },
-    ]),
-  );
+  void level;
   return {
     ...state,
-    canvases,
-    planProposals,
-    canvasSuggestions,
   };
-}
-
-function compactProjectCanvasForStorage(
-  canvas: ProjectCanvas,
-  activeProject: boolean,
-  level: StorageCompactionLevel,
-): ProjectCanvas {
-  return canvas;
 }
 
 export function createProject(

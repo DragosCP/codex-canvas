@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn } from "node:child_process";
 import { createRequire } from "node:module";
+import { createServer } from "node:net";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -10,13 +11,16 @@ const electronMain = join(appDir, "electron", "main.cjs");
 const dev = process.argv.includes("--dev");
 const rendererUrl = process.env.ELECTRON_RENDERER_URL ?? "http://127.0.0.1:4317";
 const electronBin = await resolveElectronBinary();
+const remoteDebuggingPort =
+  process.env.CODEX_DESKTOP_REMOTE_DEBUGGING_PORT ??
+  (await findAvailablePort(9230, 9250));
 
 let viteProcess = null;
 if (dev) {
   viteProcess = spawn(
     process.execPath,
     [
-      require.resolve("vite/bin/vite.js"),
+      resolveViteCli(),
       "--host",
       "127.0.0.1",
       "--port",
@@ -34,9 +38,10 @@ if (dev) {
 
 const env = {
   ...process.env,
-  CODEX_DESKTOP_REMOTE_DEBUGGING_PORT:
-    process.env.CODEX_DESKTOP_REMOTE_DEBUGGING_PORT ?? "9230",
 };
+if (remoteDebuggingPort) {
+  env.CODEX_DESKTOP_REMOTE_DEBUGGING_PORT = String(remoteDebuggingPort);
+}
 if (dev) {
   env.ELECTRON_RENDERER_URL = rendererUrl;
 } else {
@@ -73,6 +78,10 @@ async function waitForUrl(url) {
   throw new Error(`Timed out waiting for ${url}`);
 }
 
+function resolveViteCli() {
+  return join(dirname(require.resolve("vite/package.json")), "bin", "vite.js");
+}
+
 function resolveElectronBinary() {
   try {
     return require("electron");
@@ -98,4 +107,21 @@ function resolveElectronBinary() {
       });
     });
   }
+}
+
+async function findAvailablePort(start, end) {
+  for (let port = start; port <= end; port += 1) {
+    if (await isPortAvailable(port)) return String(port);
+  }
+  return "";
+}
+
+function isPortAvailable(port) {
+  return new Promise((resolve) => {
+    const server = createServer();
+    server.once("error", () => resolve(false));
+    server.listen(port, "127.0.0.1", () => {
+      server.close(() => resolve(true));
+    });
+  });
 }

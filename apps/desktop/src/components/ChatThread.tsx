@@ -9,10 +9,17 @@ import {
   TerminalSquare,
   X,
 } from "lucide-react";
-import { type ReactNode, useEffect, useRef, useState } from "react";
-import { commandStatusText, itemLabel } from "../itemUtils";
+import { useEffect, useRef, useState } from "react";
+import {
+  commandStatusText,
+  friendlyMockupPromptTitle,
+  itemLabel,
+} from "../itemUtils";
+import {
+  previewArtifactDisplayName,
+  previewArtifactKindFromText,
+} from "../mockupArtifacts";
 import type {
-  CanvasSuggestion,
   InspectorSelection,
   LocalChatDraft,
   PlanProposal,
@@ -21,38 +28,44 @@ import type {
   ThreadItem,
   Turn,
 } from "../types";
-import { lineCount } from "../utils/format";
+import { stripPlanPreviewBlocks } from "../planPreview";
+import {
+  compactCommand,
+  diffLineCounts,
+  formatFileProgressDelta,
+  formatShortLineDelta,
+  liveProgressDetail,
+  liveProgressHeadline,
+  mergeTurnFileChanges,
+  summarizeTurnProgress,
+  WORKSPACE_PROGRESS_POLL_MS,
+  type TurnProgressSummary,
+  type WorkspaceProgressSnapshot,
+} from "../turnProgress";
+import {
+  parseVisualDecisionStrip,
+  stripVisualDecisionBlocks,
+} from "../visualDecision";
 import { RichText } from "./RichText";
 
 export function ChatThread(props: {
   activeProject: Project | null;
   activeDraft: LocalChatDraft | null;
   activeThread: Thread | null;
+  activeWorkspaceProgress: WorkspaceProgressSnapshot | null;
   onAcceptPlanProposal: (proposal: PlanProposal) => void;
-  onApplyCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
-  onAskCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onDeclinePlanProposal: (proposal: PlanProposal) => void;
-  onDismissCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onModifyPlanProposal: (proposal: PlanProposal, feedback?: string) => void;
-  onOpenCanvasSuggestion: (
-    suggestion: CanvasSuggestion,
-    focusReference?: string | null,
-  ) => void;
-  onOpenPlanProposalCanvas: (
-    proposal: PlanProposal,
-    focusReference?: string | null,
-  ) => void;
   onPlanProposalFeedbackChange: (turnId: string, value: string) => void;
-  onResetCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onShowPlanUiImpact: (proposal: PlanProposal) => void;
-  onUpdateCanvasFromPlanProposal: (proposal: PlanProposal) => void;
   onSelect: (selection: InspectorSelection) => void;
-  canvasSuggestions: Record<string, CanvasSuggestion>;
-  planProposalFeedbackDrafts: Record<string, string>;
-  planProposals: Record<string, PlanProposal>;
+  planProposalFeedbackDrafts?: Record<string, string>;
+  planProposals?: Record<string, PlanProposal>;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const planProposalFeedbackDrafts = props.planProposalFeedbackDrafts ?? {};
+  const planProposals = props.planProposals ?? {};
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -98,10 +111,6 @@ export function ChatThread(props: {
 
   const activeProject = props.activeProject;
   const activeThread = props.activeThread;
-  const implementationPlanProposals = implementationPlanProposalsByTurn(
-    activeThread.turns,
-    props.planProposals,
-  );
 
   return (
     <div className="turn-list" ref={scrollerRef} onScroll={handleScroll}>
@@ -116,26 +125,19 @@ export function ChatThread(props: {
           activeProject={activeProject}
           key={turn.id}
           onAcceptPlanProposal={props.onAcceptPlanProposal}
-          onApplyCanvasSuggestion={props.onApplyCanvasSuggestion}
-          onAskCanvasSuggestion={props.onAskCanvasSuggestion}
           onDeclinePlanProposal={props.onDeclinePlanProposal}
-          onDismissCanvasSuggestion={props.onDismissCanvasSuggestion}
           onModifyPlanProposal={props.onModifyPlanProposal}
-          onOpenCanvasSuggestion={props.onOpenCanvasSuggestion}
-          onOpenPlanProposalCanvas={props.onOpenPlanProposalCanvas}
           onPlanProposalFeedbackChange={props.onPlanProposalFeedbackChange}
-          onResetCanvasSuggestion={props.onResetCanvasSuggestion}
           onShowPlanUiImpact={props.onShowPlanUiImpact}
-          onUpdateCanvasFromPlanProposal={props.onUpdateCanvasFromPlanProposal}
           onSelect={props.onSelect}
-          canvasSuggestion={props.canvasSuggestions[turn.id] ?? null}
-          planProposalFeedbackDraft={props.planProposalFeedbackDrafts[turn.id]}
-          planProposal={props.planProposals[turn.id] ?? null}
-          implementationPlanProposal={
-            implementationPlanProposals.get(turn.id) ?? null
-          }
-          threadActive={activeThread.status.type === "active"}
+          planProposalFeedbackDraft={planProposalFeedbackDrafts[turn.id]}
+          planProposal={planProposals[turn.id] ?? null}
           turn={turn}
+          workspaceProgress={
+            props.activeWorkspaceProgress?.turnId === turn.id
+              ? props.activeWorkspaceProgress
+              : null
+          }
         />
       ))}
     </div>
@@ -146,52 +148,43 @@ function TurnView(props: {
   activeProject: Project;
   turn: Turn;
   onAcceptPlanProposal: (proposal: PlanProposal) => void;
-  onApplyCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
-  onAskCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onDeclinePlanProposal: (proposal: PlanProposal) => void;
-  onDismissCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onModifyPlanProposal: (proposal: PlanProposal, feedback?: string) => void;
-  onOpenCanvasSuggestion: (
-    suggestion: CanvasSuggestion,
-    focusReference?: string | null,
-  ) => void;
-  onOpenPlanProposalCanvas: (
-    proposal: PlanProposal,
-    focusReference?: string | null,
-  ) => void;
   onPlanProposalFeedbackChange: (turnId: string, value: string) => void;
-  onResetCanvasSuggestion: (suggestion: CanvasSuggestion) => void;
   onShowPlanUiImpact: (proposal: PlanProposal) => void;
-  onUpdateCanvasFromPlanProposal: (proposal: PlanProposal) => void;
   onSelect: (selection: InspectorSelection) => void;
-  canvasSuggestion: CanvasSuggestion | null;
-  implementationPlanProposal: PlanProposal | null;
   planProposalFeedbackDraft?: string;
   planProposal: PlanProposal | null;
-  threadActive: boolean;
+  workspaceProgress: WorkspaceProgressSnapshot | null;
 }) {
   const userItems = props.turn.items.filter(
     (item): item is Extract<ThreadItem, { type: "userMessage" }> =>
       item.type === "userMessage",
   );
+  const visibleUserItems = dedupeUserMessageItems(userItems, props.activeProject);
   const finalItems = props.turn.items.filter(
     (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
       item.type === "agentMessage" &&
       (item.phase === "final_answer" || item.phase === null),
   );
-  const activityItems = props.turn.items.filter(isActivityItem);
+  const hasVisualDecision = finalItems.some((item) =>
+    Boolean(parseVisualDecisionStrip(item.text)),
+  );
+  const isQuietEmptyProjectDecisionTurn =
+    isEmptyProjectVisualPlanningDecisionTurn(props.turn);
+  const activityItems = props.turn.items.filter((item) =>
+    isActivityItem(item, props.turn.status),
+  );
   const compactionItems = props.turn.items.filter(
     (item): item is Extract<ThreadItem, { type: "contextCompaction" }> =>
       item.type === "contextCompaction",
   );
-  const fileChangeItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "fileChange" }> =>
-      item.type === "fileChange",
-  );
+  const mergedFileChangeItem =
+    props.turn.status === "inProgress" ? null : mergeTurnFileChanges(props.turn);
 
   return (
     <article className={`turn-card ${props.turn.status}`}>
-      {userItems.map((item) => (
+      {visibleUserItems.map((item) => (
         <UserMessageView
           activeProject={props.activeProject}
           key={item.id}
@@ -201,39 +194,43 @@ function TurnView(props: {
       {props.turn.error && (
         <div className="error-line">{turnErrorMessage(props.turn.error)}</div>
       )}
-      {(activityItems.length > 0 || props.turn.status === "inProgress") && (
-        <TurnActivity
-          activeProject={props.activeProject}
-          durationMs={props.turn.durationMs}
-          items={activityItems}
-          status={props.turn.status}
-        />
-      )}
+      {isQuietEmptyProjectDecisionTurn &&
+        props.turn.status === "inProgress" && (
+          <p className="turn-quiet-status">Preparing choices...</p>
+        )}
+      {!isQuietEmptyProjectDecisionTurn &&
+        (activityItems.length > 0 || props.turn.status === "inProgress") && (
+          <TurnActivity
+            activeProject={props.activeProject}
+            durationMs={props.turn.durationMs}
+            items={activityItems}
+            status={props.turn.status}
+            startedAt={props.turn.startedAt}
+            turn={props.turn}
+            turnId={props.turn.id}
+            workspaceProgress={props.workspaceProgress}
+          />
+        )}
       {compactionItems.map((item) => (
         <ContextCompactionDivider key={item.id} />
       ))}
       {finalItems.map((item) => (
         <AssistantMessageView
           activeProject={props.activeProject}
-          canvasSuggestion={props.canvasSuggestion}
           key={item.id}
           item={item}
-          planProposal={props.planProposal}
         />
       ))}
       {props.planProposal &&
         finalItems.length > 0 &&
+        !hasVisualDecision &&
         shouldShowPlanProposalReview(props.planProposal) && (
           <PlanProposalReview
             proposal={props.planProposal}
             onAccept={props.onAcceptPlanProposal}
             onDecline={props.onDeclinePlanProposal}
             onModify={props.onModifyPlanProposal}
-            onOpenCanvas={props.onOpenPlanProposalCanvas}
             onOpenPreview={props.onShowPlanUiImpact}
-            onUpdateCanvas={props.onUpdateCanvasFromPlanProposal}
-            canUpdateCanvas={!props.threadActive}
-            threadActive={props.threadActive}
             feedbackDraft={props.planProposalFeedbackDraft ?? ""}
             onFeedbackChange={(value) =>
               props.onPlanProposalFeedbackChange(
@@ -243,33 +240,12 @@ function TurnView(props: {
             }
           />
         )}
-      {props.canvasSuggestion &&
-        props.canvasSuggestion.status !== "pending" &&
-        finalItems.length > 0 && (
-          <CanvasSuggestionReview
-            suggestion={props.canvasSuggestion}
-            onApply={props.onApplyCanvasSuggestion}
-            onAskCodex={props.onAskCanvasSuggestion}
-            onDismiss={props.onDismissCanvasSuggestion}
-            onOpenCanvas={props.onOpenCanvasSuggestion}
-            onReset={props.onResetCanvasSuggestion}
-          />
-        )}
-      {fileChangeItems.map((item) => (
+      {mergedFileChangeItem && (
         <FileChangeView
           activeProject={props.activeProject}
-          key={item.id}
-          item={item}
+          key={mergedFileChangeItem.id}
+          item={mergedFileChangeItem}
           onSelect={props.onSelect}
-        />
-      ))}
-      {props.implementationPlanProposal && finalItems.length > 0 && (
-        <PlanImplementationActions
-          proposal={props.implementationPlanProposal}
-          onOpenCanvas={props.onOpenPlanProposalCanvas}
-          onUpdateCanvas={props.onUpdateCanvasFromPlanProposal}
-          canUpdateCanvas={!props.threadActive}
-          threadActive={props.threadActive}
         />
       )}
       {props.turn.items.length === 0 && <p className="muted">No output yet</p>}
@@ -277,37 +253,48 @@ function TurnView(props: {
   );
 }
 
-function implementationPlanProposalsByTurn(
-  turns: Turn[],
-  proposals: Record<string, PlanProposal>,
+function isEmptyProjectVisualPlanningDecisionTurn(turn: Turn) {
+  return turn.items.some(
+    (item) =>
+      item.type === "userMessage" &&
+      item.content.some(
+        (part) =>
+          part.type === "text" &&
+          Boolean(extractEmptyProjectVisualPlanningRequest(part.text)),
+      ),
+  );
+}
+
+function dedupeUserMessageItems(
+  items: Array<Extract<ThreadItem, { type: "userMessage" }>>,
+  activeProject: Project,
 ) {
-  const result = new Map<string, PlanProposal>();
-  let latestAcceptedPlan: PlanProposal | null = null;
-  for (const turn of turns) {
-    const proposal = proposals[turn.id];
-    if (proposal?.status === "accepted") {
-      latestAcceptedPlan = proposal;
-    }
-    if (
-      latestAcceptedPlan &&
-      turn.id !== latestAcceptedPlan.turnId &&
-      isAcceptedPlanImplementationTurn(turn)
-    ) {
-      result.set(turn.id, latestAcceptedPlan);
-    }
+  const seen = new Set<string>();
+  const result: Array<Extract<ThreadItem, { type: "userMessage" }>> = [];
+  for (const item of items) {
+    const signature = userMessageDisplaySignature(item, activeProject);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    result.push(item);
   }
   return result;
 }
 
-function isAcceptedPlanImplementationTurn(turn: Turn) {
-  return turn.items.some((item) => {
-    if (item.type !== "userMessage") return false;
-    return item.content.some(
-      (part) =>
-        part.type === "text" &&
-        part.text.trim().startsWith("I accept this plan. Implement it now"),
-    );
-  });
+function userMessageDisplaySignature(
+  item: Extract<ThreadItem, { type: "userMessage" }>,
+  activeProject: Project,
+) {
+  return item.content
+    .map((part) => {
+      if (part.type === "text") {
+        const display = friendlyUserDisplay(part.text, activeProject);
+        return `text:${display.actionLabel ?? ""}:${display.text.trim()}`;
+      }
+      if ("path" in part) return `path:${part.path}`;
+      if ("url" in part) return `url:${part.url}`;
+      return JSON.stringify(part);
+    })
+    .join("|");
 }
 
 function ContextCompactionDivider() {
@@ -336,23 +323,33 @@ function UserMessageView(props: {
 }) {
   return (
     <div className="message user-message">
-      {props.item.content.map((part, index) =>
-        part.type === "text" ? (
-          <RichText
-            key={index}
-            text={friendlyUserText(part.text, props.activeProject)}
-          />
-        ) : (
+      {props.item.content.map((part, index) => {
+        if (part.type === "text") {
+          const display = friendlyUserDisplay(part.text, props.activeProject);
+          return (
+            <div className="user-message-plain" key={index}>
+              {display.actionLabel && (
+                <span className="user-message-action">
+                  {display.actionLabel}
+                </span>
+              )}
+              {display.text && <p>{display.text}</p>}
+            </div>
+          );
+        }
+        return (
           <p className="attachment-note" key={index}>
             {attachmentLabel(part)}
           </p>
-        ),
-      )}
+        );
+      })}
     </div>
   );
 }
 
-function attachmentLabel(part: Extract<ThreadItem, { type: "userMessage" }>["content"][number]) {
+function attachmentLabel(
+  part: Extract<ThreadItem, { type: "userMessage" }>["content"][number],
+) {
   if ("path" in part) return `Added ${basename(part.path)}`;
   if ("url" in part) return "Added image";
   return "Added file";
@@ -360,16 +357,9 @@ function attachmentLabel(part: Extract<ThreadItem, { type: "userMessage" }>["con
 
 function AssistantMessageView(props: {
   activeProject: Project;
-  canvasSuggestion: CanvasSuggestion | null;
   item: Extract<ThreadItem, { type: "agentMessage" }>;
-  planProposal: PlanProposal | null;
 }) {
-  const text = friendlyText(props.item.text, props.activeProject);
-  const visibleText = friendlyCanvasProposalText(
-    text,
-    props.canvasSuggestion,
-    props.planProposal,
-  );
+  const visibleText = friendlyText(props.item.text, props.activeProject).trim();
   return (
     <div className="message assistant-message">
       {visibleText ? (
@@ -384,36 +374,34 @@ function AssistantMessageView(props: {
 function PlanProposalReview(props: {
   proposal: PlanProposal;
   feedbackDraft: string;
-  canUpdateCanvas: boolean;
   onAccept: (proposal: PlanProposal) => void;
   onDecline: (proposal: PlanProposal) => void;
   onFeedbackChange: (value: string) => void;
   onModify: (proposal: PlanProposal, feedback?: string) => void;
-  onOpenCanvas: (proposal: PlanProposal) => void;
   onOpenPreview: (proposal: PlanProposal) => void;
-  threadActive: boolean;
-  onUpdateCanvas: (proposal: PlanProposal) => void;
 }) {
   const pending = props.proposal.status === "pending";
   const title = planProposalTitle(props.proposal);
   const [decision, setDecision] = useState<"accept" | "revise">("accept");
   const feedbackText = props.feedbackDraft.trim();
-  const hasAttachedCanvasEdits = Boolean(props.proposal.canvasUserEditedAt);
+  const selectedPreviewVariant = selectedPlanPreviewVariant(props.proposal);
+  const hasAttachedPreviewContext = Boolean(
+    selectedPreviewVariant || props.proposal.previewAreaMark,
+  );
   useEffect(() => {
     if (props.feedbackDraft.trim()) setDecision("revise");
   }, [props.feedbackDraft]);
-  const acceptLabel =
-    props.proposal.proposalKind === "safer_alternative"
-      ? "Yes, implement safer plan"
-      : "Yes, implement this plan";
-  const canShowPendingCanvasImpact =
-    pending && hasPlanUiImpact(props.proposal);
+  useEffect(() => {
+    if (props.proposal.previewAreaMark) setDecision("revise");
+  }, [props.proposal.previewAreaMark]);
+  const acceptLabel = planAcceptLabel(props.proposal, selectedPreviewVariant);
+  const canShowPendingPreview = pending && hasPlanUiImpact(props.proposal);
   function submitDecision() {
     if (decision === "accept") {
       props.onAccept(props.proposal);
       return;
     }
-    if (!feedbackText && !hasAttachedCanvasEdits) return;
+    if (!feedbackText && !hasAttachedPreviewContext) return;
     props.onModify(props.proposal, feedbackText);
   }
   return (
@@ -447,9 +435,6 @@ function PlanProposalReview(props: {
             >
               <span>1.</span>
               <strong>{acceptLabel}</strong>
-              {hasAttachedCanvasEdits && (
-                <small className="plan-decision-chip">Includes Canvas edits</small>
-              )}
             </button>
             <label
               className={`plan-decision-feedback ${
@@ -468,12 +453,21 @@ function PlanProposalReview(props: {
                 rows={props.feedbackDraft ? 3 : 1}
                 value={props.feedbackDraft}
               />
+              {hasAttachedPreviewContext && (
+                <small className="plan-decision-chip">
+                  {props.proposal.previewAreaMark
+                    ? "Includes preview mark"
+                    : selectedPreviewVariant
+                      ? `Option ${selectedPreviewVariant.id} selected`
+                      : "Preview selected"}
+                </small>
+              )}
             </label>
           </div>
-          {canShowPendingCanvasImpact && (
+          {canShowPendingPreview && (
             <div className="plan-decision-inspect">
               <button
-                data-testid="plan-show-canvas-impact"
+                data-testid="plan-show-preview"
                 type="button"
                 onClick={() => props.onOpenPreview(props.proposal)}
               >
@@ -485,11 +479,6 @@ function PlanProposalReview(props: {
                     : "Show app preview"}
                 </span>
               </button>
-            </div>
-          )}
-          {hasAttachedCanvasEdits && (
-            <div className="plan-decision-inspect">
-              <span className="plan-decision-note">Canvas edits attached</span>
             </div>
           )}
           <div className="plan-decision-actions">
@@ -505,7 +494,9 @@ function PlanProposalReview(props: {
               className="plan-proposal-accept"
               data-testid="plan-accept"
               disabled={
-                decision === "revise" && !feedbackText && !hasAttachedCanvasEdits
+                decision === "revise" &&
+                !feedbackText &&
+                !hasAttachedPreviewContext
               }
               type="button"
               onClick={submitDecision}
@@ -515,169 +506,7 @@ function PlanProposalReview(props: {
             </button>
           </div>
         </div>
-      ) : (
-        <PlanProposalCompleteActions
-          proposal={props.proposal}
-          onOpenCanvas={props.onOpenCanvas}
-          onUpdateCanvas={props.onUpdateCanvas}
-          canUpdateCanvas={props.canUpdateCanvas}
-          showActions={false}
-          threadActive={props.threadActive}
-        />
-      )}
-    </div>
-  );
-}
-
-function PlanImplementationActions(props: {
-  proposal: PlanProposal;
-  canUpdateCanvas: boolean;
-  onOpenCanvas: (proposal: PlanProposal) => void;
-  onUpdateCanvas: (proposal: PlanProposal) => void;
-  threadActive: boolean;
-}) {
-  const canOfferCanvasUpdate =
-    props.proposal.status === "accepted" &&
-    hasPlanUiImpact(props.proposal) &&
-    !props.proposal.canvasUpdatedAt &&
-    props.canUpdateCanvas;
-  const canOpenSavedDraft =
-    props.proposal.status !== "pending" && hasPlanUiImpact(props.proposal);
-  if (!canOfferCanvasUpdate && !canOpenSavedDraft) return null;
-  return (
-    <div className="plan-proposal-review implementation-actions">
-      <PlanProposalCompleteActions {...props} showActions />
-    </div>
-  );
-}
-
-function PlanProposalCompleteActions(props: {
-  proposal: PlanProposal;
-  canUpdateCanvas: boolean;
-  onOpenCanvas: (proposal: PlanProposal) => void;
-  onUpdateCanvas: (proposal: PlanProposal) => void;
-  showActions: boolean;
-  threadActive: boolean;
-}) {
-  const canOfferCanvasUpdate =
-    props.proposal.status === "accepted" &&
-    hasPlanUiImpact(props.proposal) &&
-    !props.proposal.canvasUpdatedAt &&
-    props.canUpdateCanvas;
-  const canOpenSavedDraft =
-    props.proposal.status !== "pending" && hasPlanUiImpact(props.proposal);
-  if (!props.showActions) return null;
-  return (
-    <div className="plan-proposal-complete">
-      {canOpenSavedDraft && (
-        <button
-          className="plan-proposal-update-canvas"
-          data-testid="plan-open-saved-draft"
-          onClick={() => props.onOpenCanvas(props.proposal)}
-          type="button"
-        >
-          View Canvas
-        </button>
-      )}
-      {canOfferCanvasUpdate && (
-        <button
-          className="plan-proposal-update-canvas"
-          data-testid="plan-update-canvas"
-          onClick={() => props.onUpdateCanvas(props.proposal)}
-          type="button"
-        >
-          Update Canvas
-        </button>
-      )}
-    </div>
-  );
-}
-
-export function CanvasSuggestionReview(props: {
-  suggestion: CanvasSuggestion;
-  onApply: (suggestion: CanvasSuggestion) => void;
-  onAskCodex: (suggestion: CanvasSuggestion) => void;
-  onDismiss: (suggestion: CanvasSuggestion) => void;
-  onOpenCanvas: (
-    suggestion: CanvasSuggestion,
-    focusReference?: string | null,
-  ) => void;
-  onReset: (suggestion: CanvasSuggestion) => void;
-  surface?: "inline" | "strip";
-}) {
-  const pending = props.suggestion.status === "pending";
-  const canOpenCanvas = Boolean(props.suggestion.canvasProposalSnapshot);
-  const edited = Boolean(props.suggestion.canvasUserEditedAt);
-  const canReset = edited && Boolean(props.suggestion.canvasDraftBaseSnapshot);
-  return (
-    <div
-      className={`plan-proposal-review canvas-suggestion-review ${
-        props.surface === "strip" ? "review-strip" : "inline"
-      } ${props.suggestion.status}`}
-    >
-      <div className="plan-proposal-copy">
-        <strong>{canvasSuggestionTitle(props.suggestion)}</strong>
-        <span>
-          {renderCanvasReviewText(
-            props.suggestion,
-            (reference) => props.onOpenCanvas(props.suggestion, reference),
-            isGeneratedCurrentUiMockupPrompt(props.suggestion.prompt)
-              ? generatedCanvasSuggestionText(props.suggestion)
-              : null,
-          )}
-        </span>
-      </div>
-      {pending ? (
-        <div className="plan-proposal-actions" aria-label="Canvas draft">
-          {canOpenCanvas && (
-            <button
-              type="button"
-              onClick={() => props.onOpenCanvas(props.suggestion)}
-              title="Open draft"
-            >
-              <PanelRightOpen size={14} />
-              <span>UI</span>
-            </button>
-          )}
-          {canReset && (
-            <button
-              type="button"
-              onClick={() => props.onReset(props.suggestion)}
-              title="Reset draft edits"
-            >
-              <RefreshCw size={14} />
-              <span>Reset</span>
-            </button>
-          )}
-          {edited && (
-            <button
-              type="button"
-              onClick={() => props.onAskCodex(props.suggestion)}
-              title="Ask Codex about these draft edits"
-            >
-              <PencilLine size={14} />
-              <span>Ask</span>
-            </button>
-          )}
-          <button
-            className="plan-proposal-accept"
-            type="button"
-            onClick={() => props.onApply(props.suggestion)}
-            disabled={props.suggestion.canvasProposalParseStatus !== "parsed"}
-          >
-            <Check size={14} />
-            <span>{edited ? "Apply edits" : "Apply"}</span>
-          </button>
-          <button type="button" onClick={() => props.onDismiss(props.suggestion)}>
-            <X size={14} />
-            <span>Dismiss</span>
-          </button>
-        </div>
-      ) : (
-        <span className="plan-proposal-status">
-          {canvasSuggestionStatusText(props.suggestion.status)}
-        </span>
-      )}
+      ) : null}
     </div>
   );
 }
@@ -685,29 +514,39 @@ export function CanvasSuggestionReview(props: {
 function shouldShowPlanProposalReview(proposal: PlanProposal) {
   if (isNoPlanProposalRequest(proposal.prompt)) return false;
   if (isReadOnlyPlanningNoteRequest(proposal.prompt)) return false;
-  if (proposal.status !== "pending") {
-    return hasPlanUiImpact(proposal) || proposal.status !== "superseded";
-  }
-  return (
-    proposal.canvasProposalParseStatus === "pending" ||
-    proposal.canvasProposalParseStatus === "parsed" ||
-    proposal.canvasProposalParseStatus === "empty"
-  );
+  return proposal.status === "pending" || proposal.status === "accepted" || proposal.status === "declined";
 }
 
 function hasPlanUiImpact(proposal: PlanProposal) {
-  if (isNoUiCanvasRequest(proposal.prompt)) return false;
-  if (proposal.previewSpec?.variants.length) return true;
-  return Boolean(
-    proposal.canvasProposalSnapshot &&
-      (proposal.canvasProposalChangeCount > 0 || proposal.canvasUserEditedAt),
+  return Boolean(proposal.previewSpec?.variants.length || proposal.previewAreaMark);
+}
+
+function selectedPlanPreviewVariant(proposal: PlanProposal) {
+  const variants = proposal.previewSpec?.variants ?? [];
+  if (variants.length === 0) return null;
+  return (
+    variants.find((variant) => variant.id === proposal.previewSelectedVariantId) ??
+    variants[0] ??
+    null
   );
 }
 
+function planAcceptLabel(
+  proposal: PlanProposal,
+  selectedVariant: ReturnType<typeof selectedPlanPreviewVariant>,
+) {
+  if (proposal.proposalKind === "safer_alternative") {
+    return "Yes, implement safer plan";
+  }
+  if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
+    return `Implement option ${selectedVariant.id}`;
+  }
+  if (selectedVariant) return "Implement selected preview";
+  return "Yes, implement this plan";
+}
+
 function planProposalTitle(proposal: PlanProposal) {
-  return proposal.proposalKind === "safer_alternative"
-    ? "Safer plan"
-    : "Plan";
+  return proposal.proposalKind === "safer_alternative" ? "Safer plan" : "Plan";
 }
 
 function planReviewText(proposal: PlanProposal) {
@@ -715,11 +554,6 @@ function planReviewText(proposal: PlanProposal) {
     return proposal.previewSpec.variants.length > 1
       ? "Live app preview options ready."
       : "Live app preview ready.";
-  }
-  if (hasPlanUiImpact(proposal)) return canvasReviewText(proposal);
-  if (isNoUiCanvasRequest(proposal.prompt)) return "Text-only plan. No Canvas draft attached.";
-  if (proposal.canvasProposalParseStatus === "pending") {
-    return "Looking for any useful Canvas draft.";
   }
   return "Plan ready.";
 }
@@ -748,168 +582,12 @@ function isReadOnlyPlanningNoteRequest(prompt: string) {
       text,
     );
   if (!asksForSummary) return false;
-  if (
-    /\bdo\s+not\s+edit\s+files\b/.test(text) &&
-    /\bdo\s+not\s+propose\s+canvas\s+changes\b/.test(text)
-  ) {
-    return true;
-  }
+  if (/\bdo\s+not\s+edit\s+files\b/.test(text)) return true;
   const asksForChange =
     /\b(add|build|create|implement|change|move|update|wire|design|propose|proposal|feature|route|page|button|panel|menu|workflow)\b/.test(
       text,
     );
   return !asksForChange;
-}
-
-function isNoUiCanvasRequest(prompt: string) {
-  const text = prompt.toLowerCase();
-  return (
-    /\bno\s+(?:ui|visual|layout|canvas)\s+changes?\b/.test(text) ||
-    /\bwith\s+no\s+(?:ui|visual|layout|canvas)\s+changes?\b/.test(text) ||
-    /\bdo\s+not\s+propose\s+canvas\s+changes?\b/.test(text) ||
-    /\bdo\s+not\s+create\s+(?:a\s+)?(?:ui|visual|canvas)\s+draft\b/.test(text)
-  );
-}
-
-function canvasSuggestionStatusText(status: CanvasSuggestion["status"]) {
-  if (status === "applied") return "Applied";
-  return "Dismissed";
-}
-
-function canvasSuggestionTitle(suggestion: CanvasSuggestion) {
-  if (suggestion.canvasUserEditedAt) return "Edited draft";
-  return isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
-    ? "Generated draft"
-    : "Draft";
-}
-
-function generatedCanvasSuggestionText(suggestion: CanvasSuggestion) {
-  if (suggestion.canvasProposalParseStatus === "parsed") {
-    return generatedCanvasDraftSummary(suggestion.canvasProposalSnapshot);
-  }
-  if (suggestion.canvasProposalParseStatus === "pending") {
-    return "Waiting for generated Canvas draft.";
-  }
-  if (suggestion.canvasProposalParseStatus === "failed") {
-    return "Generated Canvas draft could not be parsed cleanly.";
-  }
-  if (suggestion.canvasProposalParseStatus === "empty") {
-    return "No generated Canvas draft was returned.";
-  }
-  return "Review the generated Canvas draft before applying it.";
-}
-
-function generatedCanvasDraftSummary(snapshot: CanvasSuggestion["canvasProposalSnapshot"]) {
-  if (!snapshot) return "Generated Canvas draft captured.";
-  const visibleItems = snapshot.items.filter((item) => item.visible !== false);
-  const pageIds = new Set(
-    visibleItems
-      .map((item) => item.pageId)
-      .filter((pageId): pageId is string => Boolean(pageId)),
-  );
-  const pages = pageIds.size > 0 ? pageIds.size : snapshot.pages.length;
-  const pageText = `${pages} page${pages === 1 ? "" : "s"}`;
-  const itemText = `${visibleItems.length} item${visibleItems.length === 1 ? "" : "s"}`;
-  return `Draft ready: ${itemText} across ${pageText}.`;
-}
-
-type CanvasReviewRecord = Pick<
-  PlanProposal | CanvasSuggestion,
-  | "canvasStatus"
-  | "canvasProposalParseStatus"
-  | "canvasSummary"
-  | "canvasProposalSummary"
-  | "canvasProposalSnapshot"
->;
-
-function canvasReviewText(record: CanvasReviewRecord) {
-  if (record.canvasStatus === "not_attached") {
-    return "Canvas had no usable data for this response.";
-  }
-  if (record.canvasProposalParseStatus === "parsed") {
-    return `${record.canvasSummary}. ${record.canvasProposalSummary}`;
-  }
-  if (record.canvasProposalParseStatus === "pending") {
-    return `${record.canvasSummary}. Looking for visual changes.`;
-  }
-  if (record.canvasProposalParseStatus === "empty") {
-    return `${record.canvasSummary}. No parseable canvas changes returned.`;
-  }
-  if (record.canvasProposalParseStatus === "failed") {
-    return `${record.canvasSummary}. Canvas draft could not be parsed cleanly.`;
-  }
-  return record.canvasSummary;
-}
-
-const CANVAS_REFERENCE_PATTERN = /\b[BCDTMG][1-9]\d*\b/g;
-
-function renderCanvasReviewText(
-  record: CanvasReviewRecord,
-  onOpenReference: (reference: string) => void,
-  textOverride: string | null = null,
-) {
-  const text = textOverride ?? canvasReviewText(record);
-  const references = canvasReviewReferences(record);
-  if (references.size === 0) return text;
-  const parts: ReactNode[] = [];
-  let lastIndex = 0;
-  for (const match of text.matchAll(CANVAS_REFERENCE_PATTERN)) {
-    const rawReference = match[0];
-    const index = match.index ?? 0;
-    const reference = rawReference.toUpperCase();
-    if (index > lastIndex) {
-      parts.push(text.slice(lastIndex, index));
-    }
-    if (references.has(reference)) {
-      parts.push(
-        <button
-          className="plan-reference-button"
-          key={`${reference}-${index}`}
-          onClick={() => onOpenReference(reference)}
-          title={`Open ${reference} in Canvas`}
-          type="button"
-        >
-          {rawReference}
-        </button>,
-      );
-    } else {
-      parts.push(rawReference);
-    }
-    lastIndex = index + rawReference.length;
-  }
-  if (lastIndex < text.length) {
-    parts.push(text.slice(lastIndex));
-  }
-  return parts.length > 0 ? parts : text;
-}
-
-function canvasReviewReferences(record: CanvasReviewRecord) {
-  const references = new Set<string>();
-  record.canvasProposalSnapshot?.items.forEach((item) => {
-    references.add(item.reference.toUpperCase());
-  });
-  record.canvasProposalSnapshot?.groups.forEach((group) => {
-    references.add(group.reference.toUpperCase());
-  });
-  return references;
-}
-
-function friendlyCanvasProposalText(
-  text: string,
-  suggestion: CanvasSuggestion | null,
-  proposal: PlanProposal | null,
-) {
-  const withoutProposal = stripCanvasProposalBlocks(text);
-  const compact = withoutProposal.trim();
-  const record = suggestion ?? proposal;
-  if (record?.canvasProposalParseStatus === "parsed") {
-    if (!compact || isGenericGeneratedCanvasCapture(compact)) {
-      return suggestion && isGeneratedCurrentUiMockupPrompt(suggestion.prompt)
-        ? "Generated a current interface draft. Review it above the composer."
-        : "Captured a Canvas proposal. Review it below.";
-    }
-  }
-  return compact;
 }
 
 function FileChangeView(props: {
@@ -954,16 +632,68 @@ function TurnActivity(props: {
   activeProject: Project;
   durationMs: number | null;
   items: ActivityItem[];
+  startedAt: number | null;
   status: Turn["status"];
+  turn: Turn;
+  turnId: string;
+  workspaceProgress: WorkspaceProgressSnapshot | null;
 }) {
+  const [open, setOpen] = useState(props.status === "inProgress");
+  const [progressTick, setProgressTick] = useState(0);
+
+  useEffect(() => {
+    if (props.status === "inProgress") {
+      setOpen(true);
+      setProgressTick(0);
+    }
+  }, [props.status, props.turnId]);
+
+  useEffect(() => {
+    if (props.status !== "inProgress") return;
+    const timer = window.setInterval(
+      () => setProgressTick((value) => value + 1),
+      WORKSPACE_PROGRESS_POLL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [props.status, props.turnId]);
+
+  const elapsedMs =
+    props.status === "inProgress" && props.startedAt
+      ? Math.max(0, Date.now() - props.startedAt * 1000)
+      : props.durationMs;
+  const progress = summarizeTurnProgress(
+    props.turn,
+    props.activeProject,
+    props.workspaceProgress,
+  );
+
   return (
-    <details className={`turn-activity ${props.status}`}>
+    <details
+      className={`turn-activity ${props.status}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
-        <span>{activitySummaryLabel(props.durationMs, props.status)}</span>
+        <span>
+          {activitySummaryLabel(props.durationMs, props.status, elapsedMs)}
+        </span>
         <ChevronDown className="details-chevron" size={14} />
       </summary>
       <div className="turn-activity-body">
-        {activityNodes(props.items, props.activeProject)}
+        {props.status === "inProgress" && progress.fileCount === 0 && (
+          <LiveTurnProgress
+            elapsedMs={elapsedMs}
+            progress={progress}
+            tick={progressTick}
+          />
+        )}
+        {props.status === "inProgress" && progress.fileCount > 0 && (
+          <TurnProgressInline progress={progress} status={props.status} />
+        )}
+        {activityNodes(
+          props.items.filter((item) => item.type !== "fileChange"),
+          props.activeProject,
+        )}
       </div>
     </details>
   );
@@ -972,6 +702,7 @@ function TurnActivity(props: {
 function activityNodes(items: ActivityItem[], activeProject: Project) {
   const nodes = [];
   let commandGroup: Extract<ThreadItem, { type: "commandExecution" }>[] = [];
+  const seenText = new Set<string>();
   for (const item of items) {
     if (item.type === "commandExecution") {
       commandGroup.push(item);
@@ -986,12 +717,13 @@ function activityNodes(items: ActivityItem[], activeProject: Project) {
       );
       commandGroup = [];
     }
+    const signature = activityItemTextSignature(item, activeProject);
+    if (signature) {
+      if (seenText.has(signature)) continue;
+      seenText.add(signature);
+    }
     nodes.push(
-      <ActivityLine
-        activeProject={activeProject}
-        key={item.id}
-        item={item}
-      />,
+      <ActivityLine activeProject={activeProject} key={item.id} item={item} />,
     );
   }
   if (commandGroup.length > 0) {
@@ -1005,9 +737,224 @@ function activityNodes(items: ActivityItem[], activeProject: Project) {
   return nodes;
 }
 
+function LiveTurnProgress(props: {
+  elapsedMs: number | null;
+  progress: TurnProgressSummary;
+  tick: number;
+}) {
+  const elapsed =
+    props.elapsedMs != null
+      ? formatDuration(Math.max(props.elapsedMs, props.tick * WORKSPACE_PROGRESS_POLL_MS))
+      : formatDuration(props.tick * WORKSPACE_PROGRESS_POLL_MS);
+  const headline = liveProgressHeadline(props.progress);
+  const detail = liveProgressDetail(props.progress, elapsed, props.elapsedMs);
+
+  return (
+    <div
+      className="live-turn-progress"
+      data-progress-tick={props.tick}
+      data-testid="live-turn-progress"
+    >
+      <div className="live-turn-progress-mark" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+      </div>
+      <div className="live-turn-progress-copy">
+        <strong>{headline}</strong>
+        <small
+          key={`${props.progress.additions}:${props.progress.deletions}:${props.tick}`}
+        >
+          {detail}
+        </small>
+      </div>
+      {props.progress.fileCount === 0 && (
+        <LiveTurnProgressTimeline
+          elapsedMs={props.elapsedMs}
+          progress={props.progress}
+          tick={props.tick}
+        />
+      )}
+      {props.progress.files.length > 0 && (
+        <div className="live-turn-progress-files" aria-label="Live file progress">
+          {props.progress.files.slice(0, 3).map((file) => (
+            <span
+              className="live-turn-progress-file-chip"
+              key={`${file.path}:${file.additions}:${file.deletions}`}
+            >
+              <span>{file.label}</span>
+              <strong>{formatFileProgressDelta(file)}</strong>
+            </span>
+          ))}
+          {props.progress.extraFileCount > 0 && (
+            <span className="live-turn-progress-file-chip muted">
+              +{props.progress.extraFileCount} more
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveTurnProgressTimeline(props: {
+  elapsedMs: number | null;
+  progress: TurnProgressSummary;
+  tick: number;
+}) {
+  const elapsedMs =
+    props.elapsedMs ?? props.tick * WORKSPACE_PROGRESS_POLL_MS;
+  const entries = liveProgressTimelineEntries(props.progress, elapsedMs);
+  if (entries.length === 0) return null;
+  return (
+    <div
+      className="live-turn-progress-timeline"
+      aria-label="Observable progress"
+    >
+      {entries.map((entry) => (
+        <div className="live-turn-progress-step" key={entry.key}>
+          <span>{entry.time}</span>
+          <strong>{entry.label}</strong>
+          <small>{entry.detail}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function liveProgressTimelineEntries(
+  progress: TurnProgressSummary,
+  elapsedMs: number,
+) {
+  const elapsedSeconds = Math.floor(Math.max(0, elapsedMs) / 1000);
+  const latestBucket = Math.floor(elapsedSeconds / 10) * 10;
+  if (latestBucket < 10) return [];
+  const buckets: number[] = [];
+  for (
+    let bucket = Math.max(10, latestBucket - 70);
+    bucket <= latestBucket;
+    bucket += 10
+  ) {
+    buckets.push(bucket);
+  }
+  return buckets.map((bucket) => ({
+    key: `observable-${bucket}`,
+    time: formatDuration(bucket * 1000),
+    ...liveProgressTimelineCopy(progress, bucket),
+  }));
+}
+
+function liveProgressTimelineCopy(
+  progress: TurnProgressSummary,
+  elapsedSeconds: number,
+) {
+  if (progress.activeCommandCount > 0) {
+    return {
+      label: "Command running",
+      detail: progress.latestCommand
+        ? compactCommand(progress.latestCommand)
+        : "Waiting for command output",
+    };
+  }
+  if (progress.commandCount > 0) {
+    return {
+      label:
+        elapsedSeconds >= 50
+          ? "No file writes observed yet"
+          : "Watching workspace",
+      detail: `${progress.commandCount} command${
+        progress.commandCount === 1 ? "" : "s"
+      } observed`,
+    };
+  }
+  return {
+    label: elapsedSeconds >= 30 ? "Still working" : "Waiting",
+    detail: "No command or file writes observed yet",
+  };
+}
+
+function TurnProgressInline(props: {
+  progress: TurnProgressSummary;
+  status: Turn["status"];
+}) {
+  const active = props.status === "inProgress";
+  const firstFile = props.progress.files[0];
+  if (props.progress.fileCount === 1 && firstFile) {
+    return (
+      <p className={`activity-edit-line live ${active ? "editing" : "edited"}`}>
+        <PencilLine size={14} />
+        <span>
+          {active ? "Editing" : "Edited"} {firstFile.label}
+        </span>
+        <small>{formatShortLineDelta(firstFile.additions, firstFile.deletions)}</small>
+      </p>
+    );
+  }
+
+  return (
+    <details className="turn-progress-detail" open={active}>
+      <summary>
+        <PencilLine size={14} />
+        <span>{turnProgressDetailSummary(props.progress, active)}</span>
+        <small>
+          {formatShortLineDelta(
+            props.progress.additions,
+            props.progress.deletions,
+          )}
+        </small>
+        <ChevronDown className="details-chevron" size={14} />
+      </summary>
+      <div className="turn-progress-detail-list">
+        {props.progress.files.slice(0, 6).map((file) => (
+          <div className="turn-progress-detail-row" key={file.path}>
+            <span>
+              {active ? "Editing" : "Edited"} {file.label}
+            </span>
+            <small>{formatShortLineDelta(file.additions, file.deletions)}</small>
+          </div>
+        ))}
+        {props.progress.extraFileCount > 0 && (
+          <div className="turn-progress-detail-row muted">
+            <span>{props.progress.extraFileCount} more files changed</span>
+          </div>
+        )}
+        {props.progress.commands.slice(-4).map((command) => (
+          <div className="turn-progress-detail-row command" key={command.id}>
+            <span>Ran {compactCommand(command.command)}</span>
+            <small>{command.durationMs == null ? command.status : formatDuration(command.durationMs)}</small>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function turnProgressDetailSummary(
+  progress: TurnProgressSummary,
+  active: boolean,
+) {
+  const verb = active ? "Editing" : "Edited";
+  const fileLabel = `${progress.fileCount} file${
+    progress.fileCount === 1 ? "" : "s"
+  }`;
+  const commandLabel =
+    progress.commandCount > 0
+      ? `, ran ${progress.commandCount} command${
+          progress.commandCount === 1 ? "" : "s"
+        }`
+      : "";
+  return `${verb} ${fileLabel}${commandLabel}`;
+}
+
 function ActivityLine(props: {
   activeProject: Project;
-  item: Exclude<ActivityItem, Extract<ThreadItem, { type: "commandExecution" }>>;
+  item: Exclude<
+    ActivityItem,
+    Extract<ThreadItem, { type: "commandExecution" }>
+  >;
 }) {
   const item = props.item;
   if (item.type === "agentMessage") {
@@ -1029,12 +976,12 @@ function ActivityLine(props: {
     );
   }
   if (item.type === "plan") {
-    return <RichText text={item.text} />;
+    return <RichText text={friendlyText(item.text, props.activeProject)} />;
   }
   if (item.type === "reasoning") {
-    return item.summary.concat(item.content).map((line, index) => (
-      <RichText key={index} text={line} />
-    ));
+    return uniqueActivityLines(item.summary.concat(item.content)).map(
+      (line, index) => <RichText key={index} text={line} />,
+    );
   }
   return <p>{itemLabel(item)}</p>;
 }
@@ -1054,7 +1001,10 @@ function CommandActivity(props: {
       </summary>
       <div className="command-activity-list">
         {props.commands.map((command) => (
-          <div key={command.id} className={`command-activity-line ${command.status}`}>
+          <div
+            key={command.id}
+            className={`command-activity-line ${command.status}`}
+          >
             <span>Ran {compactCommand(command.command)}</span>
             {command.status !== "completed" && (
               <small>{commandStatusText(command)}</small>
@@ -1066,11 +1016,52 @@ function CommandActivity(props: {
   );
 }
 
-function isActivityItem(item: ThreadItem): item is ActivityItem {
+function activityItemTextSignature(
+  item: Exclude<
+    ActivityItem,
+    Extract<ThreadItem, { type: "commandExecution" }>
+  >,
+  activeProject: Project,
+) {
+  if (item.type === "fileChange") return "";
+  if (item.type === "agentMessage") {
+    return normalizeActivityText(friendlyText(item.text, activeProject));
+  }
+  if (item.type === "plan") {
+    return normalizeActivityText(friendlyText(item.text, activeProject));
+  }
+  if (item.type === "reasoning") {
+    return normalizeActivityText(
+      uniqueActivityLines(item.summary.concat(item.content)).join("\n"),
+    );
+  }
+  return "";
+}
+
+function uniqueActivityLines(lines: string[]) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const line of lines) {
+    const signature = normalizeActivityText(line);
+    if (!signature || seen.has(signature)) continue;
+    seen.add(signature);
+    unique.push(line);
+  }
+  return unique;
+}
+
+function normalizeActivityText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function isActivityItem(
+  item: ThreadItem,
+  turnStatus: Turn["status"],
+): item is ActivityItem {
   if (item.type === "agentMessage") return item.phase === "commentary";
+  if (item.type === "fileChange") return turnStatus === "inProgress";
   return (
     item.type === "commandExecution" ||
-    item.type === "fileChange" ||
     item.type === "plan" ||
     item.type === "reasoning"
   );
@@ -1088,15 +1079,13 @@ function EmptyState() {
   );
 }
 
-function compactCommand(command: string) {
-  return command.length > 96 ? `${command.slice(0, 93)}...` : command;
-}
-
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
-function splitVisibleChanges(item: Extract<ThreadItem, { type: "fileChange" }>) {
+function splitVisibleChanges(
+  item: Extract<ThreadItem, { type: "fileChange" }>,
+) {
   return [item.changes.slice(0, 3), item.changes.slice(3)] as const;
 }
 
@@ -1147,20 +1136,6 @@ function FileChangeRows(props: {
   );
 }
 
-function diffLineCounts(diff: string) {
-  let additions = 0;
-  let deletions = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) additions += 1;
-    if (line.startsWith("-")) deletions += 1;
-  }
-  if (additions === 0 && deletions === 0) {
-    return { additions: Math.max(0, lineCount(diff)), deletions: 0 };
-  }
-  return { additions, deletions };
-}
-
 function isMarkdownPath(path: string) {
   return /\.(md|mdx|markdown)$/i.test(path);
 }
@@ -1178,110 +1153,226 @@ function friendlyText(text: string, activeProject: Project) {
   if (!text) return text;
   const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
   const escapedProjectPath = escapeRegExp(projectPath);
-  return stripInternalEvidenceSurface(text).replace(
-    new RegExp(escapedProjectPath, "g"),
-    ".",
-  );
+  return stripInternalEvidenceSurface(
+    stripPlanPreviewBlocks(stripVisualDecisionBlocks(trimInternalContextTail(text))),
+  ).replace(new RegExp(escapedProjectPath, "g"), ".");
 }
 
-function friendlyUserText(text: string, activeProject: Project) {
-  return friendlyText(stripHiddenPromptContext(text), activeProject);
+type FriendlyUserDisplay = {
+  actionLabel?: string;
+  text: string;
+};
+
+function friendlyUserDisplay(
+  text: string,
+  activeProject: Project,
+): FriendlyUserDisplay {
+  return mapUserDisplayText(text, activeProject);
 }
 
-function stripHiddenPromptContext(text: string) {
+function mapUserDisplayText(
+  text: string,
+  activeProject: Project,
+): FriendlyUserDisplay {
   let visible = text.trim();
-  if (isGeneratedCurrentUiMockupPrompt(visible)) {
-    return GENERATED_MOCKUP_USER_TEXT;
-  }
   const userRequestMarker = "\n\nUser request:\n";
   if (visible.startsWith("Plan Mode:") && visible.includes(userRequestMarker)) {
     visible = visible.slice(
       visible.indexOf(userRequestMarker) + userRequestMarker.length,
     );
   }
+  const visualPlanningRequest =
+    extractEmptyProjectVisualPlanningRequest(visible);
+  if (visualPlanningRequest) {
+    return { text: friendlyText(visualPlanningRequest, activeProject) };
+  }
+  const existingDecisionRequest =
+    extractExistingAppVisualDecisionRequest(visible);
+  if (existingDecisionRequest) {
+    return { text: friendlyText(existingDecisionRequest, activeProject) };
+  }
+  const existingPreviewRequest = extractExistingAppPreviewFirstRequest(visible);
+  if (existingPreviewRequest) {
+    return { text: friendlyText(existingPreviewRequest, activeProject) };
+  }
+  const mockupReviewRequest = extractSavedMockupReviewRequest(visible);
+  if (mockupReviewRequest) {
+    return { text: friendlyText(mockupReviewRequest, activeProject) };
+  }
+  const visualDecisionRequest = extractVisualDecisionSelectionRequest(visible);
+  if (visualDecisionRequest) {
+    return { text: friendlyText(visualDecisionRequest, activeProject) };
+  }
+  const buildSelectedRequest = extractBuildSelectedMockupRequest(visible);
+  if (buildSelectedRequest) {
+    return { text: friendlyText(buildSelectedRequest, activeProject) };
+  }
+  const mockupTitle = friendlyMockupPromptTitle(visible);
+  if (mockupTitle) {
+    const original = extractOriginalMockupRequest(visible);
+    const requestedChange = extractRequestedMockupChange(visible);
+    return {
+      actionLabel: mockupActionLabel(mockupTitle),
+      text: friendlyText(requestedChange || original, activeProject),
+    };
+  }
   for (const marker of [
-    "\n\nProject Canvas for this plan:\n",
-    "\n\nProject Canvas attached by the user:\n",
     "\n\nProject context explicitly attached by the user:\n",
     "\n\nFiles to inspect if needed:\n",
   ]) {
     const index = visible.indexOf(marker);
     if (index !== -1) visible = visible.slice(0, index);
   }
-  return visible.trim();
+  return { text: friendlyText(visible.trim(), activeProject) };
 }
 
-const GENERATED_MOCKUP_USER_TEXT = "Generate current interface mockup.";
-
-function isGeneratedCurrentUiMockupPrompt(text: string) {
-  return text
-    .trimStart()
-    .startsWith(
-      "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
-    );
+function mockupActionLabel(title: string) {
+  const create = title.match(
+    /^Create\s+(\d+)\s*(.*?)\b(mockups|wireframes|previews)\b first$/i,
+  );
+  if (create) {
+    const depth = create[2].trim();
+    const artifactKind = previewArtifactKindFromText(create[3], "mockup");
+    return `${previewArtifactDisplayName(
+      artifactKind,
+      1,
+      "title",
+    )} first: ${create[1]} ${depth ? `${depth} ` : ""}${previewArtifactDisplayName(
+      artifactKind,
+      2,
+      "lower",
+    )}`;
+  }
+  return title;
 }
 
-function stripCanvasProposalBlocks(text: string) {
-  const stripped = text
-    .replace(/```canvas-proposal[\s\S]*?```/gi, "")
-    .replace(/```[\s\S]*?```/g, (block) => {
-      const body = block
-        .replace(/^```[^\n]*\n?/, "")
-        .replace(/```$/, "")
-        .trim();
-      return isCanvasProposalPayload(body) ? "" : block;
-    });
-  return stripLooseCanvasProposalLines(stripped)
-    .replace(/^\s*(?:#{1,6}\s*)?(?:\*\*)?Canvas proposal(?:\*\*)?\s*:?\s*$/gim, "")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function stripLooseCanvasProposalLines(text: string) {
-  const lines = text.split(/\r?\n/);
-  const proposalLineCount = lines.filter(isLikelyCanvasProposalLine).length;
-  if (proposalLineCount < 3) return text;
-  return lines.filter((line) => !isLikelyCanvasProposalLine(line)).join("\n");
-}
-
-function isCanvasProposalPayload(text: string) {
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter(Boolean);
-  if (lines.length === 0) return false;
-  const proposalLineCount = lines.filter(isLikelyCanvasProposalLine).length;
-  if (proposalLineCount >= 2) return true;
-  return (
-    proposalLineCount === 1 &&
-    /\b(state|grid|xywh|norm|bounds)=/i.test(text) &&
-    /\b(create|current|proposed|deleted)\b/i.test(text)
+function extractEmptyProjectVisualPlanningRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Empty Project Visual Planning Context]",
   );
 }
 
-function isLikelyCanvasProposalLine(line: string) {
-  const cleaned = line
-    .trim()
-    .replace(/^[-*]\s+/, "")
-    .replace(/^\d+[.)]\s+/, "")
-    .trim();
-  if (!cleaned) return false;
-  if (/^(create|new|add)\s+(container|button|text|modal|divider|card|input|header|toolbar|row|dropdown|icon)\b/i.test(cleaned)) {
-    return /\b(state|page|grid|xywh|norm|label|title)=/i.test(cleaned);
-  }
-  if (/^(delete|remove|mark\s+deleted)\b/i.test(cleaned)) {
-    return /\b[BCDTMG][1-9]\d*\b/i.test(cleaned);
-  }
-  if (/^[BCDTMG][1-9]\d*\b/i.test(cleaned)) {
-    return /\b(state|xywh|grid|norm|bounds|x|y|w|h|width|height)=/i.test(cleaned);
-  }
-  return false;
+function extractExistingAppVisualDecisionRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Existing App Visual Decision Context]",
+  );
 }
 
-function isGenericGeneratedCanvasCapture(text: string) {
-  return /^Generated (?:Canvas|a current (?:interface|UI)) draft captured\.?$/i.test(
-    text.trim(),
+function extractExistingAppPreviewFirstRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Existing App Preview First Context]",
   );
+}
+
+function extractSavedMockupReviewRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  const sentinel = "[Codex Saved Mockup Review Context]";
+  const sentinelIndex = visible.indexOf(sentinel);
+  if (sentinelIndex === -1) {
+    return "";
+  }
+  const payload = visible.slice(sentinelIndex);
+  const marker = "\n\nUser request:\n";
+  const markerIndex = payload.indexOf(marker);
+  if (markerIndex === -1) {
+    return `Review saved ${previewArtifactDisplayName(
+      previewArtifactKindFromText(payload, "mockup"),
+      2,
+      "lower",
+    )}.`;
+  }
+  return trimInternalContextTail(
+    payload.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function extractVisualDecisionSelectionRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Visual Decision Selection]")) {
+    return "";
+  }
+  const marker = "\n\nUser-visible composer text:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "Use selected option.";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function extractBuildSelectedMockupRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Build Selected Mockup]")) {
+    return "";
+  }
+  const marker = "\n\nUser-visible request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function unwrapPlanModeUserRequest(text: string) {
+  const visible = text.trimStart();
+  const marker = "\n\nUser request:\n";
+  if (!visible.startsWith("Plan Mode:") || !visible.includes(marker)) {
+    return visible;
+  }
+  return visible.slice(visible.indexOf(marker) + marker.length);
+}
+
+function extractOriginalRequestForSentinel(text: string, sentinel: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith(sentinel)) return "";
+  const marker = "\n\nOriginal user request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function trimInternalContextTail(text: string) {
+  const endMarkers = [
+    "Project context explicitly attached by the user:\n",
+    "\n\nProject context explicitly attached by the user:\n",
+    "Files to inspect if needed:\n",
+    "\n\nFiles to inspect if needed:\n",
+    "Supporting selected mockup context:\n",
+    "\n\nSupporting selected mockup context:\n",
+    "Build rules:\n",
+    "\n\nBuild rules:\n",
+    "Selected preview context:\n",
+    "\n\nSelected preview context:\n",
+  ];
+  const end = endMarkers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  return end == null ? text : text.slice(0, end);
+}
+
+function extractOriginalMockupRequest(text: string) {
+  const marker = "Original user request:\n";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex === -1) return "";
+  const afterMarker = text.slice(markerIndex + marker.length);
+  const endMarkers = ["\n\nRules:", "\n\nBuild rules:", "\n\nSelected mockup:"];
+  const end = endMarkers
+    .map((candidate) => afterMarker.indexOf(candidate))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  return (end == null ? afterMarker : afterMarker.slice(0, end)).trim();
+}
+
+function extractRequestedMockupChange(text: string) {
+  const marker = "Requested change:\n";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return text.slice(markerIndex + marker.length).trim();
 }
 
 function stripInternalEvidenceSurface(text: string) {
@@ -1314,9 +1405,18 @@ function turnErrorMessage(error: { message: string }) {
   return error.message;
 }
 
-function activitySummaryLabel(durationMs: number | null, status: Turn["status"]) {
-  if (durationMs && status !== "inProgress") return `Worked for ${formatDuration(durationMs)}`;
-  if (status === "inProgress") return "Thinking";
+function activitySummaryLabel(
+  durationMs: number | null,
+  status: Turn["status"],
+  elapsedMs?: number | null,
+) {
+  if (durationMs && status !== "inProgress")
+    return `Worked for ${formatDuration(durationMs)}`;
+  if (status === "inProgress") {
+    return elapsedMs != null
+      ? `Working for ${formatDuration(elapsedMs)}`
+      : "Working";
+  }
   if (status === "failed") return "Thought process";
   if (status === "interrupted") return "Thought process";
   return "Thought process";

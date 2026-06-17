@@ -1,24 +1,27 @@
-import { Check, FileText, Loader2, Undo2, X } from "lucide-react";
+import { Check, FileText, Layers3, Loader2, Undo2, X } from "lucide-react";
 import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
+import { previewArtifactDisplayName } from "../mockupArtifacts";
 import type {
   ComposerAppPreviewContext,
-  CanvasSuggestion,
+  ComposerMockupPreviewContext,
   InspectorSelection,
+  MockupPreviewSet,
   PendingApproval,
   PlanProposal,
   PlanPreviewAreaMark,
+  PlanPreviewSessionState,
   Project,
-  ProjectCanvas,
+  SavedMockup,
   Thread,
   ThreadItem,
   Turn,
 } from "../types";
-import { CanvasInspector } from "./CanvasInspector";
 import {
   LiveAppPreview,
   type LiveAppPreviewMarkMeta,
 } from "./LiveAppPreview";
+import { MockupPreview } from "./MockupPreview";
 import { RichText } from "./RichText";
 
 export function Inspector(props: {
@@ -26,68 +29,68 @@ export function Inspector(props: {
   activeTurn: Turn | null;
   activeProject: Project | null;
   activeThread: Thread | null;
-  canvas: ProjectCanvas | null;
-  canvasProject: Project | null;
-  canvasLayersOpen: boolean;
-  canvasProposal: PlanProposal | null;
+  previewProject: Project | null;
   planPreviewProposal: PlanProposal | null;
   appPreviewContext: ComposerAppPreviewContext | null;
-  canvasSuggestion: CanvasSuggestion | null;
-  canvasReadOnly: boolean;
-  canvasSaveStatus: "saving" | "saved";
+  mockupPreviewSet: MockupPreviewSet | null;
+  mockupCanShowLive: boolean;
+  mockupPreviewLiveResetToken: number;
+  mockupPreviewMarks: ComposerMockupPreviewContext[];
+  mockupPreviewMode: "active" | "history";
   documentError: string | null;
   documentText: string | null;
   fileChanges: Extract<ThreadItem, { type: "fileChange" }>[];
   onAnswerApproval: (approval: PendingApproval, accepted: boolean) => void;
   onOpenDocument: (path: string) => void;
   onResizePointerDown: (event: PointerEvent<HTMLButtonElement>) => void;
-  onRequestGenerateMockup: (project: Project) => void;
   onReviewChanges: () => void;
   onRollback: () => void;
   onSelect: (selection: InspectorSelection) => void;
-  onSetCanvasLayersOpen: (projectId: string, open: boolean) => void;
-  onEditPlanProposalDraft: (proposal: PlanProposal) => void;
-  onUpdateCanvas: (projectId: string, canvas: ProjectCanvas) => void;
-  onUpdateCanvasProposal: (proposalTurnId: string, canvas: ProjectCanvas) => void;
-  onUpdateCanvasSuggestion: (
-    suggestionTurnId: string,
-    canvas: ProjectCanvas,
-  ) => void;
   onUpdatePlanPreviewAreaMark: (
     proposalTurnId: string,
     areaMark: PlanPreviewAreaMark | null,
+  ) => void;
+  onUpdatePlanPreviewSession: (
+    proposalTurnId: string,
+    session: PlanPreviewSessionState | null,
   ) => void;
   onAttachAppPreviewMark: (
     project: Project,
     areaMark: PlanPreviewAreaMark | null,
     meta: LiveAppPreviewMarkMeta,
   ) => void;
+  onAttachMockupPreviewMark: (
+    previewSet: MockupPreviewSet,
+    mockup: SavedMockup,
+    areaMark: PlanPreviewAreaMark,
+    meta?: {
+      label?: string;
+      source?: ComposerMockupPreviewContext["source"];
+      viewport?: ComposerMockupPreviewContext["viewport"];
+      highlightId?: string;
+    },
+  ) => void;
+  onBuildBaselineApp: (project: Project) => void;
+  onBuildMockup: (previewSet: MockupPreviewSet, mockup: SavedMockup) => void;
+  onResetMockupProposalHighlights: (
+    previewSet: MockupPreviewSet,
+    mockup: SavedMockup,
+    viewport: ComposerMockupPreviewContext["viewport"],
+  ) => void;
+  onSelectMockup: (proposalSetId: string, mockupId: string) => void;
   onUpdatePlanPreviewVariant: (proposalTurnId: string, variantId: string) => void;
   selection: InspectorSelection;
 }) {
-  const canvasSelected =
-    props.selection.type === "canvas" ||
-    props.selection.type === "canvasProposal" ||
-    props.selection.type === "canvasSuggestion";
-  const proposalSelected =
-    props.selection.type === "canvasProposal" ||
-    props.selection.type === "canvasSuggestion";
-  const canvasProposalSummary = proposalSelected
-    ? (props.selection.type === "canvasProposal"
-        ? props.canvasProposal?.canvasProposalSummary
-        : props.canvasSuggestion?.canvasProposalSummary)
-    : null;
-  function updateVisibleCanvas(canvas: ProjectCanvas) {
-    if (props.selection.type === "canvasProposal") {
-      props.onUpdateCanvasProposal(props.selection.proposalTurnId, canvas);
-      return;
-    }
-    if (props.selection.type === "canvasSuggestion") {
-      props.onUpdateCanvasSuggestion(props.selection.suggestionTurnId, canvas);
-      return;
-    }
-    props.onUpdateCanvas(canvas.projectId, canvas);
-  }
+  const previewSelected =
+    props.selection.type === "appPreview" ||
+    props.selection.type === "planPreview" ||
+    props.selection.type === "mockupPreview";
+  const mockupPreviewProjectId =
+    props.selection.type === "mockupPreview" ? props.selection.projectId : null;
+  const mockupPreviewProposalSetId =
+    props.selection.type === "mockupPreview"
+      ? props.selection.proposalSetId
+      : null;
 
   return (
     <aside className="inspector">
@@ -97,7 +100,7 @@ export function Inspector(props: {
         aria-label="Resize inspector"
         onPointerDown={props.onResizePointerDown}
       />
-      {!canvasSelected && (
+      {!previewSelected && (
         <header className="inspector-header">
           <h2>{inspectorTitle(props.selection)}</h2>
         </header>
@@ -109,90 +112,29 @@ export function Inspector(props: {
           activeTurn={props.activeTurn}
           approvals={props.approvals}
           fileChanges={props.fileChanges}
+          mockupHistoryMode={props.mockupPreviewMode === "history"}
+          mockupPreviewSet={props.mockupPreviewSet}
           onSelect={props.onSelect}
+          onSelectMockup={props.onSelectMockup}
         />
       )}
-      {canvasSelected &&
-        props.canvas &&
-        props.canvasProject && (
-          <CanvasInspector
-            canvas={props.canvas}
-            project={props.canvasProject}
-            layersOpen={props.canvasLayersOpen}
-            statusKind={proposalSelected ? "draft" : props.canvasSaveStatus}
-            statusLabel={
-              proposalSelected
-                ? "Draft"
-                : props.canvasSaveStatus === "saving"
-                  ? "Saving"
-                  : "Saved"
-            }
-            readOnly={props.canvasReadOnly}
-            onChange={updateVisibleCanvas}
-            onLayersOpenChange={(open) =>
-              props.canvasProject &&
-              props.onSetCanvasLayersOpen(props.canvasProject.id, open)
-            }
-            onRequestGenerateMockup={props.onRequestGenerateMockup}
-            onEditProposalDraft={
-              props.selection.type === "canvasProposal" &&
-              props.selection.readOnly &&
-              props.canvasProposal
-                ? () =>
-                    props.onEditPlanProposalDraft(
-                      props.canvasProposal as PlanProposal,
-                    )
-                : undefined
-            }
-            focusReference={
-              props.selection.type === "canvas" ||
-              props.selection.type === "canvasProposal" ||
-              props.selection.type === "canvasSuggestion"
-                ? (props.selection.focusReference ?? null)
-                : null
-            }
-            focusRequestId={
-              props.selection.type === "canvas" ||
-              props.selection.type === "canvasProposal" ||
-              props.selection.type === "canvasSuggestion"
-                ? props.selection.focusRequestId
-                : undefined
-            }
-            proposalMode={proposalSelected}
-            proposalEdited={
-              props.selection.type === "canvasProposal"
-                ? Boolean(props.canvasProposal?.canvasUserEditedAt)
-                : props.selection.type === "canvasSuggestion"
-                  ? Boolean(props.canvasSuggestion?.canvasUserEditedAt)
-                  : false
-            }
-            proposalLabel={
-              props.selection.type === "canvasSuggestion"
-                ? isGeneratedCurrentUiDraft(props.canvasSuggestion)
-                  ? "Generated draft"
-                  : "Draft"
-                : props.selection.type === "canvasProposal" &&
-                    props.selection.readOnly
-                  ? props.canvasProposal?.proposalKind === "safer_alternative"
-                    ? "Saved safer draft"
-                    : "Saved draft"
-                  : props.canvasProposal?.proposalKind === "safer_alternative"
-                    ? "Safer draft"
-                    : "Draft"
-            }
-            proposalSummary={canvasProposalSummary}
-          />
-        )}
       {props.selection.type === "planPreview" &&
-        props.canvasProject &&
+        props.previewProject &&
         props.planPreviewProposal && (
           <LiveAppPreview
-            project={props.canvasProject}
+            project={props.previewProject}
             proposal={props.planPreviewProposal}
+            onBuildBaselineRequest={props.onBuildBaselineApp}
             onAreaMarkChange={(areaMark) =>
               props.onUpdatePlanPreviewAreaMark(
                 props.planPreviewProposal?.turnId ?? "",
                 areaMark,
+              )
+            }
+            onSessionChange={(session) =>
+              props.onUpdatePlanPreviewSession(
+                props.planPreviewProposal?.turnId ?? "",
+                session,
               )
             }
             onVariantChange={(variantId) =>
@@ -203,13 +145,35 @@ export function Inspector(props: {
             }
           />
         )}
-      {props.selection.type === "appPreview" && props.canvasProject && (
+      {props.selection.type === "appPreview" && props.previewProject && (
         <LiveAppPreview
-          project={props.canvasProject}
+          project={props.previewProject}
           areaMark={props.appPreviewContext?.areaMark ?? null}
+          onBuildBaselineRequest={props.onBuildBaselineApp}
           onAreaMarkChange={(areaMark, meta) =>
-            props.canvasProject &&
-            props.onAttachAppPreviewMark(props.canvasProject, areaMark, meta)
+            props.previewProject &&
+            props.onAttachAppPreviewMark(props.previewProject, areaMark, meta)
+          }
+        />
+      )}
+      {mockupPreviewProjectId && (
+        <MockupPreview
+          mode={props.mockupPreviewMode}
+          appPreviewAreaMark={props.appPreviewContext?.areaMark ?? null}
+          canShowLive={props.mockupCanShowLive}
+          forceLiveToken={props.mockupPreviewLiveResetToken}
+          markContexts={props.mockupPreviewMarks}
+          project={props.previewProject}
+          previewSet={props.mockupPreviewSet}
+          onBuild={props.onBuildMockup}
+          onLiveMarkArea={(project, areaMark, meta) =>
+            props.onAttachAppPreviewMark(project, areaMark, meta)
+          }
+          onMarkArea={props.onAttachMockupPreviewMark}
+          onResetHighlightContexts={props.onResetMockupProposalHighlights}
+          onSelect={(mockupId) =>
+            mockupPreviewProposalSetId &&
+            props.onSelectMockup(mockupPreviewProposalSetId, mockupId)
           }
         />
       )}
@@ -315,9 +279,15 @@ function ActivityPanel(props: {
   activeTurn: Turn | null;
   approvals: PendingApproval[];
   fileChanges: Extract<ThreadItem, { type: "fileChange" }>[];
+  mockupHistoryMode: boolean;
+  mockupPreviewSet: MockupPreviewSet | null;
   onSelect: (selection: InspectorSelection) => void;
+  onSelectMockup: (proposalSetId: string, mockupId: string) => void;
 }) {
   const recentChanges = props.fileChanges.slice(-3).reverse();
+  const mockupProjectId = props.mockupPreviewSet?.projectId ?? null;
+  const mockupProposalSetId = props.mockupPreviewSet?.proposalSetId ?? null;
+  const savedMockups = props.mockupPreviewSet?.mockups ?? [];
   return (
     <div className="inspector-empty activity-panel">
       <section className="activity-card">
@@ -336,6 +306,67 @@ function ActivityPanel(props: {
           {props.activeTurn?.status ?? "idle"}
         </span>
       </section>
+
+      {mockupProjectId && savedMockups.length > 0 && (
+        <section className="activity-section">
+          <p className="sidebar-label">
+            {previewArtifactDisplayName(
+              props.mockupPreviewSet?.artifactKind ?? "mockup",
+              2,
+              "title",
+            )}
+          </p>
+          {props.mockupHistoryMode ? (
+            savedMockups.map((mockup, index) => (
+              <button
+                className="activity-row activity-row-rich"
+                key={mockup.id}
+                onClick={() => {
+                  if (!mockupProposalSetId) return;
+                  props.onSelectMockup(mockupProposalSetId, mockup.id);
+                  props.onSelect({
+                    type: "mockupPreview",
+                    projectId: mockupProjectId,
+                    proposalSetId: mockupProposalSetId,
+                  });
+                }}
+                type="button"
+              >
+                <Layers3 size={15} />
+                <span className="activity-row-copy">
+                  <strong>
+                    {mockup.label || String.fromCharCode(65 + index)}:{" "}
+                    {mockup.title}
+                  </strong>
+                  <small>{mockup.summary || mockup.filePath}</small>
+                </span>
+              </button>
+            ))
+          ) : (
+            <button
+              className="activity-row"
+              onClick={() =>
+                props.onSelect({
+                  type: "mockupPreview",
+                  projectId: mockupProjectId,
+                  proposalSetId: mockupProposalSetId ?? "",
+                })
+              }
+              type="button"
+            >
+              <Layers3 size={15} />
+              <span>
+                Open saved{" "}
+                {previewArtifactDisplayName(
+                  props.mockupPreviewSet?.artifactKind ?? "mockup",
+                  2,
+                  "lower",
+                )}
+              </span>
+            </button>
+          )}
+        </section>
+      )}
 
       {props.approvals.length > 0 && (
         <section className="activity-section">
@@ -418,14 +449,10 @@ function inspectorTitle(selection: InspectorSelection) {
   switch (selection.type) {
     case "document":
       return selection.title ?? "Document";
-    case "canvas":
-      return "Canvas";
-    case "canvasProposal":
-      return "Canvas";
-    case "canvasSuggestion":
-      return "Canvas";
     case "appPreview":
       return "App Preview";
+    case "mockupPreview":
+      return "Mockup Preview";
     case "planPreview":
       return "App Preview";
     case "command":
@@ -437,16 +464,6 @@ function inspectorTitle(selection: InspectorSelection) {
     default:
       return "Activity";
   }
-}
-
-function isGeneratedCurrentUiDraft(suggestion: CanvasSuggestion | null) {
-  return Boolean(
-    suggestion?.prompt
-      .trimStart()
-      .startsWith(
-        "Inspect this local project and generate a low-fidelity current interface Canvas mockup.",
-      ),
-  );
 }
 
 function isMarkdownPath(path: string) {

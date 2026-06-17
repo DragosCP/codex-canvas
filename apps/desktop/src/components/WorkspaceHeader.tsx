@@ -1,6 +1,5 @@
 import {
   AppWindow,
-  LayoutDashboard,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
@@ -11,8 +10,6 @@ import type { ConnectionStatus, Project, Thread } from "../types";
 
 export function WorkspaceHeader(props: {
   activeProject: Project | null;
-  activeCanvasDraft: boolean;
-  activeCanvasSelected: boolean;
   activeAppPreviewSelected: boolean;
   activeThread: Thread | null;
   hasActiveProject: boolean;
@@ -21,7 +18,6 @@ export function WorkspaceHeader(props: {
   backendLabel: string;
   inspectorOpen: boolean;
   onOpenAppPreview: () => void;
-  onOpenCanvas: () => void;
   onOpenSidebar: () => void;
   onToggleInspector: () => void;
 }) {
@@ -67,29 +63,12 @@ export function WorkspaceHeader(props: {
           aria-pressed={props.activeAppPreviewSelected}
           title={
             props.activeProject
-              ? "Open app preview"
-              : "Select a project before opening App Preview"
+              ? "Open live preview"
+              : "Select a project before opening live preview"
           }
           type="button"
         >
           <AppWindow size={18} />
-        </button>
-        <button
-          className={`icon-button canvas-toggle ${
-            props.activeCanvasSelected ? "active" : ""
-          } ${props.activeCanvasDraft ? "draft" : ""}`}
-          onClick={props.onOpenCanvas}
-          disabled={!props.activeProject}
-          aria-pressed={props.activeCanvasSelected}
-          title={
-            props.activeCanvasDraft
-              ? "Canvas draft is open"
-              : props.activeProject
-              ? "Open project canvas"
-              : "Select a project before opening Canvas"
-          }
-        >
-          <LayoutDashboard size={18} />
         </button>
         <button
           className={`icon-button inspector-toggle ${

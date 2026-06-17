@@ -1,4 +1,10 @@
-import { useEffect, useRef, useState } from "react";
+import {
+  type MouseEvent as ReactMouseEvent,
+  useEffect,
+  useRef,
+  useState,
+} from "react";
+import { createPortal } from "react-dom";
 import {
   Archive,
   Check,
@@ -23,6 +29,7 @@ import {
   X,
   Zap,
 } from "lucide-react";
+import { previewArtifactDisplayName, previewArtifactKindFromText } from "../mockupArtifacts";
 import { connectionVerb, type RuntimeInfo } from "../runtime";
 import { threadTitle } from "../itemUtils";
 import type {
@@ -44,6 +51,16 @@ type Confirmation =
   | { type: "archiveThread"; threadId: string }
   | { type: "archiveProject"; projectId: string }
   | { type: "removeProject"; projectId: string };
+
+type ProjectMenuPosition = {
+  left: number;
+  top: number;
+};
+
+const PROJECT_MENU_WIDTH = 190;
+const PROJECT_MENU_HEIGHT = 164;
+const PROJECT_MENU_GAP = 6;
+const PROJECT_MENU_MARGIN = 8;
 
 export function ProjectSidebar(props: {
   activeDraftProjectId: string | null;
@@ -92,6 +109,8 @@ export function ProjectSidebar(props: {
   const [openProjectMenuId, setOpenProjectMenuId] = useState<string | null>(
     null,
   );
+  const [projectMenuPosition, setProjectMenuPosition] =
+    useState<ProjectMenuPosition | null>(null);
   const [editingProjectId, setEditingProjectId] = useState<string | null>(null);
   const [projectDraftName, setProjectDraftName] = useState("");
   const [editingThreadId, setEditingThreadId] = useState<string | null>(null);
@@ -122,8 +141,46 @@ export function ProjectSidebar(props: {
     return () => document.removeEventListener("mousedown", closeSettings);
   }, [settingsOpen]);
 
+  useEffect(() => {
+    if (!addMenuOpen && !openProjectMenuId && !confirming) return;
+
+    function closeMenus(event: MouseEvent) {
+      const target = event.target as Element | null;
+      if (target?.closest("[data-sidebar-menu-root]")) return;
+      setAddMenuOpen(false);
+      setOpenProjectMenuId(null);
+      setProjectMenuPosition(null);
+      setConfirming(null);
+    }
+
+    function closeOnEscape(event: KeyboardEvent) {
+      if (event.key !== "Escape") return;
+      setAddMenuOpen(false);
+      setOpenProjectMenuId(null);
+      setProjectMenuPosition(null);
+      setConfirming(null);
+    }
+
+    function closeFloatingMenus() {
+      setOpenProjectMenuId(null);
+      setProjectMenuPosition(null);
+    }
+
+    document.addEventListener("mousedown", closeMenus);
+    document.addEventListener("keydown", closeOnEscape);
+    window.addEventListener("resize", closeFloatingMenus);
+    document.addEventListener("scroll", closeFloatingMenus, true);
+    return () => {
+      document.removeEventListener("mousedown", closeMenus);
+      document.removeEventListener("keydown", closeOnEscape);
+      window.removeEventListener("resize", closeFloatingMenus);
+      document.removeEventListener("scroll", closeFloatingMenus, true);
+    };
+  }, [addMenuOpen, confirming, openProjectMenuId]);
+
   function beginProjectRename(project: Project) {
     setOpenProjectMenuId(null);
+    setProjectMenuPosition(null);
     setEditingProjectId(project.id);
     setProjectDraftName(project.name);
   }
@@ -138,7 +195,7 @@ export function ProjectSidebar(props: {
 
   function beginThreadRename(thread: Thread) {
     setEditingThreadId(thread.id);
-    setThreadDraftName(threadTitle(thread));
+    setThreadDraftName(sidebarThreadTitle(thread));
   }
 
   function finishThreadRename(threadId: string) {
@@ -158,17 +215,44 @@ export function ProjectSidebar(props: {
     props.onArchiveProjectChats(project);
     setConfirming(null);
     setOpenProjectMenuId(null);
+    setProjectMenuPosition(null);
   }
 
   function confirmRemoveProject(projectId: string) {
     props.onRemoveProject(projectId);
     setConfirming(null);
     setOpenProjectMenuId(null);
+    setProjectMenuPosition(null);
   }
 
   function requestProjectConfirmation(confirmation: Confirmation) {
     setConfirming(confirmation);
     setOpenProjectMenuId(null);
+    setProjectMenuPosition(null);
+  }
+
+  function toggleProjectMenu(
+    projectId: string,
+    event: ReactMouseEvent<HTMLButtonElement>,
+  ) {
+    const rect = event.currentTarget.getBoundingClientRect();
+    const open = openProjectMenuId !== projectId;
+    const left = Math.min(
+      window.innerWidth - PROJECT_MENU_WIDTH - PROJECT_MENU_MARGIN,
+      Math.max(PROJECT_MENU_MARGIN, rect.right - PROJECT_MENU_WIDTH),
+    );
+    const hasRoomBelow =
+      rect.bottom + PROJECT_MENU_GAP + PROJECT_MENU_HEIGHT <=
+      window.innerHeight;
+    const top = hasRoomBelow
+      ? rect.bottom + PROJECT_MENU_GAP
+      : Math.max(
+          PROJECT_MENU_MARGIN,
+          rect.top - PROJECT_MENU_HEIGHT - PROJECT_MENU_GAP,
+        );
+    setConfirming(null);
+    setProjectMenuPosition(open ? { left, top } : null);
+    setOpenProjectMenuId(open ? projectId : null);
   }
 
   async function logout() {
@@ -181,572 +265,667 @@ export function ProjectSidebar(props: {
     }
   }
 
+  const openProjectMenuGroup = openProjectMenuId
+    ? (props.projectThreadGroups.find(
+        (group) => group.project.id === openProjectMenuId,
+      ) ?? null)
+    : null;
+
   return (
-    <aside className="sidebar">
-      <header className="sidebar-header">
-        <div>
-          <strong>Codex</strong>
-          <span title={props.runtime.backendLabel}>Local projects</span>
-        </div>
-        <button
-          className="icon-button small"
-          onClick={props.onConnect}
-          disabled={connecting}
-          title={props.connectionError ?? props.runtime.backendLabel}
-        >
-          {connecting ? (
-            <Loader2 className="spin" size={15} />
-          ) : (
-            <Zap size={15} />
-          )}
-        </button>
-      </header>
-
-      <button
-        className="sidebar-primary"
-        onClick={() => props.onStartThread()}
-        disabled={false}
-        title={
-          props.activeProject
-            ? "Start a new draft in this project"
-            : "Select or add a project first"
-        }
-      >
-        <Plus size={16} /> New Chat
-      </button>
-
-      <div className="sidebar-search">
-        <Search size={14} />
-        <input
-          value={props.threadSearch}
-          onChange={(event) => props.onThreadSearchChange(event.target.value)}
-          placeholder="Filter visible projects and chats"
-          title="Filters the projects and chats already visible in this sidebar"
-        />
-      </div>
-
-      <div className={`connection-pill ${props.connectionStatus}`}>
-        <span />
-        {connectionVerb(props.connectionStatus)}
-      </div>
-
-      {props.actionError && (
-        <p className="sidebar-error">{props.actionError}</p>
-      )}
-
-      {!props.activeProject && (
-        <p className="sidebar-guidance">
-          Select or add a project to start a chat.
-        </p>
-      )}
-
-      <section className="sidebar-section projects-section">
-        <div className="section-title-row projects-title">
-          <p className="sidebar-label">Projects</p>
-          <div className="menu-anchor">
-            <button
-              className="icon-button mini project-add-button"
-              onClick={() => setAddMenuOpen((value) => !value)}
-              title="Add project"
-            >
-              <FolderPlus size={13} />
-            </button>
-            {addMenuOpen && (
-              <div className="sidebar-menu add-project-menu">
-                <button
-                  disabled
-                  title="Deferred: current desktop projects need a local folder."
-                >
-                  <FilePlus2 size={14} />
-                  <span>Start from scratch</span>
-                </button>
-                <button
-                  onClick={async () => {
-                    const picked = await props.onPickProjectFolder();
-                    setAddingProject(!picked);
-                    setAddMenuOpen(false);
-                  }}
-                >
-                  <FolderOpen size={14} />
-                  <span>Use existing folder</span>
-                </button>
-              </div>
-            )}
+    <>
+      <aside className="sidebar">
+        <header className="sidebar-header">
+          <div>
+            <strong>Codex</strong>
+            <span title={props.runtime.backendLabel}>Local projects</span>
           </div>
+          <button
+            className="icon-button small"
+            onClick={props.onConnect}
+            disabled={connecting}
+            title={props.connectionError ?? props.runtime.backendLabel}
+          >
+            {connecting ? (
+              <Loader2 className="spin" size={15} />
+            ) : (
+              <Zap size={15} />
+            )}
+          </button>
+        </header>
+
+        <button
+          className="sidebar-primary"
+          onClick={() => props.onStartThread()}
+          disabled={false}
+          title={
+            props.activeProject
+              ? "Start a new draft in this project"
+              : "Select or add a project first"
+          }
+        >
+          <Plus size={16} /> New Chat
+        </button>
+
+        <div className="sidebar-search">
+          <Search size={14} />
+          <input
+            value={props.threadSearch}
+            onChange={(event) => props.onThreadSearchChange(event.target.value)}
+            placeholder="Filter visible projects and chats"
+            title="Filters the projects and chats already visible in this sidebar"
+          />
         </div>
 
-        {addingProject && (
-          <label className="path-adder">
-            <span>Local folder</span>
-            <div>
-              <input
-                value={props.projectPath}
-                onChange={(event) =>
-                  props.onProjectPathChange(event.target.value)
-                }
-                placeholder={props.runtime.projectPathHint}
-              />
-              <button
-                className="icon-button small"
-                onClick={() => {
-                  props.onAddProject();
-                  if (props.projectPath.trim()) setAddingProject(false);
-                }}
-                title="Add folder path"
-              >
-                <Plus size={15} />
-              </button>
-            </div>
-          </label>
+        <div className={`connection-pill ${props.connectionStatus}`}>
+          <span />
+          {connectionVerb(props.connectionStatus)}
+        </div>
+
+        {props.actionError && (
+          <p className="sidebar-error">{props.actionError}</p>
         )}
 
-        <div className="project-list">
-          {props.projectThreadGroups.length === 0 && (
-            <div className="empty-sidebar-state">
-              <MessageSquare size={16} />
-              <span>
-                {props.threadSearch.trim()
-                  ? "No visible matches"
-                  : "No projects yet"}
-              </span>
-              <small>
-                {props.threadSearch.trim()
-                  ? "Search filters only loaded sidebar rows."
-                  : "Use the folder button above to add one."}
-              </small>
-            </div>
-          )}
-          {props.projectThreadGroups.map(({ project, threads, draft }) => {
-            const expanded = props.expandedProjectIds.includes(project.id);
-            const visibleThreads = threads.slice(0, expanded ? 10 : 5);
-            const hasRows = Boolean(draft) || visibleThreads.length > 0;
-            const hiddenThreadCount = Math.max(
-              0,
-              threads.length - visibleThreads.length,
-            );
-            return (
-              <div key={project.id} className="project-block">
-                {editingProjectId === project.id ? (
-                  <form
-                    className="project-rename"
-                    onSubmit={(event) => {
-                      event.preventDefault();
-                      finishProjectRename(project.id);
+        {!props.activeProject && (
+          <p className="sidebar-guidance">
+            Select or add a project to start a chat.
+          </p>
+        )}
+
+        <section className="sidebar-section projects-section">
+          <div className="section-title-row projects-title">
+            <p className="sidebar-label">Projects</p>
+            <div className="menu-anchor" data-sidebar-menu-root>
+              <button
+                className="icon-button mini project-add-button"
+                onClick={() => setAddMenuOpen((value) => !value)}
+                title="Add project"
+              >
+                <FolderPlus size={13} />
+              </button>
+              {addMenuOpen && (
+                <div className="sidebar-menu add-project-menu">
+                  <button
+                    disabled
+                    title="Deferred: current desktop projects need a local folder."
+                  >
+                    <FilePlus2 size={14} />
+                    <span>Start from scratch</span>
+                  </button>
+                  <button
+                    onClick={async () => {
+                      const picked = await props.onPickProjectFolder();
+                      setAddingProject(!picked);
+                      setAddMenuOpen(false);
                     }}
                   >
-                    <input
-                      autoFocus
-                      value={projectDraftName}
-                      onChange={(event) =>
-                        setProjectDraftName(event.target.value)
-                      }
-                      onKeyDown={(event) => {
-                        if (event.key === "Escape") {
-                          setEditingProjectId(null);
-                          setProjectDraftName("");
-                        }
+                    <FolderOpen size={14} />
+                    <span>Use existing folder</span>
+                  </button>
+                </div>
+              )}
+            </div>
+          </div>
+
+          {addingProject && (
+            <label className="path-adder">
+              <span>Local folder</span>
+              <div>
+                <input
+                  value={props.projectPath}
+                  onChange={(event) =>
+                    props.onProjectPathChange(event.target.value)
+                  }
+                  placeholder={props.runtime.projectPathHint}
+                />
+                <button
+                  className="icon-button small"
+                  onClick={() => {
+                    props.onAddProject();
+                    if (props.projectPath.trim()) setAddingProject(false);
+                  }}
+                  title="Add folder path"
+                >
+                  <Plus size={15} />
+                </button>
+              </div>
+            </label>
+          )}
+
+          <div className="project-list">
+            {props.projectThreadGroups.length === 0 && (
+              <div className="empty-sidebar-state">
+                <MessageSquare size={16} />
+                <span>
+                  {props.threadSearch.trim()
+                    ? "No visible matches"
+                    : "No projects yet"}
+                </span>
+                <small>
+                  {props.threadSearch.trim()
+                    ? "Search filters only loaded sidebar rows."
+                    : "Use the folder button above to add one."}
+                </small>
+              </div>
+            )}
+            {props.projectThreadGroups.map(({ project, threads, draft }) => {
+              const expanded = props.expandedProjectIds.includes(project.id);
+              const visibleThreads = threads.slice(0, expanded ? 10 : 5);
+              const hasRows = Boolean(draft) || visibleThreads.length > 0;
+              const hiddenThreadCount = Math.max(
+                0,
+                threads.length - visibleThreads.length,
+              );
+              return (
+                <div key={project.id} className="project-block">
+                  {editingProjectId === project.id ? (
+                    <form
+                      className="project-rename"
+                      onSubmit={(event) => {
+                        event.preventDefault();
+                        finishProjectRename(project.id);
                       }}
-                    />
-                    <button
-                      className="icon-button mini"
-                      title="Save project name"
                     >
-                      <Check size={13} />
-                    </button>
-                  </form>
-                ) : (
-                  <>
-                    <div className="project-row-wrap">
+                      <input
+                        autoFocus
+                        value={projectDraftName}
+                        onChange={(event) =>
+                          setProjectDraftName(event.target.value)
+                        }
+                        onKeyDown={(event) => {
+                          if (event.key === "Escape") {
+                            setEditingProjectId(null);
+                            setProjectDraftName("");
+                          }
+                        }}
+                      />
                       <button
-                        className="project-row"
-                        onClick={() => props.onSelectProject(project)}
-                        title={project.path}
+                        className="icon-button mini"
+                        title="Save project name"
                       >
-                        <Folder size={14} />
-                        <span>{project.name}</span>
-                        {project.pinned && <Pin size={11} />}
+                        <Check size={13} />
                       </button>
-                      <div className="project-actions">
+                    </form>
+                  ) : (
+                    <>
+                      <div className="project-row-wrap">
                         <button
-                          className="icon-button mini"
-                          onClick={() => props.onStartThread(project)}
-                          title="Start new chat draft"
+                          className="project-row"
+                          onClick={() => props.onSelectProject(project)}
+                          title={project.path}
                         >
-                          <Plus size={13} />
+                          <Folder size={14} />
+                          <span>{project.name}</span>
+                          {project.pinned && <Pin size={11} />}
                         </button>
-                        <div className="menu-anchor">
+                        <div className="project-actions">
                           <button
                             className="icon-button mini"
-                            onClick={() =>
-                              setOpenProjectMenuId((current) =>
-                                current === project.id ? null : project.id,
-                              )
-                            }
-                            title="Project actions"
+                            onClick={() => props.onStartThread(project)}
+                            title="Start new chat draft"
                           >
-                            <MoreHorizontal size={14} />
+                            <Plus size={13} />
                           </button>
-                          {openProjectMenuId === project.id && (
-                            <div className="sidebar-menu project-menu">
-                              <button
-                                onClick={() =>
-                                  props.updateProject(project.id, (item) => ({
-                                    ...item,
-                                    pinned: !item.pinned,
-                                  }))
-                                }
-                              >
-                                {project.pinned ? (
-                                  <PinOff size={14} />
-                                ) : (
-                                  <Pin size={14} />
-                                )}
-                                <span>
-                                  {project.pinned
-                                    ? "Unpin project"
-                                    : "Pin project"}
-                                </span>
-                              </button>
-                              <button
-                                disabled
-                                title="Deferred until the desktop file-manager bridge is wired."
-                              >
-                                <FolderOpen size={14} />
-                                <span>Open in Explorer</span>
-                              </button>
-                              <button
-                                onClick={() => beginProjectRename(project)}
-                              >
-                                <Edit3 size={14} />
-                                <span>Rename project</span>
-                              </button>
-                              <button
-                                onClick={() =>
-                                  requestProjectConfirmation({
-                                    type: "archiveProject",
-                                    projectId: project.id,
-                                  })
-                                }
-                                disabled={threads.length === 0}
-                              >
-                                <Archive size={14} />
-                                <span>Archive chats</span>
-                              </button>
-                              <button
-                                onClick={() =>
-                                  requestProjectConfirmation({
-                                    type: "removeProject",
-                                    projectId: project.id,
-                                  })
-                                }
-                              >
-                                <X size={14} />
-                                <span>Remove</span>
-                              </button>
-                            </div>
-                          )}
+                          <div className="menu-anchor" data-sidebar-menu-root>
+                            <button
+                              className="icon-button mini"
+                              onClick={(event) =>
+                                toggleProjectMenu(project.id, event)
+                              }
+                              title="Project actions"
+                            >
+                              <MoreHorizontal size={14} />
+                            </button>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    {confirming?.type === "archiveProject" &&
-                      confirming.projectId === project.id && (
-                        <div className="confirm-popover project-confirm">
-                          <div className="project-confirm-copy">
-                            <span>Archive chats</span>
-                            <small>
-                              Visible chats move out of this project list.
-                            </small>
+                      {confirming?.type === "archiveProject" &&
+                        confirming.projectId === project.id && (
+                          <div
+                            className="confirm-popover project-confirm"
+                            data-sidebar-menu-root
+                          >
+                            <div className="project-confirm-copy">
+                              <span>Archive chats</span>
+                              <small>
+                                Visible chats move out of this project list.
+                              </small>
+                            </div>
+                            <div className="project-confirm-actions">
+                              <button
+                                type="button"
+                                onClick={() => setConfirming(null)}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => confirmArchiveProject(project)}
+                              >
+                                Archive
+                              </button>
+                            </div>
                           </div>
-                          <div className="project-confirm-actions">
-                            <button onClick={() => setConfirming(null)}>
-                              Cancel
-                            </button>
-                            <button
-                              className="danger"
-                              onClick={() => confirmArchiveProject(project)}
-                            >
-                              Archive
-                            </button>
+                        )}
+                      {confirming?.type === "removeProject" &&
+                        confirming.projectId === project.id && (
+                          <div
+                            className="confirm-popover project-confirm"
+                            data-sidebar-menu-root
+                          >
+                            <div className="project-confirm-copy">
+                              <span>Remove from list</span>
+                              <small>
+                                Chats stay saved. Re-adding this folder will
+                                show them again.
+                              </small>
+                            </div>
+                            <div className="project-confirm-actions">
+                              <button
+                                type="button"
+                                onClick={() => setConfirming(null)}
+                              >
+                                Cancel
+                              </button>
+                              <button
+                                type="button"
+                                className="danger"
+                                onClick={() => confirmRemoveProject(project.id)}
+                              >
+                                Remove
+                              </button>
+                            </div>
                           </div>
-                        </div>
-                      )}
-                    {confirming?.type === "removeProject" &&
-                      confirming.projectId === project.id && (
-                        <div className="confirm-popover project-confirm">
-                          <div className="project-confirm-copy">
-                            <span>Remove project</span>
-                            <small>Only the sidebar item is removed.</small>
-                          </div>
-                          <div className="project-confirm-actions">
-                            <button onClick={() => setConfirming(null)}>
-                              Cancel
-                            </button>
-                            <button
-                              className="danger"
-                              onClick={() => confirmRemoveProject(project.id)}
-                            >
-                              Remove
-                            </button>
-                          </div>
-                        </div>
-                      )}
-                  </>
-                )}
-
-                <div className="project-thread-list">
-                  {!hasRows && (
-                    <p className="empty-project-chats">No chats yet</p>
+                        )}
+                    </>
                   )}
-                  {draft && (
-                    <div
-                      key={draft.id}
-                      className={`thread-stack draft-thread ${
-                        props.activeDraftProjectId === project.id
-                          ? "active"
-                          : ""
-                      }`}
-                    >
+
+                  <div className="project-thread-list">
+                    {!hasRows && (
+                      <p className="empty-project-chats">No chats yet</p>
+                    )}
+                    {draft && (
                       <div
-                        className={`thread-row-wrap draft-row-wrap ${
+                        key={draft.id}
+                        className={`thread-stack draft-thread ${
                           props.activeDraftProjectId === project.id
                             ? "active"
                             : ""
                         }`}
                       >
-                        <span className="thread-draft-gutter" />
-                        <button
-                          className="thread-row"
-                          onClick={() => props.onSelectDraft(project)}
-                          title="Unsent new chat draft"
-                        >
-                          <MessageSquare size={12} />
-                          <span>New chat</span>
-                        </button>
-                        <div className="thread-row-meta">
-                          <small className="thread-time">
-                            {draft.text.trim() ||
-                            draft.attachments.length > 0 ||
-                            (draft.contexts?.length ?? 0) > 0
-                              ? formatRelative(draft.updatedAt)
-                              : "Draft"}
-                          </small>
-                        </div>
-                      </div>
-                    </div>
-                  )}
-                  {visibleThreads.map((thread) => {
-                    const pinned = pinnedThreads.has(thread.id);
-                    const active = props.activeThreadId === thread.id;
-                    const running = thread.status.type === "active";
-                    return (
-                      <div key={thread.id} className="thread-stack">
                         <div
-                          className={`thread-row-wrap ${active ? "active" : ""} ${
-                            pinned ? "pinned" : ""
+                          className={`thread-row-wrap draft-row-wrap ${
+                            props.activeDraftProjectId === project.id
+                              ? "active"
+                              : ""
                           }`}
                         >
+                          <span className="thread-draft-gutter" />
                           <button
-                            className="icon-button mini thread-pin-action"
-                            onClick={() =>
-                              props.onTogglePinnedThread(thread.id)
-                            }
-                            title={pinned ? "Unpin chat" : "Pin chat"}
+                            className="thread-row"
+                            onClick={() => props.onSelectDraft(project)}
+                            title="Unsent new chat draft"
                           >
-                            {pinned ? <PinOff size={12} /> : <Pin size={12} />}
+                            <MessageSquare size={12} />
+                            <span>New chat</span>
                           </button>
-                          {editingThreadId === thread.id ? (
-                            <form
-                              className="thread-rename"
-                              onSubmit={(event) => {
-                                event.preventDefault();
-                                finishThreadRename(thread.id);
-                              }}
-                            >
-                              <input
-                                autoFocus
-                                value={threadDraftName}
-                                onChange={(event) =>
-                                  setThreadDraftName(event.target.value)
-                                }
-                                onKeyDown={(event) => {
-                                  if (event.key === "Escape") {
-                                    setEditingThreadId(null);
-                                    setThreadDraftName("");
-                                  }
-                                }}
-                              />
-                              <button
-                                className="icon-button mini"
-                                title="Save name"
-                              >
-                                <Check size={13} />
-                              </button>
-                            </form>
-                          ) : (
-                            <button
-                              className="thread-row"
-                              onClick={() =>
-                                props.onSelectThread(thread.id, project)
-                              }
-                              onDoubleClick={() => beginThreadRename(thread)}
-                              title={`${threadTitle(thread)}. Double-click to rename.`}
-                            >
-                              {running && (
-                                <Loader2 className="spin" size={12} />
-                              )}
-                              <span>{threadTitle(thread)}</span>
-                            </button>
-                          )}
                           <div className="thread-row-meta">
                             <small className="thread-time">
-                              {formatRelative(thread.updatedAt)}
+                              {draft.text.trim() ||
+                              draft.attachments.length > 0 ||
+                              (draft.contexts?.length ?? 0) > 0
+                                ? formatRelative(draft.updatedAt)
+                                : "Draft"}
                             </small>
-                            <button
-                              className="icon-button mini thread-archive-action"
-                              onClick={() =>
-                                setConfirming({
-                                  type: "archiveThread",
-                                  threadId: thread.id,
-                                })
-                              }
-                              title="Archive chat"
-                            >
-                              <Archive size={12} />
-                            </button>
                           </div>
                         </div>
-                        {confirming?.type === "archiveThread" &&
-                          confirming.threadId === thread.id && (
-                            <div className="confirm-popover thread-confirm">
-                              <span>You sure?</span>
-                              <button
-                                onClick={() =>
-                                  confirmArchiveThread(thread.id, project)
-                                }
+                      </div>
+                    )}
+                    {visibleThreads.map((thread) => {
+                      const pinned = pinnedThreads.has(thread.id);
+                      const active = props.activeThreadId === thread.id;
+                      const running = thread.status.type === "active";
+                      const title = sidebarThreadTitle(thread);
+                      return (
+                        <div key={thread.id} className="thread-stack">
+                          <div
+                            className={`thread-row-wrap ${active ? "active" : ""} ${
+                              pinned ? "pinned" : ""
+                            }`}
+                          >
+                            <button
+                              className="icon-button mini thread-pin-action"
+                              onClick={() =>
+                                props.onTogglePinnedThread(thread.id)
+                              }
+                              title={pinned ? "Unpin chat" : "Pin chat"}
+                            >
+                              {pinned ? (
+                                <PinOff size={12} />
+                              ) : (
+                                <Pin size={12} />
+                              )}
+                            </button>
+                            {editingThreadId === thread.id ? (
+                              <form
+                                className="thread-rename"
+                                onSubmit={(event) => {
+                                  event.preventDefault();
+                                  finishThreadRename(thread.id);
+                                }}
                               >
-                                Archive
+                                <input
+                                  autoFocus
+                                  value={threadDraftName}
+                                  onChange={(event) =>
+                                    setThreadDraftName(event.target.value)
+                                  }
+                                  onKeyDown={(event) => {
+                                    if (event.key === "Escape") {
+                                      setEditingThreadId(null);
+                                      setThreadDraftName("");
+                                    }
+                                  }}
+                                />
+                                <button
+                                  className="icon-button mini"
+                                  title="Save name"
+                                >
+                                  <Check size={13} />
+                                </button>
+                              </form>
+                            ) : (
+                              <button
+                                className="thread-row"
+                                onClick={() =>
+                                  props.onSelectThread(thread.id, project)
+                                }
+                                onDoubleClick={() => beginThreadRename(thread)}
+                                title={`${title}. Double-click to rename.`}
+                              >
+                                {running && (
+                                  <Loader2 className="spin" size={12} />
+                                )}
+                                <span>{title}</span>
                               </button>
-                              <button onClick={() => setConfirming(null)}>
-                                Cancel
+                            )}
+                            <div className="thread-row-meta">
+                              <small className="thread-time">
+                                {formatRelative(thread.updatedAt)}
+                              </small>
+                              <button
+                                className="icon-button mini thread-archive-action"
+                                onClick={() =>
+                                  setConfirming({
+                                    type: "archiveThread",
+                                    threadId: thread.id,
+                                  })
+                                }
+                                title="Archive chat"
+                              >
+                                <Archive size={12} />
                               </button>
                             </div>
-                          )}
-                      </div>
-                    );
-                  })}
-                  {threads.length > 5 && (
-                    <button
-                      className="show-more-row"
-                      onClick={() => props.onToggleProjectExpanded(project.id)}
-                      title={
-                        expanded
-                          ? "Show only the latest 5 chats"
-                          : `Show 5 more chats${hiddenThreadCount > 5 ? "; older chats stay hidden" : ""}`
-                      }
-                    >
-                      {expanded ? "Show less" : "Show more"}
-                    </button>
-                  )}
-                </div>
-              </div>
-            );
-          })}
-        </div>
-      </section>
-
-      <div className="settings-area" ref={settingsAreaRef}>
-        {settingsOpen && (
-          <div className="settings-popover">
-            <div className="settings-popover-row account-row">
-              <UserCircle size={15} />
-              <span title={account.title}>{account.title}</span>
-            </div>
-            <div className="settings-popover-row account-row muted-row">
-              <Settings size={15} />
-              <span>{account.detail}</span>
-            </div>
-            <div className="settings-menu-divider" />
-            <div className="settings-popover-row">
-              <Settings size={15} />
-              <span>Settings</span>
-            </div>
-            {usageRows.length > 0 && (
-              <>
-                <div className="settings-menu-divider" />
-                <button
-                  className="settings-popover-row"
-                  onClick={() => setUsageOpen((value) => !value)}
-                >
-                  <Gauge size={15} />
-                  <span>Usage remaining</span>
-                  {usageOpen ? (
-                    <ChevronDown size={14} />
-                  ) : (
-                    <ChevronRight size={14} />
-                  )}
-                </button>
-                {usageOpen && (
-                  <div className="usage-summary">
-                    {usageRows.map((row) => (
-                      <div className="usage-summary-row" key={row.label}>
-                        <strong>{row.label}</strong>
-                        <span>{row.remaining}</span>
-                        {row.reset && <span>{row.reset}</span>}
-                      </div>
-                    ))}
+                          </div>
+                          {confirming?.type === "archiveThread" &&
+                            confirming.threadId === thread.id && (
+                              <div
+                                className="confirm-popover thread-confirm"
+                                data-sidebar-menu-root
+                              >
+                                <span>You sure?</span>
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    confirmArchiveThread(thread.id, project)
+                                  }
+                                >
+                                  Archive
+                                </button>
+                                <button
+                                  type="button"
+                                  onClick={() => setConfirming(null)}
+                                >
+                                  Cancel
+                                </button>
+                              </div>
+                            )}
+                        </div>
+                      );
+                    })}
+                    {threads.length > 5 && (
+                      <button
+                        className="show-more-row"
+                        onClick={() =>
+                          props.onToggleProjectExpanded(project.id)
+                        }
+                        title={
+                          expanded
+                            ? "Show only the latest 5 chats"
+                            : `Show 5 more chats${hiddenThreadCount > 5 ? "; older chats stay hidden" : ""}`
+                        }
+                      >
+                        {expanded ? "Show less" : "Show more"}
+                      </button>
+                    )}
                   </div>
-                )}
-              </>
-            )}
-            {canLogin && (
-              <>
-                <div className="settings-menu-divider" />
-                <button
-                  className="settings-popover-row"
-                  onClick={() => {
-                    setSettingsOpen(false);
-                    props.onOpenAuth();
-                  }}
-                  disabled={props.connectionStatus !== "connected"}
-                >
-                  <UserCircle size={15} />
-                  <span>Sign in</span>
-                </button>
-              </>
-            )}
-            {canLogout && (
-              <>
-                <div className="settings-menu-divider" />
-                <button
-                  className="settings-popover-row"
-                  onClick={() => void logout()}
-                  disabled={
-                    logoutBusy || props.connectionStatus !== "connected"
-                  }
-                >
-                  {logoutBusy ? (
-                    <Loader2 className="spin" size={15} />
-                  ) : (
-                    <LogOut size={15} />
-                  )}
-                  <span>Log out</span>
-                </button>
-              </>
-            )}
+                </div>
+              );
+            })}
           </div>
+        </section>
+
+        <div className="settings-area" ref={settingsAreaRef}>
+          {settingsOpen && (
+            <div className="settings-popover">
+              <div className="settings-popover-row account-row">
+                <UserCircle size={15} />
+                <span title={account.title}>{account.title}</span>
+              </div>
+              <div className="settings-popover-row account-row muted-row">
+                <Settings size={15} />
+                <span>{account.detail}</span>
+              </div>
+              <div className="settings-menu-divider" />
+              <div className="settings-popover-row">
+                <Settings size={15} />
+                <span>Settings</span>
+              </div>
+              {usageRows.length > 0 && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <button
+                    className="settings-popover-row"
+                    onClick={() => setUsageOpen((value) => !value)}
+                  >
+                    <Gauge size={15} />
+                    <span>Usage remaining</span>
+                    {usageOpen ? (
+                      <ChevronDown size={14} />
+                    ) : (
+                      <ChevronRight size={14} />
+                    )}
+                  </button>
+                  {usageOpen && (
+                    <div className="usage-summary">
+                      {usageRows.map((row) => (
+                        <div className="usage-summary-row" key={row.label}>
+                          <strong>{row.label}</strong>
+                          <span>{row.remaining}</span>
+                          {row.reset && <span>{row.reset}</span>}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </>
+              )}
+              {canLogin && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <button
+                    className="settings-popover-row"
+                    onClick={() => {
+                      setSettingsOpen(false);
+                      props.onOpenAuth();
+                    }}
+                    disabled={props.connectionStatus !== "connected"}
+                  >
+                    <UserCircle size={15} />
+                    <span>Sign in</span>
+                  </button>
+                </>
+              )}
+              {canLogout && (
+                <>
+                  <div className="settings-menu-divider" />
+                  <button
+                    className="settings-popover-row"
+                    onClick={() => void logout()}
+                    disabled={
+                      logoutBusy || props.connectionStatus !== "connected"
+                    }
+                  >
+                    {logoutBusy ? (
+                      <Loader2 className="spin" size={15} />
+                    ) : (
+                      <LogOut size={15} />
+                    )}
+                    <span>Log out</span>
+                  </button>
+                </>
+              )}
+            </div>
+          )}
+          <button
+            className={`settings-link ${settingsOpen ? "active" : ""}`}
+            onClick={() => {
+              setAddMenuOpen(false);
+              setOpenProjectMenuId(null);
+              setSettingsOpen((value) => !value);
+            }}
+          >
+            <Settings size={15} /> Settings
+          </button>
+        </div>
+      </aside>
+      {openProjectMenuGroup &&
+        projectMenuPosition &&
+        createPortal(
+          <ProjectActionsMenu
+            project={openProjectMenuGroup.project}
+            threadCount={openProjectMenuGroup.threads.length}
+            left={projectMenuPosition.left}
+            top={projectMenuPosition.top}
+            onRename={beginProjectRename}
+            onRequestConfirmation={requestProjectConfirmation}
+            onTogglePinned={(project) =>
+              props.updateProject(project.id, (item) => ({
+                ...item,
+                pinned: !item.pinned,
+              }))
+            }
+          />,
+          document.body,
         )}
-        <button
-          className={`settings-link ${settingsOpen ? "active" : ""}`}
-          onClick={() => {
-            setAddMenuOpen(false);
-            setOpenProjectMenuId(null);
-            setSettingsOpen((value) => !value);
-          }}
-        >
-          <Settings size={15} /> Settings
-        </button>
-      </div>
-    </aside>
+    </>
+  );
+}
+
+function ProjectActionsMenu(props: {
+  left: number;
+  onRename: (project: Project) => void;
+  onRequestConfirmation: (confirmation: Confirmation) => void;
+  onTogglePinned: (project: Project) => void;
+  project: Project;
+  threadCount: number;
+  top: number;
+}) {
+  return (
+    <div
+      className="sidebar-menu project-menu floating-project-menu"
+      data-sidebar-menu-root
+      style={{
+        left: `${props.left}px`,
+        top: `${props.top}px`,
+        width: `${PROJECT_MENU_WIDTH}px`,
+      }}
+    >
+      <button onClick={() => props.onTogglePinned(props.project)}>
+        {props.project.pinned ? <PinOff size={14} /> : <Pin size={14} />}
+        <span>{props.project.pinned ? "Unpin project" : "Pin project"}</span>
+      </button>
+      <button
+        disabled
+        title="Deferred until the desktop file-manager bridge is wired."
+      >
+        <FolderOpen size={14} />
+        <span>Open in Explorer</span>
+      </button>
+      <button onClick={() => props.onRename(props.project)}>
+        <Edit3 size={14} />
+        <span>Rename project</span>
+      </button>
+      <button
+        onClick={() =>
+          props.onRequestConfirmation({
+            type: "archiveProject",
+            projectId: props.project.id,
+          })
+        }
+        disabled={props.threadCount === 0}
+      >
+        <Archive size={14} />
+        <span>Archive chats</span>
+      </button>
+      <button
+        onClick={() =>
+          props.onRequestConfirmation({
+            type: "removeProject",
+            projectId: props.project.id,
+          })
+        }
+      >
+        <X size={14} />
+        <span>Remove from list</span>
+      </button>
+    </div>
+  );
+}
+
+function sidebarThreadTitle(thread: Thread) {
+  return scrubInternalSidebarTitle(threadTitle(thread));
+}
+
+function scrubInternalSidebarTitle(title: string) {
+  if (title.includes("[Codex Saved Mockup Review Context]")) {
+    return `Review saved ${sidebarArtifactLabel(title, 2)}`;
+  }
+  if (title.includes("[Codex Empty Project Visual Planning Context]")) {
+    return "Start with visual options";
+  }
+  if (title.includes("[Codex Existing App Visual Decision Context]")) {
+    return "Review current app change";
+  }
+  if (title.includes("[Codex Existing App Preview First Context]")) {
+    return "Preview current app change";
+  }
+  if (title.includes("[Codex Visual Decision Selection]")) {
+    return "Use selected option";
+  }
+  if (title.includes("[Codex Mockup Artifact Task]")) {
+    return `Update saved ${sidebarArtifactLabel(title, 2)}`;
+  }
+  if (title.includes("[Codex Build Selected Mockup]")) {
+    return `Build selected ${sidebarArtifactLabel(title, 1)}`;
+  }
+  return title;
+}
+
+function sidebarArtifactLabel(text: string, count: number) {
+  return previewArtifactDisplayName(
+    previewArtifactKindFromText(text, "mockup"),
+    count,
+    "lower",
   );
 }
 

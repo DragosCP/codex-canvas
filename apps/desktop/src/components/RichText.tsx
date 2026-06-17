@@ -149,7 +149,7 @@ function parseBlocks(text: string): RichBlock[] {
 function renderInline(text: string): ReactNode[] {
   const nodes: ReactNode[] = [];
   const token =
-    /(\*\*[^*\n][\s\S]*?[^*\n]\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|(?:[A-Za-z]:[\\/]|\/mnt\/|\.{0,2}[\\/]|(?:docs|plans|apps|codex-rs|codex-cli|sdk|scripts|tools)[\\/])[\w./\\\-()[\]#@]+)/g;
+    /(\*\*[^*\n][\s\S]*?[^*\n]\*\*|`[^`\n]+`|\[[^\]\n]+\]\([^)]+\)|(?:[A-Za-z]:[\\/]|\/mnt\/|\/(?:[\w.-]+\/)+|\.{1,2}[\\/]|(?:docs|plans|apps|codex-rs|codex-cli|sdk|scripts|tools)[\\/])[\w./\\\-()[\]#@]+)/g;
   let cursor = 0;
   let match: RegExpExecArray | null;
 

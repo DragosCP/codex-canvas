@@ -2,7 +2,11 @@ import { type Dispatch, type SetStateAction, useCallback } from "react";
 import type { JsonRpcMessage, ServerRequest } from "../appServerClient";
 import {
   appendDelta,
+  appendPlanDelta,
+  appendReasoningSummaryDelta,
+  appendReasoningTextDelta,
   ensureTurn,
+  ensureReasoningSummaryPart,
   replaceTurn,
   updateTurnItems,
   upsertItem,
@@ -99,6 +103,50 @@ export function useAppServerEvents(args: {
 
       if (message.method === "item/agentMessage/delta" && threadId && turnId) {
         appendItemDelta(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (message.method === "item/plan/delta" && threadId && turnId) {
+        appendPlanItemDelta(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/summaryTextDelta" &&
+        threadId &&
+        turnId
+      ) {
+        appendReasoningItemDelta(
+          args.patchThread,
+          threadId,
+          turnId,
+          params,
+          "summary",
+        );
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/summaryPartAdded" &&
+        threadId &&
+        turnId
+      ) {
+        ensureReasoningPart(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/textDelta" &&
+        threadId &&
+        turnId
+      ) {
+        appendReasoningItemDelta(
+          args.patchThread,
+          threadId,
+          turnId,
+          params,
+          "content",
+        );
         return;
       }
 
@@ -204,6 +252,61 @@ function appendItemDelta(
     ...thread,
     turns: updateTurnItems(thread.turns, turnId, (items) =>
       appendDelta(items, itemId, delta),
+    ),
+  }));
+}
+
+function appendPlanItemDelta(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params?: Record<string, unknown>,
+) {
+  const itemId = params?.itemId as string;
+  const delta = (params?.delta ?? "") as string;
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      appendPlanDelta(items, itemId, delta),
+    ),
+  }));
+}
+
+function appendReasoningItemDelta(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params: Record<string, unknown> | undefined,
+  field: "summary" | "content",
+) {
+  const itemId = params?.itemId as string;
+  const delta = (params?.delta ?? "") as string;
+  const index =
+    field === "summary"
+      ? Number(params?.summaryIndex ?? 0)
+      : Number(params?.contentIndex ?? 0);
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      field === "summary"
+        ? appendReasoningSummaryDelta(items, itemId, index, delta)
+        : appendReasoningTextDelta(items, itemId, index, delta),
+    ),
+  }));
+}
+
+function ensureReasoningPart(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params?: Record<string, unknown>,
+) {
+  const itemId = params?.itemId as string;
+  const summaryIndex = Number(params?.summaryIndex ?? 0);
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      ensureReasoningSummaryPart(items, itemId, summaryIndex),
     ),
   }));
 }

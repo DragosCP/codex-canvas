@@ -64,8 +64,9 @@ export type LayoutState = {
   commandSurfaceHeight: number;
   inspectorOpen: boolean;
   commandSurfaceOpen: boolean;
-  canvasLayersOpenByProject: Record<string, boolean>;
 };
+
+export type PreviewArtifactKind = "mockup" | "wireframe" | "preview";
 
 export type DesktopState = {
   version: 1;
@@ -75,9 +76,9 @@ export type DesktopState = {
   activeThreadId: string | null;
   pinnedThreadIds: string[];
   expandedProjectIds: string[];
-  canvases: Record<string, ProjectCanvas>;
   planProposals: Record<string, PlanProposal>;
-  canvasSuggestions: Record<string, CanvasSuggestion>;
+  mockupActiveProposalSetIdsByThreadId: Record<string, string>;
+  mockupHistoryProposalSetIds: Record<string, boolean>;
   layout: LayoutState;
 };
 
@@ -91,34 +92,18 @@ export type PendingApproval = {
 export type InspectorSelection =
   | { type: "empty" }
   | {
-      type: "canvas";
-      projectId: string;
-      focusReference?: string | null;
-      focusRequestId?: number;
-    }
-  | {
-      type: "canvasProposal";
-      projectId: string;
-      proposalTurnId: string;
-      focusReference?: string | null;
-      focusRequestId?: number;
-      readOnly?: boolean;
-    }
-  | {
       type: "appPreview";
       projectId: string;
+    }
+  | {
+      type: "mockupPreview";
+      projectId: string;
+      proposalSetId: string;
     }
   | {
       type: "planPreview";
       projectId: string;
       proposalTurnId: string;
-    }
-  | {
-      type: "canvasSuggestion";
-      projectId: string;
-      suggestionTurnId: string;
-      focusReference?: string | null;
-      focusRequestId?: number;
     }
   | { type: "document"; path: string; title?: string }
   | { type: "command"; item: Extract<ThreadItem, { type: "commandExecution" }> }
@@ -128,6 +113,37 @@ export type InspectorSelection =
 export type ThreadMap = Record<string, Thread>;
 
 export type ThreadTokenUsageMap = Record<string, ThreadTokenUsage>;
+
+export type MockupDepth = "quick" | "full";
+
+export type SavedMockup = {
+  id: string;
+  label: string;
+  title: string;
+  summary: string;
+  filePath: string;
+  html: string;
+  highlights?: ProposalHighlight[];
+};
+
+export type MockupPreviewSet = {
+  proposalSetId: string;
+  projectId: string;
+  threadId: string | null;
+  artifactKind: PreviewArtifactKind;
+  baseDir: string;
+  originalPrompt: string;
+  depth: MockupDepth;
+  selectedMockupId: string | null;
+  mockups: SavedMockup[];
+};
+
+export type ProposalHighlight = {
+  id: string;
+  label: string;
+  note: string;
+  areaMark: PlanPreviewAreaMark;
+};
 
 export type ComposerAttachmentStatus = "attached" | "ready" | "unsupported";
 
@@ -142,13 +158,6 @@ export type ComposerAttachment = {
   title: string;
 };
 
-export type ComposerCanvasContext = {
-  type: "canvas";
-  projectId: string;
-  projectName: string;
-  target?: ComposerCanvasContextTarget;
-};
-
 export type ComposerAppPreviewContext = {
   type: "appPreview";
   id: string;
@@ -156,57 +165,33 @@ export type ComposerAppPreviewContext = {
   projectName: string;
   previewUrl: string;
   viewport: "desktop" | "mobile";
+  markLabel?: string;
+  markNumber?: number;
   areaMark: PlanPreviewAreaMark;
 };
 
-export type ComposerContextReference =
-  | ComposerCanvasContext
-  | ComposerAppPreviewContext;
-
-export type ComposerCanvasContextTarget =
-  | {
-      kind: "project";
-    }
-  | {
-      kind: "page";
-      pageId: string | null;
-      pageName: string;
-      subPageId?: string | null;
-      subPageName?: string | null;
-    }
-  | {
-      kind: "item";
-      pageId: string | null;
-      pageName: string;
-      subPageId?: string | null;
-      subPageName?: string | null;
-      itemId: string;
-      reference: string;
-      label: string;
-    }
-  | {
-      kind: "group";
-      pageId: string | null;
-      pageName: string;
-      subPageId?: string | null;
-      subPageName?: string | null;
-      groupId: string;
-      reference: string;
-      label: string;
-    };
-
-export type ComposerCanvasContextOption = {
+export type ComposerMockupPreviewContext = {
+  type: "mockupPreview";
   id: string;
-  context: ComposerCanvasContext;
-  label: string;
-  detail: string;
+  projectId: string;
+  projectName: string;
+  proposalSetId: string;
+  artifactKind: PreviewArtifactKind;
+  mockupId: string;
+  mockupLabel: string;
+  mockupTitle: string;
+  markLabel: string;
+  markNumber: number;
+  filePath: string;
+  viewport: "desktop" | "mobile";
+  areaMark: PlanPreviewAreaMark;
+  source?: "userMark" | "proposalHighlight";
+  highlightId?: string;
 };
 
-export type PlanCanvasStatus =
-  | "not_attached"
-  | "empty"
-  | "sparse"
-  | "usable";
+export type ComposerContextReference =
+  | ComposerAppPreviewContext
+  | ComposerMockupPreviewContext;
 
 export type PlanProposalStatus =
   | "pending"
@@ -216,13 +201,6 @@ export type PlanProposalStatus =
 
 export type PlanProposalKind = "plan" | "safer_alternative";
 
-export type CanvasProposalParseStatus =
-  | "none"
-  | "pending"
-  | "parsed"
-  | "empty"
-  | "failed";
-
 export type PlanProposal = {
   id: string;
   projectId: string;
@@ -230,23 +208,12 @@ export type PlanProposal = {
   turnId: string;
   prompt: string;
   contexts: ComposerContextReference[];
-  canvasStatus: PlanCanvasStatus;
-  canvasSummary: string;
-  canvasBaseSnapshot: ProjectCanvas | null;
-  canvasDraftBaseSnapshot?: ProjectCanvas | null;
-  canvasProposalSnapshot: ProjectCanvas | null;
-  canvasProposalParseStatus: CanvasProposalParseStatus;
-  canvasProposalParserVersion?: number;
-  canvasProposalChangeCount: number;
-  canvasProposalSummary: string;
-  canvasProposalErrors: string[];
-  canvasUserEditedAt?: number;
   previewSpec?: PlanPreviewSpec | null;
   previewSelectedVariantId?: string | null;
   previewAreaMark?: PlanPreviewAreaMark | null;
+  previewSession?: PlanPreviewSessionState | null;
   previewUserEditedAt?: number;
   proposalKind: PlanProposalKind;
-  canvasUpdatedAt?: number;
   status: PlanProposalStatus;
   createdAt: number;
   updatedAt: number;
@@ -293,32 +260,25 @@ export type PlanPreviewAreaMark = {
   height: number;
   viewportWidth: number;
   viewportHeight: number;
+  route?: string;
   note: string;
   createdAt: number;
 };
 
-export type CanvasSuggestionStatus = "pending" | "applied" | "dismissed";
+export type PlanPreviewCleanupStatus =
+  | "idle"
+  | "clean"
+  | "injected"
+  | "reset"
+  | "failed"
+  | "unavailable";
 
-export type CanvasSuggestion = {
-  id: string;
-  projectId: string;
-  threadId: string;
-  turnId: string;
-  prompt: string;
-  contexts: ComposerContextReference[];
-  canvasStatus: PlanCanvasStatus;
-  canvasSummary: string;
-  canvasBaseSnapshot: ProjectCanvas | null;
-  canvasDraftBaseSnapshot?: ProjectCanvas | null;
-  canvasProposalSnapshot: ProjectCanvas | null;
-  canvasProposalParseStatus: CanvasProposalParseStatus;
-  canvasProposalParserVersion?: number;
-  canvasProposalChangeCount: number;
-  canvasProposalSummary: string;
-  canvasProposalErrors: string[];
-  canvasUserEditedAt?: number;
-  status: CanvasSuggestionStatus;
-  createdAt: number;
+export type PlanPreviewSessionState = {
+  previewUrl: string;
+  route: string;
+  viewport: "desktop" | "mobile";
+  interactionState: string;
+  cleanupStatus: PlanPreviewCleanupStatus;
   updatedAt: number;
 };
 
@@ -330,142 +290,6 @@ export type LocalChatDraft = {
   attachments: ComposerAttachment[];
   contexts: ComposerContextReference[];
   createdAt: number;
-  updatedAt: number;
-};
-
-export type CanvasDevice = "desktop" | "mobile";
-
-export type CanvasItemState = "current" | "proposed" | "deleted";
-
-export type CanvasItemKind =
-  | "container"
-  | "text"
-  | "modal"
-  | "divider"
-  | "button";
-
-export type CanvasPage = {
-  id: string;
-  name: string;
-  order: number;
-  subPages: CanvasSubPage[];
-};
-
-export type CanvasSubPage = {
-  id: string;
-  pageId: string;
-  name: string;
-  order: number;
-};
-
-export type CanvasBounds = {
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  left: number;
-  top: number;
-  right: number;
-  bottom: number;
-};
-
-export type CanvasItem = {
-  id: string;
-  numericId: number;
-  reference: string;
-  kind: CanvasItemKind;
-  title: string;
-  body: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  bounds: CanvasBounds;
-  originalX?: number | null;
-  originalY?: number | null;
-  originalWidth?: number | null;
-  originalHeight?: number | null;
-  state: CanvasItemState;
-  locked: boolean;
-  visible: boolean;
-  zIndex: number;
-  pageId: string | null;
-  subPageId: string | null;
-  device: CanvasDevice | null;
-  groupId: string | null;
-  comment: string;
-  createdAt: number;
-  updatedAt: number;
-};
-
-export type CanvasGroup = {
-  id: string;
-  numericId: number;
-  reference: string;
-  title: string;
-  state: CanvasItemState;
-  itemIds: string[];
-  bounds: CanvasBounds;
-  locked: boolean;
-  pageId: string | null;
-  subPageId: string | null;
-  device: CanvasDevice | null;
-  createdAt: number;
-  updatedAt: number;
-};
-
-export type CanvasInteractionTriggerKind = "item" | "group";
-
-export type CanvasInteractionFrameNumber = 2 | 3;
-
-export type CanvasInteractionItemDelta = {
-  itemId: string;
-  reference: string;
-  x?: number;
-  y?: number;
-  width?: number;
-  height?: number;
-  visible?: boolean;
-  createdItem?: CanvasItem | null;
-  sourceGroupId?: string | null;
-  sourceGroupReference?: string | null;
-};
-
-export type CanvasInteractionFrame = {
-  id: string;
-  frame: CanvasInteractionFrameNumber;
-  label: string;
-  affected: CanvasInteractionItemDelta[];
-  holdMs: number | null;
-  sticky: boolean;
-  createdAt: number;
-  updatedAt: number;
-};
-
-export type CanvasInteractionPreview = {
-  id: string;
-  triggerKind: CanvasInteractionTriggerKind;
-  triggerId: string;
-  triggerReference: string;
-  title: string;
-  pageId: string | null;
-  subPageId: string | null;
-  device: CanvasDevice | null;
-  frames: CanvasInteractionFrame[];
-  createdAt: number;
-  updatedAt: number;
-};
-
-export type ProjectCanvas = {
-  projectId: string;
-  version: 2;
-  activePageId: string;
-  activeSubPageId: string;
-  activeDevice: CanvasDevice;
-  pages: CanvasPage[];
-  items: CanvasItem[];
-  groups: CanvasGroup[];
-  interactionPreviews: CanvasInteractionPreview[];
   updatedAt: number;
 };
 

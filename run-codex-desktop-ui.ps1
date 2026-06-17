@@ -15,10 +15,6 @@ $Url = "http://127.0.0.1:4317"
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 Set-Location $Root
 
-function Get-DesktopExePath {
-    Join-Path $Root "apps\desktop\src-tauri\target\release\codex-desktop.exe"
-}
-
 function Test-LocalPort {
     param([int]$Port)
 
@@ -50,64 +46,64 @@ function Start-HiddenServer {
     Write-Host "Started $Name. Log: $LogFile"
 }
 
+function Test-CodexLocalWindow {
+    $mainScript = (Join-Path $Root "apps\desktop\electron\main.cjs").ToLowerInvariant()
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "electron.exe" -and
+            $_.CommandLine -and
+            $_.CommandLine.ToLowerInvariant().Contains($mainScript)
+        } |
+        Select-Object -First 1
+    return [bool]$processes
+}
+
 if ($Shell -eq "desktop") {
     if ($Backend -ne "real") {
-        Write-Host "The built desktop app currently supports the real WSL backend path only."
+        Write-Host "The Electron desktop app currently supports the real native backend path only."
         Write-Host "Use -Shell browser -Backend mock for the mock/demo fallback."
         exit 1
     }
 
-    $exe = Get-DesktopExePath
-    if (-not (Test-Path $exe)) {
-        Write-Host "Built desktop app not found: $exe"
-        Write-Host "Run: corepack pnpm --filter @openai/codex-desktop tauri:build"
-        Write-Host "Or use: .\run-codex-desktop-ui.ps1 -Shell tauri -Backend real"
+    $electronRunner = Join-Path $Root "apps\desktop\electron\run.mjs"
+    $desktopBundle = Join-Path $Root "apps\desktop\dist\index.html"
+
+    if (-not (Test-Path $electronRunner)) {
+        Write-Host "Electron launcher not found: $electronRunner"
+        Write-Host "Check that apps\desktop\electron is present on this branch."
+        exit 1
+    }
+
+    if (-not (Test-Path $desktopBundle)) {
+        Write-Host "Desktop renderer bundle not found: $desktopBundle"
+        Write-Host "Run: corepack pnpm --filter @openai/codex-desktop build"
         exit 1
     }
 
     if ($NoOpen) {
-        Write-Host "Desktop app is ready: $exe"
+        Write-Host "Electron desktop app is ready: $electronRunner"
         exit 0
     }
 
-    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
-    Write-Host "Started Codex Desktop app: $exe"
+    if (Test-CodexLocalWindow) {
+        Write-Host "Codex Local already appears to be running."
+        exit 0
+    }
+
+    $launchLog = Join-Path $CacheDir ("codex-local-electron-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
+    Start-HiddenServer `
+        -Name "Codex Local Electron" `
+        -Command "corepack pnpm --filter @openai/codex-desktop electron:run" `
+        -LogFile $launchLog
+
+    Write-Host "Codex Local Electron is starting. A native window should open shortly."
     exit 0
 }
 
 if ($Shell -eq "tauri") {
-    if ($Backend -ne "real") {
-        Write-Host "Tauri dev currently supports the real WSL backend path only."
-        Write-Host "Use -Shell browser -Backend mock for the mock/demo fallback."
-        exit 1
-    }
-
-    $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-    if ((Test-Path $CargoBin) -and (($env:Path -split ';') -notcontains $CargoBin)) {
-        $env:Path = "$CargoBin;$env:Path"
-    }
-
-    foreach ($tool in @("corepack", "cargo")) {
-        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-            Write-Host "$tool is not available on PATH."
-            Write-Host "Install Windows Rust/Cargo and open a new terminal, then retry."
-            exit 1
-        }
-    }
-
-    if (Test-LocalPort -Port 4317) {
-        Write-Host "Desktop UI dev server is already running on 127.0.0.1:4317."
-        Write-Host "If you changed shell/backend modes, stop the existing dev server first."
-        exit 0
-    }
-
-    Start-HiddenServer `
-        -Name "Tauri desktop app" `
-        -Command "set `"PATH=$CargoBin;%PATH%`" && corepack pnpm --filter @openai/codex-desktop tauri:dev" `
-        -LogFile (Join-Path $CacheDir "p03-tauri-dev.log")
-
-    Write-Host "Tauri desktop app is starting. A native window should open shortly."
-    exit 0
+    Write-Host "The Tauri shell was removed on this branch."
+    Write-Host "Use: .\run-codex-desktop-ui.ps1 -Shell desktop -Backend real"
+    exit 1
 }
 
 $BackendPort = if ($Backend -eq "real") { 48890 } else { 48888 }
