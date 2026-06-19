@@ -1,4 +1,4 @@
-import { type Dispatch, type SetStateAction, useCallback } from "react";
+import { type Dispatch, type SetStateAction, useCallback, useRef } from "react";
 import type { JsonRpcMessage, ServerRequest } from "../appServerClient";
 import {
   appendDelta,
@@ -21,6 +21,8 @@ import type {
 } from "../types";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
+type AgentMessageItem = Extract<ThreadItem, { type: "agentMessage" }>;
+type AgentMessageBuffer = Record<string, Record<string, AgentMessageItem>>;
 
 export function useAppServerEvents(args: {
   activeProjectPath: string | null;
@@ -35,6 +37,8 @@ export function useAppServerEvents(args: {
   setPendingApprovals: SetState<PendingApproval[]>;
   setRunningTurnId: SetState<string | null>;
 }) {
+  const streamedAgentMessagesRef = useRef<AgentMessageBuffer>({});
+
   const handleNotification = useCallback(
     (message: JsonRpcMessage) => {
       if (!message.method) return;
@@ -53,7 +57,11 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "turn/completed" && threadId && params?.turn) {
-        const turn = params.turn as Turn;
+        const turn = mergeBufferedAgentMessagesForTurn(
+          params.turn as Turn,
+          streamedAgentMessagesRef.current[turnId || (params.turn as Turn).id],
+        );
+        delete streamedAgentMessagesRef.current[turn.id];
         args.setRunningTurnId((current) =>
           current === turn.id ? null : current,
         );
@@ -68,6 +76,7 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "error" && threadId && turnId && params?.error) {
+        delete streamedAgentMessagesRef.current[turnId];
         const error = params.error as Turn["error"];
         args.patchThread(threadId, (thread) => ({
           ...thread,
@@ -92,6 +101,7 @@ export function useAppServerEvents(args: {
         params?.item
       ) {
         const item = params.item as ThreadItem;
+        rememberAgentMessage(streamedAgentMessagesRef.current, turnId, item);
         args.patchThread(threadId, (thread) => ({
           ...thread,
           turns: updateTurnItems(thread.turns, turnId, (items) =>
@@ -102,6 +112,7 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "item/agentMessage/delta" && threadId && turnId) {
+        rememberAgentMessageDelta(streamedAgentMessagesRef.current, turnId, params);
         appendItemDelta(args.patchThread, threadId, turnId, params);
         return;
       }
@@ -238,6 +249,60 @@ export function useAppServerEvents(args: {
   );
 
   return { handleNotification, handleServerRequest };
+}
+
+function rememberAgentMessage(
+  buffer: AgentMessageBuffer,
+  turnId: string,
+  item: ThreadItem,
+) {
+  if (item.type !== "agentMessage") return;
+  const turnMessages = (buffer[turnId] ??= {});
+  const existing = turnMessages[item.id];
+  turnMessages[item.id] =
+    !existing || item.text.length >= existing.text.length ? item : existing;
+}
+
+function rememberAgentMessageDelta(
+  buffer: AgentMessageBuffer,
+  turnId: string,
+  params?: Record<string, unknown>,
+) {
+  const itemId = params?.itemId as string | undefined;
+  if (!itemId) return;
+  const delta = (params?.delta ?? "") as string;
+  const turnMessages = (buffer[turnId] ??= {});
+  const existing =
+    turnMessages[itemId] ??
+    ({
+      type: "agentMessage",
+      id: itemId,
+      phase: null,
+      text: "",
+    } as AgentMessageItem);
+  turnMessages[itemId] = {
+    ...existing,
+    text: `${existing.text}${delta}`,
+  };
+}
+
+export function mergeBufferedAgentMessagesForTurn(
+  turn: Turn,
+  buffered?: Record<string, AgentMessageItem>,
+): Turn {
+  if (!buffered || Object.keys(buffered).length === 0) return turn;
+  const incomingIds = new Set(turn.items.map((item) => item.id));
+  const items = [
+    ...turn.items.map((item) => {
+      if (item.type !== "agentMessage") return item;
+      const bufferedItem = buffered[item.id];
+      return bufferedItem && bufferedItem.text.length > item.text.length
+        ? { ...item, text: bufferedItem.text }
+        : item;
+    }),
+    ...Object.values(buffered).filter((item) => !incomingIds.has(item.id)),
+  ];
+  return { ...turn, items };
 }
 
 function appendItemDelta(

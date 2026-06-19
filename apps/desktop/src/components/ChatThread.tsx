@@ -3,6 +3,7 @@ import {
   ChevronDown,
   FileText,
   FolderOpen,
+  Image as ImageIcon,
   PanelRightOpen,
   PencilLine,
   RefreshCw,
@@ -19,7 +20,9 @@ import {
   previewArtifactDisplayName,
   previewArtifactKindFromText,
 } from "../mockupArtifacts";
+import { composerContextPreviewImage } from "../previewContextImages";
 import type {
+  ComposerContextReference,
   InspectorSelection,
   LocalChatDraft,
   PlanProposal,
@@ -47,6 +50,16 @@ import {
   stripVisualDecisionBlocks,
 } from "../visualDecision";
 import { RichText } from "./RichText";
+import {
+  ImagePreviewLightbox,
+  usePreviewImageSource,
+  type PreviewImageItem,
+} from "./ImagePreviewLightbox";
+
+type UserMessageContentPart = Extract<
+  ThreadItem,
+  { type: "userMessage" }
+>["content"][number];
 
 export function ChatThread(props: {
   activeProject: Project | null;
@@ -61,11 +74,13 @@ export function ChatThread(props: {
   onSelect: (selection: InspectorSelection) => void;
   planProposalFeedbackDrafts?: Record<string, string>;
   planProposals?: Record<string, PlanProposal>;
+  sentComposerContextsByTurnId?: Record<string, ComposerContextReference[]>;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
   const planProposalFeedbackDrafts = props.planProposalFeedbackDrafts ?? {};
   const planProposals = props.planProposals ?? {};
+  const sentComposerContextsByTurnId = props.sentComposerContextsByTurnId ?? {};
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -132,6 +147,7 @@ export function ChatThread(props: {
           onSelect={props.onSelect}
           planProposalFeedbackDraft={planProposalFeedbackDrafts[turn.id]}
           planProposal={planProposals[turn.id] ?? null}
+          sentComposerContexts={sentComposerContextsByTurnId[turn.id] ?? []}
           turn={turn}
           workspaceProgress={
             props.activeWorkspaceProgress?.turnId === turn.id
@@ -155,6 +171,7 @@ function TurnView(props: {
   onSelect: (selection: InspectorSelection) => void;
   planProposalFeedbackDraft?: string;
   planProposal: PlanProposal | null;
+  sentComposerContexts: ComposerContextReference[];
   workspaceProgress: WorkspaceProgressSnapshot | null;
 }) {
   const userItems = props.turn.items.filter(
@@ -162,10 +179,13 @@ function TurnView(props: {
       item.type === "userMessage",
   );
   const visibleUserItems = dedupeUserMessageItems(userItems, props.activeProject);
-  const finalItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
-      item.type === "agentMessage" &&
-      (item.phase === "final_answer" || item.phase === null),
+  const finalItems = dedupeAgentMessageItems(
+    props.turn.items.filter(
+      (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+        item.type === "agentMessage" &&
+        (item.phase === "final_answer" || item.phase === null),
+    ),
+    props.activeProject,
   );
   const hasVisualDecision = finalItems.some((item) =>
     Boolean(parseVisualDecisionStrip(item.text)),
@@ -187,6 +207,7 @@ function TurnView(props: {
       {visibleUserItems.map((item) => (
         <UserMessageView
           activeProject={props.activeProject}
+          contexts={props.sentComposerContexts}
           key={item.id}
           item={item}
         />
@@ -280,6 +301,23 @@ function dedupeUserMessageItems(
   return result;
 }
 
+function dedupeAgentMessageItems(
+  items: Array<Extract<ThreadItem, { type: "agentMessage" }>>,
+  activeProject: Project,
+) {
+  const seen = new Set<string>();
+  const result: Array<Extract<ThreadItem, { type: "agentMessage" }>> = [];
+  for (const item of items) {
+    const signature = normalizeActivityText(
+      friendlyText(item.text, activeProject),
+    );
+    if (signature && seen.has(signature)) continue;
+    if (signature) seen.add(signature);
+    result.push(item);
+  }
+  return result;
+}
+
 function userMessageDisplaySignature(
   item: Extract<ThreadItem, { type: "userMessage" }>,
   activeProject: Project,
@@ -319,37 +357,120 @@ type ActivityItem =
 
 function UserMessageView(props: {
   activeProject: Project;
+  contexts: ComposerContextReference[];
   item: Extract<ThreadItem, { type: "userMessage" }>;
 }) {
+  const imageParts = props.item.content.filter(isUserMessageImagePart);
+  const previewImages: PreviewImageItem[] = [
+    ...imageParts.map((part, index) => userMessageImagePreviewItem(part, index)),
+    ...props.contexts.map(composerContextPreviewImage),
+  ];
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const visibleParts = props.item.content.filter(
+    (part) => !isUserMessageImagePart(part),
+  );
   return (
-    <div className="message user-message">
-      {props.item.content.map((part, index) => {
-        if (part.type === "text") {
-          const display = friendlyUserDisplay(part.text, props.activeProject);
-          return (
-            <div className="user-message-plain" key={index}>
-              {display.actionLabel && (
-                <span className="user-message-action">
-                  {display.actionLabel}
-                </span>
-              )}
-              {display.text && <p>{display.text}</p>}
-            </div>
-          );
-        }
-        return (
-          <p className="attachment-note" key={index}>
-            {attachmentLabel(part)}
-          </p>
-        );
-      })}
+    <div className="user-message-group">
+      {previewImages.length > 0 && (
+        <div className="user-message-image-strip" aria-label="Attached visuals">
+          {previewImages.map((image, index) => (
+            <UserMessageImage
+              image={image}
+              key={`${image.id}:${index}`}
+              onPreview={() => setPreviewIndex(index)}
+            />
+          ))}
+        </div>
+      )}
+      {visibleParts.length > 0 && (
+        <div className="message user-message">
+          {visibleParts.map((part, index) => {
+            if (part.type === "text") {
+              const display = friendlyUserDisplay(part.text, props.activeProject);
+              return (
+                <div className="user-message-plain" key={index}>
+                  {display.actionLabel && (
+                    <span className="user-message-action">
+                      {display.actionLabel}
+                    </span>
+                  )}
+                  {display.text && <p>{display.text}</p>}
+                </div>
+              );
+            }
+            return (
+              <p className="attachment-note" key={index}>
+                {attachmentLabel(part)}
+              </p>
+            );
+          })}
+        </div>
+      )}
+      {previewIndex !== null && previewImages[previewIndex] && (
+        <ImagePreviewLightbox
+          images={previewImages}
+          index={previewIndex}
+          onClose={() => setPreviewIndex(null)}
+          onSelect={setPreviewIndex}
+        />
+      )}
     </div>
   );
 }
 
-function attachmentLabel(
-  part: Extract<ThreadItem, { type: "userMessage" }>["content"][number],
-) {
+function UserMessageImage(props: {
+  image: PreviewImageItem;
+  onPreview: () => void;
+}) {
+  const previewUrl = usePreviewImageSource(props.image);
+  return (
+    <button
+      type="button"
+      className="user-message-image-thumb"
+      title={props.image.title}
+      onClick={props.onPreview}
+      aria-label={`Preview ${props.image.title}`}
+    >
+      {previewUrl ? (
+        <img src={previewUrl} alt={props.image.alt ?? props.image.title} />
+      ) : (
+        <span>
+          <ImageIcon size={22} />
+          <small>{props.image.title}</small>
+        </span>
+      )}
+    </button>
+  );
+}
+
+function isUserMessageImagePart(
+  part: UserMessageContentPart,
+): part is Extract<UserMessageContentPart, { type: "image" | "localImage" }> {
+  return part.type === "image" || part.type === "localImage";
+}
+
+function userMessageImagePreviewItem(
+  part: Extract<UserMessageContentPart, { type: "image" | "localImage" }>,
+  index: number,
+) : PreviewImageItem {
+  if (part.type === "localImage") {
+    const title = basename(part.path);
+    return {
+      id: `message-local-image:${part.path}:${index}`,
+      title,
+      alt: title,
+      path: part.path,
+    };
+  }
+  return {
+    id: `message-image:${part.url}:${index}`,
+    title: "Attached image",
+    alt: "Attached image",
+    src: part.url,
+  };
+}
+
+function attachmentLabel(part: UserMessageContentPart) {
   if ("path" in part) return `Added ${basename(part.path)}`;
   if ("url" in part) return "Added image";
   return "Added file";
@@ -396,6 +517,8 @@ function PlanProposalReview(props: {
   }, [props.proposal.previewAreaMark]);
   const acceptLabel = planAcceptLabel(props.proposal, selectedPreviewVariant);
   const canShowPendingPreview = pending && hasPlanUiImpact(props.proposal);
+  const proposalNoun =
+    props.proposal.proposalKind === "live_proposal" ? "proposal" : "plan";
   function submitDecision() {
     if (decision === "accept") {
       props.onAccept(props.proposal);
@@ -413,7 +536,7 @@ function PlanProposalReview(props: {
       {pending ? (
         <div
           className="plan-decision"
-          aria-label="Implement this plan?"
+          aria-label={`Implement this ${proposalNoun}?`}
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
@@ -425,7 +548,7 @@ function PlanProposalReview(props: {
             }
           }}
         >
-          <strong>Implement this plan?</strong>
+          <strong>Implement this {proposalNoun}?</strong>
           <div className="plan-decision-options">
             <button
               className={decision === "accept" ? "selected" : ""}
@@ -449,7 +572,9 @@ function PlanProposalReview(props: {
                   props.onFeedbackChange(event.target.value);
                 }}
                 onFocus={() => setDecision("revise")}
-                placeholder="No, and tell Codex what to do differently"
+                placeholder={`No, and tell Codex what to ${
+                  proposalNoun === "proposal" ? "show differently" : "do differently"
+                }`}
                 rows={props.feedbackDraft ? 3 : 1}
                 value={props.feedbackDraft}
               />
@@ -538,6 +663,13 @@ function planAcceptLabel(
   if (proposal.proposalKind === "safer_alternative") {
     return "Yes, implement safer plan";
   }
+  if (proposal.proposalKind === "live_proposal") {
+    if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
+      return `Build option ${selectedVariant.id}`;
+    }
+    if (selectedVariant) return "Build selected proposal";
+    return "Build proposal";
+  }
   if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
     return `Implement option ${selectedVariant.id}`;
   }
@@ -546,15 +678,17 @@ function planAcceptLabel(
 }
 
 function planProposalTitle(proposal: PlanProposal) {
+  if (proposal.proposalKind === "live_proposal") return "Proposal";
   return proposal.proposalKind === "safer_alternative" ? "Safer plan" : "Plan";
 }
 
 function planReviewText(proposal: PlanProposal) {
   if (proposal.previewSpec?.variants.length) {
     return proposal.previewSpec.variants.length > 1
-      ? "Live app preview options ready."
-      : "Live app preview ready.";
+      ? "Live proposal options ready."
+      : "Live proposal ready.";
   }
+  if (proposal.proposalKind === "live_proposal") return "Proposal ready.";
   return "Plan ready.";
 }
 
@@ -1195,6 +1329,14 @@ function mapUserDisplayText(
   if (existingPreviewRequest) {
     return { text: friendlyText(existingPreviewRequest, activeProject) };
   }
+  const liveOverlayProposalRequest = extractLiveOverlayProposalRequest(visible);
+  if (liveOverlayProposalRequest) {
+    return { text: friendlyText(liveOverlayProposalRequest, activeProject) };
+  }
+  const codeProposalRequest = extractCodeProposalWorkspaceRequest(visible);
+  if (codeProposalRequest) {
+    return { text: friendlyText(codeProposalRequest, activeProject) };
+  }
   const mockupReviewRequest = extractSavedMockupReviewRequest(visible);
   if (mockupReviewRequest) {
     return { text: friendlyText(mockupReviewRequest, activeProject) };
@@ -1264,6 +1406,20 @@ function extractExistingAppPreviewFirstRequest(text: string) {
   return extractOriginalRequestForSentinel(
     text,
     "[Codex Existing App Preview First Context]",
+  );
+}
+
+function extractLiveOverlayProposalRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Live Overlay Proposal Context]",
+  );
+}
+
+function extractCodeProposalWorkspaceRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Code Proposal Workspace Context]",
   );
 }
 

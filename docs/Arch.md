@@ -24,6 +24,10 @@
 - Remember preview URLs per project. If a project has no remembered URL, do not automatically show another project's last preview; show the unavailable/choose URL state instead.
 - Managed preview processes are per project and opt-in. Do not auto-start every known project. Stopping a managed preview should stop only that project's process/server and clear the active webview.
 - Preview state should include project ID, URL, route label, viewport, status, error, updated timestamp, and cleanup/reset status.
+- Normal-chat existing-app live-overlay proposals reuse the Plan Preview path instead of a parallel artifact system. The model returns a hidden `codex-plan-preview` block, desktop stores it as a `live_proposal` `PlanProposal`, and `LiveAppPreview` records hidden proposal metadata plus optional highlights for the existing webview.
+- `PlanPreviewSpec` carries optional route, view state, target region, and per-variant proposal highlights. Highlights are rendered by Live Preview only when the user chooses `Show changes`; they are supporting review metadata, not accepted app UI.
+- Streamed agent text can contain hidden preview JSON that app-server completion payloads may omit. Desktop buffers streamed final-agent message text per turn and merges it into the completed turn before parsing so preview specs survive completion/list refresh.
+- P25b architecture: serious new-app, new-page, redesign, and large UI proposals can use isolated code-backed proposal workspaces. Desktop owns workspace creation, baseline snapshots, diff/patch computation, preview lifecycle, and promotion checks; app-server turns still do the Codex work inside those proposal workspace paths rather than creating a parallel agent runtime. Cleanup/history polish remains future work.
 
 ## Plan Mode
 
@@ -40,9 +44,10 @@
 - Empty-project visual-option prompting is LLM-led: the desktop may attach compact project state and capability guidance, while the agent decides whether to save mockups first or implement directly.
 - Empty-project visual-option prompting should be routed only for broad UI/app/product creation or explicit preview-option requests. Operational command/script/no-edit prompts use the normal turn path even when the folder is empty.
 - Existing-app broad UX/UI prompts can use the same decision-strip protocol with current-app wording.
-- Existing-app preview-first prompts route by specificity: an explicit single-preview request creates one review-only `.codex/mockups` artifact, an explicit multiple-directions request creates A/B/C artifacts, and ambiguous "show me first" or "wireframe first" follow-ups use the current-app decision strip before artifacts are generated.
+- Existing-app preview-first prompts route by specificity: small control/placement/menu/panel proposals prefer temporary Live overlay proposals; explicit wireframes/mockups, broad visual exploration, Live-unavailable cases, and complex structural changes use saved `.codex/mockups` fallback. Ambiguous "show me first" follow-ups use the current-app decision strip before artifacts or overlays are generated.
+- P25b routing splits that fallback further: empty-project visual options and explicit serious runnable existing-app preview requests prefer code-backed proposal workspaces, while explicit rough wireframes/mockups and Live-unavailable fallbacks remain saved `.codex/mockups`.
 - Decision-only prompt wrappers may mention `.codex/mockups` output rules, but completion handling must not treat them as artifact-creation turns. Only turns that actually request review artifacts should activate a current proposal set or auto-open Mockup Preview.
-- App/Mockup mark contexts serialize only the relevant project, preview/mockup identity, viewport, marked rectangle, note, and timestamp. They are temporary communication context, not DOM selectors.
+- App/Mockup mark contexts serialize only the relevant project, preview/mockup identity, viewport, marked rectangle, note, timestamp, and optional renderer-owned thumbnail data URL for display. They are temporary communication context, not DOM selectors.
 - Existing-app visual-decision sends preserve project-scoped App/Mockup mark contexts through the selected choice so a user's marked location still supports the eventual preview, revision, or implementation turn.
 
 ## Decision Strips
@@ -56,16 +61,18 @@
 
 - Saved mockups live under the project folder in `.codex/mockups/manifest.json` and up to three HTML files such as `mockup-a.html`, `mockup-b.html`, and `mockup-c.html`.
 - Saved mockups are concept artifacts. They can be reopened, switched, revised, added to, marked, or built from, but they are not localhost apps or code branches.
+- Code-backed proposal workspaces are the branch-like lane for promotable runnable options. Do not overload saved mockups with branch semantics.
 - When saved `.codex/mockups` artifacts exist and the set is still an active decision, the desktop can render a compact A/B/C selector above the composer so users can open and switch the selected mockup without digging through Activity.
 - The above-composer saved-mockup strip is only a selector. Heavier actions such as revise, add, and build belong to Mockup Preview and should stage the composer rather than send immediately.
 - Build-selected sends must preserve two separate payloads: the visible user request for chat/title/display and hidden selected-mockup context for agent guidance. The visible request is authoritative and should override selected mockup context when they conflict.
 - Build-selected staging stores visible prompt metadata on the submission draft. Chat, Activity, sidebar, and transcript display read that visible request or scrub the generic attached-context marker instead of rendering selected-option or mark payloads.
-- Mockup Preview area marks are composer context (`@MockupMark`) with selected option, saved file, viewport size, named rectangle, and timestamp.
+- Mockup Preview area marks are composer context (`@MockupMark`) with selected option, saved file, viewport size, named rectangle, timestamp, and optional thumbnail presentation metadata.
 - Mockup mark rectangles are rendered from composer contexts. Removing the composer chip removes the matching rectangle, and saved rectangles are non-interactive so they do not block iframe clicks.
-- Composer preview contexts are project-scoped. Project switches, new-folder selection, new chats, and prompt serialization must not show or send App/Mockup chips whose `projectId` differs from the active project.
+- Composer preview contexts are project-scoped. Project switches, new-folder selection, new chats, and prompt serialization must not show or send App/Mockup chips whose `projectId` differs from the active project. Sent composer contexts are retained only as desktop transcript presentation state so their picture chips can render above the matching user message.
 - Saved mockup decisions are additionally thread-owned. The desktop may keep project-level `.codex/mockups` artifacts open in Inspector, but composer A/B/C selectors and hidden saved-mockup review context should serialize only when the owning thread is active.
 - After a `Build selected mockup` turn starts, desktop records that project as mockup history mode. History mode hides the composer selector and commit actions while keeping saved mockups openable and markable as reference pages.
 - Starting mockups that entered history mode must not be reused as active existing-app proposal tabs. New `Live | Preview` or `Live | A | B | C` comparisons require a fresh current-request review artifact set based on the live app.
+- Follow-up prompt routing must not target saved mockup history for normal feature requests. If the user asks for a new setting, page, placement, or option after building a mockup, prompt wrappers should route from current Live state and create fresh proposals rather than update the old saved Option A/B/C artifact.
 - Saved mockup manifest entries may include proposal highlight rectangles with labels and notes. Electron normalizes bounds before exposing them; the renderer shows them as temporary proposal overlays, and adjusted highlights serialize as supporting composer context rather than accepted app chrome.
 - Build-selected agent turns should create runnable files and clear start instructions, but should not launch preview/server processes. Electron's managed App Preview lifecycle owns project server start/stop after implementation.
 
@@ -81,8 +88,9 @@
 - `scripts/stage-desktop-sidecar.mjs` builds and stages the Windows release sidecar in `apps/desktop/electron/resources/codex-sidecar`: `codex.exe`, `codex-resources/codex-command-runner.exe`, `codex-resources/codex-windows-sandbox-setup.exe`, and `codex-resources/rg.exe`.
 - Thread list/read/resume behavior must reconcile sidebar state and hydrated turns without showing stale chats or raw thread IDs.
 - Electron exposes small native bridges for file/folder picking, image previews, auth URL opening, and preview/browser control; document ingestion remains an app-server/tool concern.
+- Composer image attachments use Electron's file-path bridge plus app-server `localImage` inputs. The desktop only renders chips/thumbnails and passes local paths; core owns converting those images for the model request. Preview mark thumbnails are display metadata on composer contexts and do not turn marks into model image attachments unless the user separately attaches an image.
 - App Preview URLs are project-scoped. Electron keys managed preview processes by normalized project path and rejects probe/open requests for URLs owned by another managed project. The renderer also treats duplicate remembered localhost URLs across projects as stale unless the active project currently owns that managed preview, so old `127.0.0.1:5173` memory cannot make every folder show the same app.
-- Tauri is retired on the current branch. Electron must preserve the existing app-server boundary and local bridge semantics unless the app-server contract explicitly changes.
+- Electron must preserve the existing app-server boundary and local bridge semantics unless the app-server contract explicitly changes.
 - Account/auth/model/usage visibility should come from app-server APIs. The desktop can start app-server `account/login/start` flows for ChatGPT browser auth, ChatGPT device-code auth, or API-key auth, then listen for `account/login/completed` and `account/updated`; it must not store or display tokens.
 
 ## Verification

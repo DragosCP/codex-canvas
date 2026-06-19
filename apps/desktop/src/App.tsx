@@ -14,7 +14,9 @@ import {
   type AuthDialogState,
 } from "./components/AuthDialog";
 import { ChatThread } from "./components/ChatThread";
+import { CodeProposalOptionStrip } from "./components/CodeProposalOptionStrip";
 import { Composer } from "./components/Composer";
+import { nextAppPreviewMarkNumber } from "./composerContexts";
 import { Inspector } from "./components/Inspector";
 import { MockupOptionStrip } from "./components/MockupOptionStrip";
 import { ProjectSidebar } from "./components/ProjectSidebar";
@@ -80,6 +82,9 @@ import {
 import type {
   AppServerSnapshot,
   BackendMode,
+  CodeProposalFileChange,
+  CodeProposalOption,
+  CodeProposalSet,
   ComposerAttachment,
   ComposerAppPreviewContext,
   ComposerContextReference,
@@ -116,7 +121,11 @@ type SubmissionDraft = {
   createdAt: number;
   localDraftProjectId?: string | null;
   targetThreadId?: string | null;
+  cwdOverride?: string | null;
   openMockupsOnComplete?: boolean;
+  liveOverlayProposalOnComplete?: boolean;
+  codeProposalOnComplete?: boolean;
+  mockupHistoryOnComplete?: boolean;
   proposalSetId?: string | null;
   artifactKind?: PreviewArtifactKind | null;
 };
@@ -141,6 +150,30 @@ type ProjectEmptyStatus = {
 
 type MockupsListResult = Omit<MockupPreviewSet, "projectId"> & {
   projectPath: string;
+};
+
+type PreparedProposalWorkspaces = {
+  proposalSetId: string;
+  rootPath: string;
+  options: Array<{ id: "A" | "B" | "C"; workspacePath: string }>;
+};
+
+type CodeProposalAddOptionRequest = {
+  optionId: "A" | "B" | "C";
+  sourceOptionId: "A" | "B" | "C" | null;
+};
+
+type ProposalWorkspaceDiffResult = {
+  proposalSetId: string;
+  optionId: "A" | "B" | "C";
+  workspacePath: string;
+  changedFiles: CodeProposalFileChange[];
+};
+
+type ProposalWorkspaceApplyResult = {
+  ok: boolean;
+  changedFiles: CodeProposalFileChange[];
+  conflicts: Array<{ path: string; reason: string }>;
 };
 
 type ActiveVisualDecision = {
@@ -291,6 +324,15 @@ export function App() {
       ? desktop.mockupActiveProposalSetIdsByThreadId[desktop.activeThreadId] ??
         null
       : null;
+  const activeThreadProposalSetIsHistory = Boolean(
+    activeThreadProposalSetId &&
+      desktop.mockupHistoryProposalSetIds[activeThreadProposalSetId],
+  );
+  const activeThreadCodeProposalSetId =
+    desktop.activeThreadId != null
+      ? desktop.codeProposalActiveSetIdsByThreadId[desktop.activeThreadId] ??
+        null
+      : null;
 
   useEffect(() => {
     if (!activeProject) return;
@@ -311,6 +353,7 @@ export function App() {
   const activePreviewProjectId =
     inspector.type === "appPreview" ||
     inspector.type === "mockupPreview" ||
+    inspector.type === "codeProposalPreview" ||
     inspector.type === "planPreview"
       ? inspector.projectId
       : null;
@@ -318,6 +361,7 @@ export function App() {
     desktop.layout.inspectorOpen &&
     (inspector.type === "appPreview" ||
       inspector.type === "planPreview" ||
+      inspector.type === "codeProposalPreview" ||
       inspector.type === "mockupPreview");
   const sidebarDockedWidth = sidebarWidthForShell(shellWidth);
   const inspectorWidth = desktop.layout.inspectorOpen
@@ -352,6 +396,7 @@ export function App() {
   const activeProjectHasSavedMockups = activeProject
     ? Boolean(
         activeThreadProposalSetId &&
+          !activeThreadProposalSetIsHistory &&
           mockupPreviewSets[activeThreadProposalSetId]?.mockups.length,
       )
     : false;
@@ -373,6 +418,17 @@ export function App() {
     projectId: string,
     threadId: string | null,
   ): InspectorSelection {
+    const codeProposalSetId =
+      threadId != null
+        ? desktop.codeProposalActiveSetIdsByThreadId[threadId]?.trim() || ""
+        : "";
+    if (codeProposalSetId) {
+      return {
+        type: "codeProposalPreview",
+        projectId,
+        proposalSetId: codeProposalSetId,
+      };
+    }
     const proposalSetId =
       threadId != null
         ? desktop.mockupActiveProposalSetIdsByThreadId[threadId]?.trim() || ""
@@ -400,15 +456,13 @@ export function App() {
     activeProject,
     activeTurnState,
   );
-  const activeTurnProgress = summarizeTurnProgress(
-    activeTurnState,
-    activeProject,
-    activeWorkspaceProgress,
-  );
   const fileChangeItems = mergeThreadFileChanges(activeThread);
   const currentSettings = activeProject?.settings ?? defaultSettings;
-  const promptReady =
-    composerText.trim().length > 0 || activeComposerContexts.length > 0;
+  const promptReady = hasDraftContent({
+    text: composerText,
+    attachments,
+    contexts: activeComposerContexts,
+  });
   const activeContextUsage = desktop.activeThreadId
     ? (tokenUsageByThread[desktop.activeThreadId] ?? null)
     : null;
@@ -825,7 +879,12 @@ export function App() {
     const projectId = desktop.activeProjectId;
     let shouldResetToLive = false;
     setInspector((current) => {
-      if (current.type !== "mockupPreview") return current;
+      if (
+        current.type !== "mockupPreview" &&
+        current.type !== "codeProposalPreview"
+      ) {
+        return current;
+      }
       const nextSelection = preferredLivePreviewSelection(
         projectId,
         desktop.activeThreadId,
@@ -846,13 +905,19 @@ export function App() {
     setInspector((current) => {
       if (
         current.type !== "appPreview" &&
-        current.type !== "mockupPreview"
+        current.type !== "mockupPreview" &&
+        current.type !== "codeProposalPreview"
       ) {
         return current;
       }
       if (!desktop.activeProjectId) return { type: "empty" };
       if (current.projectId === desktop.activeProjectId) return current;
-      if (current.type === "mockupPreview") return { type: "empty" };
+      if (
+        current.type === "mockupPreview" ||
+        current.type === "codeProposalPreview"
+      ) {
+        return { type: "empty" };
+      }
       return { type: "appPreview", projectId: desktop.activeProjectId };
     });
   }, [desktop.activeProjectId]);
@@ -878,6 +943,7 @@ export function App() {
       if (
         current.type === "appPreview" ||
         current.type === "mockupPreview" ||
+        current.type === "codeProposalPreview" ||
         current.type === "planPreview"
       ) {
         return current;
@@ -1031,7 +1097,12 @@ export function App() {
     if (project) {
       void refreshProjectEmptyStatus(project);
     }
-    if (draft.settings.planMode) {
+    const targetProposalSetId = draft.proposalSetId?.trim() || "";
+    if (draft.codeProposalOnComplete && targetProposalSetId && project) {
+      void finalizeCodeProposalTurn(project.id, targetProposalSetId, turn.id);
+      return;
+    }
+    if (draft.settings.planMode || draft.liveOverlayProposalOnComplete) {
       const finalText = finalAgentText(turn);
       const previewSpec = parsePlanPreviewSpec(finalText);
       const visiblePrompt = draft.visiblePrompt?.trim() || draft.prompt;
@@ -1050,33 +1121,59 @@ export function App() {
                 previewSpec?.variants[0]?.id ??
                 proposal.previewSelectedVariantId ??
                 null,
-              proposalKind: classifyPlanProposalKind(
-                visiblePrompt,
-                finalText,
-              ),
+              proposalKind: draft.liveOverlayProposalOnComplete
+                ? "live_proposal"
+                : classifyPlanProposalKind(
+                    visiblePrompt,
+                    finalText,
+                  ),
               updatedAt: Date.now(),
             },
           },
         };
       });
+      if (draft.liveOverlayProposalOnComplete && previewSpec && project) {
+        setInspector({
+          type: "planPreview",
+          projectId: project.id,
+          proposalTurnId: turn.id,
+        });
+        setDesktop((current) => ({
+          ...current,
+          layout: { ...current.layout, inspectorOpen: true },
+        }));
+      }
+    }
+    if (draft.mockupHistoryOnComplete && targetProposalSetId) {
+      setDesktop((current) =>
+        markMockupProposalSetAsHistory(current, targetProposalSetId),
+      );
+      if (project) {
+        openPreviewInspector(project.id);
+      }
     }
     const changedSavedMockups = turnTouchesSavedMockups(turn);
-    const targetProposalSetId = draft.proposalSetId?.trim() || "";
+    const completedMockupBuildTurn = Boolean(
+      draft.mockupHistoryOnComplete && targetProposalSetId,
+    );
     const savedMockupArtifactTurn =
       !isEmptyProjectVisualPlanningPrompt(draft.prompt) &&
       !isExistingAppVisualDecisionPrompt(draft.prompt) &&
+      !isLiveOverlayProposalPrompt(draft.prompt) &&
       isSavedMockupArtifactRequest(draft.prompt);
     const activatesSavedMockupDecision =
-      draft.openMockupsOnComplete ||
+      !completedMockupBuildTurn &&
+      (draft.openMockupsOnComplete ||
         isMockupGenerationPrompt(draft.prompt) ||
         isMockupReviewPrompt(draft.prompt) ||
-        savedMockupArtifactTurn;
+        savedMockupArtifactTurn);
     if (
-      activatesSavedMockupDecision ||
-      isMockupGenerationPrompt(draft.prompt) ||
-      isMockupReviewPrompt(draft.prompt) ||
-      savedMockupArtifactTurn ||
-      changedSavedMockups
+      !completedMockupBuildTurn &&
+      (activatesSavedMockupDecision ||
+        isMockupGenerationPrompt(draft.prompt) ||
+        isMockupReviewPrompt(draft.prompt) ||
+        savedMockupArtifactTurn ||
+        changedSavedMockups)
     ) {
       if (activatesSavedMockupDecision && targetProposalSetId) {
         setDesktop((current) => ({
@@ -1204,6 +1301,319 @@ export function App() {
     }));
   }
 
+  function openCodeProposalInspector(projectId: string, proposalSetId: string) {
+    setInspector({ type: "codeProposalPreview", projectId, proposalSetId });
+    setDesktop((current) => ({
+      ...current,
+      layout: {
+        ...current.layout,
+        inspectorOpen: true,
+        inspectorWidth: Math.max(
+          current.layout.inspectorWidth,
+          preferredPreviewInspectorWidth(),
+        ),
+      },
+    }));
+  }
+
+  function selectCodeProposal(proposalSetId: string, optionId: "A" | "B" | "C") {
+    setDesktop((current) => {
+      const previewSet = current.codeProposalSets[proposalSetId];
+      if (!previewSet) return current;
+      return {
+        ...current,
+        codeProposalSets: {
+          ...current.codeProposalSets,
+          [proposalSetId]: {
+            ...previewSet,
+            selectedOptionId: optionId,
+            updatedAt: Date.now(),
+          },
+        },
+      };
+    });
+  }
+
+  async function prepareCodeProposalSet(
+    project: Project,
+    proposalSetId: string,
+    optionIds: Array<"A" | "B" | "C">,
+    originalPrompt: string,
+  ) {
+    const prepared = await desktopInvoke<PreparedProposalWorkspaces>(
+      "proposal_workspaces_prepare",
+      {
+        projectPath: project.path,
+        proposalSetId,
+        optionIds,
+      },
+    );
+    if (!prepared) {
+      throw new Error("Could not prepare proposal workspaces.");
+    }
+    const now = Date.now();
+    const previewSet: CodeProposalSet = {
+      proposalSetId: prepared.proposalSetId,
+      projectId: project.id,
+      threadId: activeThread?.id ?? null,
+      turnId: null,
+      rootPath: prepared.rootPath,
+      originalPrompt,
+      selectedOptionId: prepared.options[0]?.id ?? null,
+      options: prepared.options.map((option) => ({
+        id: option.id,
+        title: `Option ${option.id}`,
+        summary: "Generating runnable proposal.",
+        workspacePath: option.workspacePath,
+        status: "generating",
+        changedFiles: [],
+      })),
+      status: "generating",
+      createdAt: now,
+      updatedAt: now,
+    };
+    setDesktop((current) => ({
+      ...current,
+      codeProposalSets: {
+        ...current.codeProposalSets,
+        [previewSet.proposalSetId]: previewSet,
+      },
+    }));
+    return prepared;
+  }
+
+  async function prepareAdditionalCodeProposalOption(
+    project: Project,
+    previewSet: CodeProposalSet,
+    request: CodeProposalAddOptionRequest,
+  ) {
+    const sourceOption = request.sourceOptionId
+      ? previewSet.options.find(
+          (candidate) => candidate.id === request.sourceOptionId,
+        )
+      : null;
+    const prepared = await desktopInvoke<PreparedProposalWorkspaces>(
+      "proposal_workspace_add_option",
+      {
+        projectPath: project.path,
+        proposalSetId: previewSet.proposalSetId,
+        optionId: request.optionId,
+        sourceWorkspacePath: sourceOption?.workspacePath ?? "",
+      },
+    );
+    const preparedOption = prepared?.options[0] ?? null;
+    if (!prepared || !preparedOption) {
+      throw new Error("Could not prepare the requested proposal option.");
+    }
+    const now = Date.now();
+    setDesktop((current) => {
+      const stored =
+        current.codeProposalSets[previewSet.proposalSetId] ?? previewSet;
+      const nextOption: CodeProposalOption = {
+        id: preparedOption.id,
+        title: `Option ${preparedOption.id}`,
+        summary: "Generating runnable proposal.",
+        workspacePath: preparedOption.workspacePath,
+        status: "generating",
+        changedFiles: [],
+      };
+      return {
+        ...current,
+        codeProposalSets: {
+          ...current.codeProposalSets,
+          [stored.proposalSetId]: {
+            ...stored,
+            rootPath: prepared.rootPath || stored.rootPath,
+            selectedOptionId: preparedOption.id,
+            options: sortCodeProposalOptions([
+              ...stored.options.filter(
+                (option) => option.id !== preparedOption.id,
+              ),
+              nextOption,
+            ]),
+            status: "generating",
+            updatedAt: now,
+          },
+        },
+      };
+    });
+    return prepared;
+  }
+
+  async function applyCodeProposal(
+    previewSet: CodeProposalSet,
+    option: CodeProposalOption,
+  ) {
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === previewSet.projectId,
+    );
+    if (!project) {
+      setSendError(
+        "That proposal belongs to a project that is no longer available.",
+      );
+      return;
+    }
+    setSendError(null);
+    setDesktop((current) => {
+      const stored = current.codeProposalSets[previewSet.proposalSetId];
+      if (!stored) return current;
+      return {
+        ...current,
+        codeProposalSets: {
+          ...current.codeProposalSets,
+          [stored.proposalSetId]: updateCodeProposalOption(stored, option.id, {
+            status: "applying",
+          }),
+        },
+      };
+    });
+    try {
+      void desktopInvoke("app_preview_stop", {
+        projectPath: option.workspacePath,
+      })?.catch(() => null);
+      const result = await desktopInvoke<ProposalWorkspaceApplyResult>(
+        "proposal_workspace_apply",
+        {
+          projectPath: project.path,
+          workspacePath: option.workspacePath,
+        },
+      );
+      if (!result?.ok) {
+        const firstConflict = result?.conflicts?.[0];
+        throw new Error(
+          firstConflict
+            ? `Cannot apply ${firstConflict.path}: ${firstConflict.reason}`
+            : "The proposal could not be applied.",
+        );
+      }
+      setDesktop((current) => {
+        const stored = current.codeProposalSets[previewSet.proposalSetId];
+        if (!stored) return current;
+        const updated = updateCodeProposalOption(stored, option.id, {
+          status: "applied",
+          changedFiles: result.changedFiles,
+          appliedAt: Date.now(),
+        });
+        return {
+          ...current,
+          codeProposalSets: {
+            ...current.codeProposalSets,
+            [stored.proposalSetId]: {
+              ...updated,
+              selectedOptionId: option.id,
+              status: "applied",
+              updatedAt: Date.now(),
+            },
+          },
+          codeProposalActiveSetIdsByThreadId: removeRecordKey(
+            current.codeProposalActiveSetIdsByThreadId,
+            stored.threadId,
+          ),
+        };
+      });
+      await refreshProjectEmptyStatus(project);
+      void desktopInvoke("app_preview_start", {
+        projectPath: project.path,
+      })?.catch(() => null);
+      openPreviewInspector(project.id);
+    } catch (error) {
+      const message = `Could not apply proposal: ${errorMessage(error)}`;
+      setSendError(message);
+      setDesktop((current) => {
+        const stored = current.codeProposalSets[previewSet.proposalSetId];
+        if (!stored) return current;
+        return {
+          ...current,
+          codeProposalSets: {
+            ...current.codeProposalSets,
+            [stored.proposalSetId]: {
+              ...updateCodeProposalOption(stored, option.id, {
+                status: "ready",
+              }),
+              status: "failed",
+              error: message,
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    }
+  }
+
+  async function finalizeCodeProposalTurn(
+    projectId: string,
+    proposalSetId: string,
+    turnId: string,
+  ) {
+    const previewSet = desktopRef.current.codeProposalSets[proposalSetId];
+    if (!previewSet) return;
+    try {
+      const diffs = (
+        await Promise.all(
+        previewSet.options.map((option) =>
+          desktopInvoke<ProposalWorkspaceDiffResult>(
+            "proposal_workspace_diff",
+            { workspacePath: option.workspacePath },
+          ),
+        ),
+        )
+      ).filter((diff): diff is ProposalWorkspaceDiffResult => Boolean(diff));
+      setDesktop((current) => {
+        const stored = current.codeProposalSets[proposalSetId];
+        if (!stored) return current;
+        const updatedOptions = stored.options.map((option) => {
+          const diff = diffs.find((candidate) => candidate.optionId === option.id);
+          return {
+            ...option,
+            status: "ready" as const,
+            changedFiles: diff?.changedFiles ?? [],
+            summary: codeProposalChangeSummary(diff?.changedFiles ?? []),
+          };
+        });
+        return {
+          ...current,
+          codeProposalSets: {
+            ...current.codeProposalSets,
+            [proposalSetId]: {
+              ...stored,
+              turnId,
+              options: updatedOptions,
+              selectedOptionId:
+                stored.selectedOptionId ?? updatedOptions[0]?.id ?? null,
+              status: "ready",
+              updatedAt: Date.now(),
+            },
+          },
+          codeProposalActiveSetIdsByThreadId: stored.threadId
+            ? {
+                ...current.codeProposalActiveSetIdsByThreadId,
+                [stored.threadId]: proposalSetId,
+              }
+            : current.codeProposalActiveSetIdsByThreadId,
+        };
+      });
+      openCodeProposalInspector(projectId, proposalSetId);
+    } catch (error) {
+      setSendError(`Could not finalize proposal workspaces: ${errorMessage(error)}`);
+      setDesktop((current) => {
+        const stored = current.codeProposalSets[proposalSetId];
+        if (!stored) return current;
+        return {
+          ...current,
+          codeProposalSets: {
+            ...current.codeProposalSets,
+            [proposalSetId]: {
+              ...stored,
+              status: "failed",
+              error: errorMessage(error),
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+    }
+  }
+
   async function refreshProjectEmptyStatus(
     project: Project,
   ): Promise<ProjectEmptyStatus | null> {
@@ -1328,10 +1738,46 @@ export function App() {
     }
   }
 
+  function stageBuildCodeProposal(
+    previewSet: CodeProposalSet,
+    option: CodeProposalOption,
+  ) {
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === previewSet.projectId,
+    );
+    if (!project) {
+      setSendError(
+        "That proposal belongs to a project that is no longer available.",
+      );
+      return;
+    }
+    setVisualDecisionComposerAction(null);
+    setComposerText(`Implement option ${option.id}`);
+    setAttachments([]);
+    selectCodeProposal(previewSet.proposalSetId, option.id);
+    updateProject(project.id, (candidate) => ({
+      ...candidate,
+      settings: { ...candidate.settings, planMode: false },
+    }));
+    openCodeProposalInspector(previewSet.projectId, previewSet.proposalSetId);
+    if (!desktop.activeThreadId) {
+      setActiveDraftProjectId(project.id);
+    }
+    setSendError(null);
+    window.requestAnimationFrame(() => {
+      document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
+    });
+  }
+
   function chooseVisualDecisionOption(
     decision: ActiveVisualDecision,
     option: VisualDecisionOption,
   ) {
+    const decisionContexts = activeProject
+      ? (desktop.sentComposerContextsByTurnId[decision.turnId] ?? []).filter(
+          (context) => context.projectId === activeProject.id,
+        )
+      : [];
     setDismissedVisualDecisionIds((current) => ({
       ...current,
       [decision.id]: true,
@@ -1344,7 +1790,10 @@ export function App() {
     setAttachments([]);
     if (activeProject) {
       setComposerContexts((current) =>
-        composerContextsForProject(current, activeProject.id),
+        dedupeComposerContexts([
+          ...composerContextsForProject(current, activeProject.id),
+          ...decisionContexts,
+        ]),
       );
     }
     if (activeProject && !desktop.activeThreadId) {
@@ -1522,26 +1971,50 @@ export function App() {
   function attachAppPreviewMark(
     project: Project,
     areaMark: PlanPreviewAreaMark | null,
-    meta: { previewUrl: string; viewport: "desktop" | "mobile" },
+    meta: {
+      previewUrl: string;
+      viewport: "desktop" | "mobile";
+      thumbnailDataUrl?: string;
+    },
   ) {
     setComposerContexts((current) => {
-      const withoutProjectMark = current.filter(
-        (context) =>
-          context.type !== "appPreview" || context.projectId !== project.id,
+      if (!areaMark) {
+        return current.filter(
+          (context) =>
+            context.type !== "appPreview" || context.projectId !== project.id,
+        );
+      }
+      const existingContext = current.find(
+        (context): context is ComposerAppPreviewContext =>
+          context.type === "appPreview" &&
+          context.projectId === project.id &&
+          context.areaMark.createdAt === areaMark.createdAt,
       );
-      if (!areaMark) return withoutProjectMark;
+      const markNumber =
+        existingContext?.markNumber ??
+        nextAppPreviewMarkNumber(current, project.id);
       const nextContext: ComposerAppPreviewContext = {
         type: "appPreview",
-        id: `app-preview:${project.id}:${areaMark.createdAt}`,
+        id:
+          existingContext?.id ??
+          `app-preview:${project.id}:${areaMark.createdAt}`,
         projectId: project.id,
         projectName: project.name,
         previewUrl: meta.previewUrl,
         viewport: meta.viewport,
-        markLabel: "App mark 1",
-        markNumber: 1,
+        markLabel: existingContext?.markLabel ?? `Mark ${markNumber}`,
+        markNumber,
         areaMark,
+        thumbnailDataUrl:
+          meta.thumbnailDataUrl ?? existingContext?.thumbnailDataUrl,
       };
-      return [...withoutProjectMark, nextContext];
+      const withoutCurrentMark = current.filter(
+        (context) =>
+          context.type !== "appPreview" ||
+          context.projectId !== project.id ||
+          context.areaMark.createdAt !== areaMark.createdAt,
+      );
+      return [...withoutCurrentMark, nextContext];
     });
     if (!desktop.activeThreadId) {
       setActiveDraftProjectId(project.id);
@@ -1558,6 +2031,7 @@ export function App() {
       source?: ComposerMockupPreviewContext["source"];
       viewport?: ComposerMockupPreviewContext["viewport"];
       highlightId?: string;
+      thumbnailDataUrl?: string;
     },
   ) {
     const project = desktop.projects.find(
@@ -1599,6 +2073,7 @@ export function App() {
         filePath: mockup.filePath,
         viewport: meta?.viewport === "mobile" ? "mobile" : "desktop",
         areaMark,
+        thumbnailDataUrl: meta?.thumbnailDataUrl,
         source: meta?.source ?? "userMark",
         highlightId: meta?.highlightId,
       };
@@ -1686,7 +2161,8 @@ export function App() {
     setInspector((current) =>
       current.type === "appPreview"
         ? { type: "appPreview", projectId: project.id }
-        : current.type === "mockupPreview"
+        : current.type === "mockupPreview" ||
+            current.type === "codeProposalPreview"
           ? { type: "empty" }
           : { type: "empty" },
     );
@@ -1721,10 +2197,14 @@ export function App() {
       activeProject;
     clearActiveDraftSelection();
     setInspector((current) =>
-      (current.type === "appPreview" || current.type === "mockupPreview") &&
+      (current.type === "appPreview" ||
+        current.type === "mockupPreview" ||
+        current.type === "codeProposalPreview") &&
       projectForThread
         ? preferredLivePreviewSelection(projectForThread.id, threadId)
-        : current.type === "appPreview" || current.type === "mockupPreview"
+        : current.type === "appPreview" ||
+            current.type === "mockupPreview" ||
+            current.type === "codeProposalPreview"
           ? current
           : { type: "empty" },
     );
@@ -1954,15 +2434,120 @@ export function App() {
           selectedMockupPreviewSet.proposalSetId
         ],
     );
+    const selectedCodeProposalSet =
+      inspector.type === "codeProposalPreview"
+        ? (desktop.codeProposalSets[inspector.proposalSetId] ?? null)
+        : activeThreadCodeProposalSetId
+          ? (desktop.codeProposalSets[activeThreadCodeProposalSetId] ?? null)
+        : null;
+    if (
+      selectedCodeProposalSet &&
+      visiblePrompt &&
+      isCodeProposalImplementationCommitment(visiblePrompt)
+    ) {
+      const unsupportedOption = unsupportedCodeProposalOptionLabel(visiblePrompt);
+      if (unsupportedOption) {
+        setSendError(codeProposalOptionLimitMessage(unsupportedOption));
+        return;
+      }
+      const requestedOptionId =
+        optionIdFromText(visiblePrompt) ??
+        selectedCodeProposalSet.selectedOptionId ??
+        selectedCodeProposalSet.options[0]?.id ??
+        null;
+      const option = requestedOptionId
+        ? selectedCodeProposalSet.options.find(
+            (candidate) => candidate.id === requestedOptionId,
+          )
+        : null;
+      if (!option) {
+        setSendError("Choose a proposal option before applying it.");
+        return;
+      }
+      await applyCodeProposal(selectedCodeProposalSet, option);
+      setComposerText("");
+      setAttachments([]);
+      setComposerContexts([]);
+      setVisualDecisionComposerAction(null);
+      return;
+    }
+    const codeProposalOptionBlockReason = selectedCodeProposalSet
+      ? codeProposalAddOptionBlockReason(
+          visiblePrompt,
+          selectedCodeProposalSet,
+        )
+      : null;
+    if (codeProposalOptionBlockReason) {
+      setSendError(codeProposalOptionBlockReason);
+      return;
+    }
+    const addCodeProposalOptionRequest = selectedCodeProposalSet
+      ? codeProposalAddOptionRequest(visiblePrompt, selectedCodeProposalSet)
+      : null;
     let prompt = visiblePrompt;
     let settings = { ...activeProject.settings };
     let contexts = [...activeComposerContexts];
     let openMockupsOnComplete = false;
+    let liveOverlayProposalOnComplete = false;
+    let codeProposalOnComplete = false;
+    let mockupHistoryOnComplete = false;
     let proposalSetId: string | null = null;
     let artifactKind: PreviewArtifactKind | null = null;
+    let cwdOverride: string | null = null;
 
-    if (visualDecisionComposerAction) {
-      if (visualDecisionOptionCreatesMockups(visualDecisionComposerAction.option)) {
+    if (selectedCodeProposalSet && addCodeProposalOptionRequest) {
+      proposalSetId = selectedCodeProposalSet.proposalSetId;
+      const codeProposal = await prepareAdditionalCodeProposalOption(
+        activeProject,
+        selectedCodeProposalSet,
+        addCodeProposalOptionRequest,
+      );
+      cwdOverride = codeProposal.rootPath;
+      prompt = codeProposalAddOptionPrompt(
+        visiblePrompt,
+        activeProject,
+        status,
+        planModeWasOn,
+        liveContext,
+        selectedCodeProposalSet,
+        codeProposal,
+        addCodeProposalOptionRequest,
+      );
+      settings = { ...settings, planMode: false };
+      codeProposalOnComplete = true;
+    } else if (visualDecisionComposerAction) {
+      const createsCodeProposal =
+        visualDecisionOptionCreatesCodeProposal(
+          visualDecisionComposerAction.option,
+        ) &&
+        shouldUseCodeProposalWorkspace(
+          [
+            visiblePrompt,
+            visualDecisionComposerText(visualDecisionComposerAction.option),
+            visualDecisionComposerAction.option.prompt,
+          ].join(" "),
+        );
+      const createsLiveOverlay = visualDecisionOptionCreatesLiveOverlay(
+        visualDecisionComposerAction.option,
+      );
+      const createsMockups =
+        !createsCodeProposal &&
+        !createsLiveOverlay &&
+        visualDecisionOptionCreatesMockups(visualDecisionComposerAction.option);
+      let codeProposal: PreparedProposalWorkspaces | null = null;
+      if (createsCodeProposal) {
+        proposalSetId = createProposalSetId(
+          activeThread?.id ?? activeProject.id,
+        );
+        codeProposal = await prepareCodeProposalSet(
+          activeProject,
+          proposalSetId,
+          codeProposalOptionIds(visualDecisionComposerAction.option),
+          visiblePrompt || visualDecisionComposerText(visualDecisionComposerAction.option),
+        );
+        cwdOverride = codeProposal.rootPath;
+      }
+      if (createsMockups) {
         proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
         artifactKind = visualDecisionArtifactKind(
           visualDecisionComposerAction.option,
@@ -1974,22 +2559,28 @@ export function App() {
         proposalSetId,
         artifactKind,
         activeThread?.id ?? null,
+        liveContext,
+        codeProposal,
       );
       settings = { ...settings, planMode: false };
-      openMockupsOnComplete = visualDecisionOptionCreatesMockups(
-        visualDecisionComposerAction.option,
-      );
+      openMockupsOnComplete = createsMockups;
+      liveOverlayProposalOnComplete = createsLiveOverlay;
+      codeProposalOnComplete = createsCodeProposal;
     } else if (
       selectedMockupPreviewSet &&
       inspector.type === "mockupPreview" &&
       !selectedMockupIsHistory &&
       visiblePrompt
     ) {
+      const commitsToLive = isSavedMockupImplementationCommitment(
+        visiblePrompt,
+      );
       proposalSetId = selectedMockupPreviewSet.proposalSetId;
       artifactKind = selectedMockupPreviewSet.artifactKind;
       prompt = savedMockupReviewPrompt(visiblePrompt, selectedMockupPreviewSet);
       settings = { ...settings, planMode: false };
-      openMockupsOnComplete = true;
+      openMockupsOnComplete = !commitsToLive;
+      mockupHistoryOnComplete = commitsToLive;
     } else if (
       status?.empty &&
       !planModeWasOn &&
@@ -2024,24 +2615,56 @@ export function App() {
       (isExplicitPreviewFirstRequest(visiblePrompt) ||
         isExplicitOptionsRequest(visiblePrompt))
     ) {
-      proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
-      artifactKind = explicitPreviewArtifactKind(
-        visiblePrompt,
-        isExplicitOptionsRequest(visiblePrompt) ? "mockup" : "preview",
-      );
-      prompt = existingAppPreviewFirstPrompt(
-        visiblePrompt,
-        activeProject,
-        status,
-        isExplicitOptionsRequest(visiblePrompt),
-        planModeWasOn,
-        liveContext,
-        proposalSetId,
-        artifactKind,
-        activeThread?.id ?? null,
-      );
+      const wantsOptions = isExplicitOptionsRequest(visiblePrompt);
+      if (shouldUseCodeProposalWorkspace(visiblePrompt)) {
+        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
+        const codeProposal = await prepareCodeProposalSet(
+          activeProject,
+          proposalSetId,
+          codeProposalOptionIdsForPrompt(visiblePrompt, wantsOptions),
+          visiblePrompt,
+        );
+        cwdOverride = codeProposal.rootPath;
+        prompt = codeProposalWorkspacePrompt(
+          visiblePrompt,
+          activeProject,
+          status,
+          wantsOptions,
+          planModeWasOn,
+          liveContext,
+          codeProposal,
+        );
+        codeProposalOnComplete = true;
+      } else if (shouldUseLiveOverlayProposal(visiblePrompt)) {
+        prompt = liveOverlayProposalPrompt(
+          visiblePrompt,
+          activeProject,
+          status,
+          wantsOptions,
+          planModeWasOn,
+          liveContext,
+        );
+        liveOverlayProposalOnComplete = true;
+      } else {
+        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
+        artifactKind = explicitPreviewArtifactKind(
+          visiblePrompt,
+          wantsOptions ? "mockup" : "preview",
+        );
+        prompt = existingAppPreviewFirstPrompt(
+          visiblePrompt,
+          activeProject,
+          status,
+          wantsOptions,
+          planModeWasOn,
+          liveContext,
+          proposalSetId,
+          artifactKind,
+          activeThread?.id ?? null,
+        );
+        openMockupsOnComplete = true;
+      }
       settings = { ...settings, planMode: false };
-      openMockupsOnComplete = true;
     }
 
     const draft: SubmissionDraft = {
@@ -2054,7 +2677,11 @@ export function App() {
       createdAt: Date.now(),
       localDraftProjectId:
         activeDraftProjectId === activeProject.id ? activeDraftProjectId : null,
+      cwdOverride,
       openMockupsOnComplete,
+      liveOverlayProposalOnComplete,
+      codeProposalOnComplete,
+      mockupHistoryOnComplete,
       proposalSetId,
       artifactKind,
     };
@@ -2086,7 +2713,11 @@ export function App() {
       hasUnsupportedAttachments:
         unsupportedAttachments(draft.attachments).length > 0,
       pendingApprovals,
-      promptReady: Boolean(draft.prompt.trim()) || draft.contexts.length > 0,
+      promptReady: hasDraftContent({
+        text: draft.prompt,
+        attachments: draft.attachments,
+        contexts: draft.contexts,
+      }),
       sendStarting: sendStartingRef.current || sendStarting,
       runningTurnId: runningTurnIdRef.current ?? runningTurnId,
     });
@@ -2148,7 +2779,13 @@ export function App() {
       ];
       let response: { turn: Turn };
       try {
-        response = await startTurn(targetThread, project, draft.settings, input);
+        response = await startTurn(
+          targetThread,
+          project,
+          draft.settings,
+          input,
+          draft.cwdOverride,
+        );
       } catch (error) {
         if (!isStaleThreadError(error)) throw error;
         forgetThread(targetThread.id);
@@ -2157,7 +2794,13 @@ export function App() {
           throw new Error("Could not create a replacement chat thread.");
         }
         targetThread = replacementThread;
-        response = await startTurn(targetThread, project, draft.settings, input);
+        response = await startTurn(
+          targetThread,
+          project,
+          draft.settings,
+          input,
+          draft.cwdOverride,
+        );
       }
 
       const visibleTurn = turnWithOptimisticUserMessage(
@@ -2166,9 +2809,12 @@ export function App() {
         draft.attachments,
       );
       const now = Date.now();
-      const planProposal: PlanProposal | null = draft.settings.planMode
+      const planProposal: PlanProposal | null =
+        draft.settings.planMode || draft.liveOverlayProposalOnComplete
         ? {
-            id: `plan:${response.turn.id}`,
+            id: `${
+              draft.liveOverlayProposalOnComplete ? "live-proposal" : "plan"
+            }:${response.turn.id}`,
             projectId: project.id,
             threadId: targetThread.id,
             turnId: response.turn.id,
@@ -2179,7 +2825,9 @@ export function App() {
             previewAreaMark: null,
             previewSession: null,
             previewUserEditedAt: undefined,
-            proposalKind: "plan",
+            proposalKind: draft.liveOverlayProposalOnComplete
+              ? "live_proposal"
+              : "plan",
             status: "pending",
             createdAt: now,
             updatedAt: now,
@@ -2207,14 +2855,17 @@ export function App() {
         );
       }
       if (options.clearComposer || sendingLocalDraft) {
-        const preserveDecisionContexts =
-          isExistingAppVisualDecisionPrompt(draft.prompt) ||
-          isEmptyProjectVisualPlanningPrompt(draft.prompt);
+        const sentContextIds = new Set(
+          draft.contexts.map(composerContextIdentity),
+        );
         setComposerText("");
         setAttachments([]);
         setComposerContexts((current) =>
-          preserveDecisionContexts
-            ? composerContextsForProject(current, project.id)
+          sentContextIds.size > 0
+            ? current.filter(
+                (context) =>
+                  !sentContextIds.has(composerContextIdentity(context)),
+              )
             : [],
         );
         setVisualDecisionComposerAction(null);
@@ -2233,10 +2884,36 @@ export function App() {
       }));
       setDesktop((current) => {
         const targetProposalSetId = draft.proposalSetId?.trim() || "";
-        return {
+        const next = {
           ...current,
           activeProjectId: project.id,
           activeThreadId: targetThread.id,
+          sentComposerContextsByTurnId:
+            draft.contexts.length > 0
+              ? pruneSentComposerContextsByTurnId({
+                  ...current.sentComposerContextsByTurnId,
+                  [response.turn.id]: draft.contexts,
+                })
+              : current.sentComposerContextsByTurnId,
+          codeProposalActiveSetIdsByThreadId:
+            draft.codeProposalOnComplete && targetProposalSetId
+              ? {
+                  ...current.codeProposalActiveSetIdsByThreadId,
+                  [targetThread.id]: targetProposalSetId,
+                }
+              : current.codeProposalActiveSetIdsByThreadId,
+          codeProposalSets:
+            draft.codeProposalOnComplete && targetProposalSetId
+              ? {
+                  ...current.codeProposalSets,
+                  [targetProposalSetId]: {
+                    ...current.codeProposalSets[targetProposalSetId],
+                    threadId: targetThread.id,
+                    turnId: response.turn.id,
+                    updatedAt: Date.now(),
+                  },
+                }
+              : current.codeProposalSets,
           mockupActiveProposalSetIdsByThreadId:
             draft.openMockupsOnComplete && targetProposalSetId
               ? {
@@ -2263,11 +2940,14 @@ export function App() {
               : stored,
           ),
         };
+        return draft.mockupHistoryOnComplete && targetProposalSetId
+          ? markMockupProposalSetAsHistory(next, targetProposalSetId)
+          : next;
       });
       void pollTurnUntilSettled(
         targetThread.id,
         response.turn.id,
-        project.path,
+        draft.cwdOverride || project.path,
       );
       return true;
     } catch (error) {
@@ -2292,12 +2972,16 @@ export function App() {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
+    const acceptedPreviewContext = planPreviewDecisionSummary(latestProposal);
+    const acceptsLiveProposal = latestProposal.proposalKind === "live_proposal";
     const accepted = await sendDraft(
       {
-        prompt: planProposalAcceptPrompt(
-          planPreviewDecisionSummary(latestProposal),
-        ),
-        visiblePrompt: "I accept this plan. Implement it now.",
+        prompt: acceptsLiveProposal
+          ? liveOverlayProposalAcceptPrompt(acceptedPreviewContext)
+          : planProposalAcceptPrompt(acceptedPreviewContext),
+        visiblePrompt: acceptsLiveProposal
+          ? "Build selected proposal."
+          : "I accept this plan. Implement it now.",
         projectId: project.id,
         settings: {
           ...project.settings,
@@ -2349,25 +3033,37 @@ export function App() {
     }
     const revisionFeedback = feedback.trim();
     const revisionPreviewContext = planPreviewDecisionSummary(latestProposal);
+    const revisesLiveProposal = latestProposal.proposalKind === "live_proposal";
     if (revisionFeedback || revisionPreviewContext) {
       const sent = await sendDraft(
         {
-          prompt: planProposalRevisionPrompt(
-            latestProposal,
-            revisionFeedback,
-            revisionPreviewContext,
-          ),
-          visiblePrompt: feedback.trim() || "Please revise the plan.",
+          prompt: revisesLiveProposal
+            ? liveOverlayProposalRevisionPrompt(
+                latestProposal,
+                revisionFeedback,
+                revisionPreviewContext,
+              )
+            : planProposalRevisionPrompt(
+                latestProposal,
+                revisionFeedback,
+                revisionPreviewContext,
+              ),
+          visiblePrompt:
+            feedback.trim() ||
+            (revisesLiveProposal
+              ? "Please revise the proposal."
+              : "Please revise the plan."),
           projectId: project.id,
           settings: {
             ...project.settings,
-            planMode: true,
+            planMode: !revisesLiveProposal,
           },
           attachments: [],
           contexts: latestProposal.contexts,
           createdAt: Date.now(),
           localDraftProjectId: null,
           targetThreadId: latestProposal.threadId,
+          liveOverlayProposalOnComplete: revisesLiveProposal,
         },
         { clearComposer: true },
       );
@@ -2390,7 +3086,7 @@ export function App() {
                 ...candidate,
                 settings: {
                   ...candidate.settings,
-                  planMode: true,
+                  planMode: !revisesLiveProposal,
                 },
               }
             : candidate,
@@ -2402,7 +3098,11 @@ export function App() {
     setActionError(null);
     setRetryDraft(null);
     setActiveDraftProjectId(null);
-    setComposerText(planProposalRevisionPrompt(latestProposal));
+    setComposerText(
+      latestProposal.proposalKind === "live_proposal"
+        ? liveOverlayProposalRevisionPrompt(latestProposal)
+        : planProposalRevisionPrompt(latestProposal),
+    );
     setAttachments([]);
     setComposerContexts(latestProposal.contexts);
     window.requestAnimationFrame(() => {
@@ -2418,7 +3118,7 @@ export function App() {
               ...candidate,
               settings: {
                 ...candidate.settings,
-                planMode: true,
+                planMode: latestProposal.proposalKind !== "live_proposal",
               },
             }
           : candidate,
@@ -2485,14 +3185,16 @@ export function App() {
     project: Project,
     settings: ProjectSettings,
     input: Array<Record<string, unknown>>,
+    cwdOverride?: string | null,
   ) {
+    const cwd = cwdOverride || project.path;
     return withRequestTimeout(
       client.request<{ turn: Turn }>("turn/start", {
         threadId: targetThread.id,
-        cwd: project.path,
+        cwd,
         input,
         approvalPolicy: settings.approvalPolicy,
-        sandboxPolicy: sandboxPolicyFor(settings.sandbox, project.path),
+        sandboxPolicy: sandboxPolicyFor(settings.sandbox, cwd),
         model: settings.model,
         effort: settings.effort,
         serviceTier: settings.serviceTier,
@@ -3290,6 +3992,10 @@ export function App() {
     activeThreadProposalSetId
       ? (mockupPreviewSets[activeThreadProposalSetId] ?? null)
       : null;
+  const activeThreadCodeProposalSet =
+    activeThreadCodeProposalSetId
+      ? (desktop.codeProposalSets[activeThreadCodeProposalSetId] ?? null)
+      : null;
   const previewProject = activePreviewProjectId
     ? (desktop.projects.find(
         (project) => project.id === activePreviewProjectId,
@@ -3299,14 +4005,20 @@ export function App() {
     inspector.type === "planPreview"
       ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
       : null;
-  const selectedAppPreviewContext =
-    inspector.type === "appPreview" || inspector.type === "mockupPreview"
-      ? (activeComposerContexts.find(
+  const selectedAppPreviewContexts =
+    inspector.type === "appPreview" ||
+    inspector.type === "mockupPreview" ||
+    inspector.type === "codeProposalPreview"
+      ? activeComposerContexts.filter(
           (context): context is ComposerAppPreviewContext =>
             context.type === "appPreview" &&
             context.projectId === inspector.projectId,
-        ) ?? null)
-      : null;
+        )
+      : [];
+  const selectedCodeProposalSet =
+    inspector.type === "codeProposalPreview"
+      ? (desktop.codeProposalSets[inspector.proposalSetId] ?? null)
+      : activeThreadCodeProposalSet;
   const selectedMockupPreviewSet =
     inspector.type === "mockupPreview"
       ? (mockupPreviewSets[inspector.proposalSetId] ?? null)
@@ -3324,6 +4036,11 @@ export function App() {
       projectEmptyStatusById[selectedMockupPreviewSet.projectId] &&
       !projectEmptyStatusById[selectedMockupPreviewSet.projectId].empty,
   );
+  const selectedCodeProposalCanShowLive = Boolean(
+    selectedCodeProposalSet &&
+      projectEmptyStatusById[selectedCodeProposalSet.projectId] &&
+      !projectEmptyStatusById[selectedCodeProposalSet.projectId].empty,
+  );
   const mockupPreviewMarks = composerContexts.filter(
     (context): context is ComposerMockupPreviewContext =>
       context.type === "mockupPreview" &&
@@ -3340,7 +4057,10 @@ export function App() {
         inspector.projectId === activeProject.id) ||
         (inspector.type === "mockupPreview" &&
           inspector.projectId === activeProject.id &&
-          inspector.proposalSetId === activeThreadProposalSetId)),
+          inspector.proposalSetId === activeThreadProposalSetId) ||
+        (inspector.type === "codeProposalPreview" &&
+          inspector.projectId === activeProject.id &&
+          inspector.proposalSetId === activeThreadCodeProposalSetId)),
   );
   const activeThreadRunning = Boolean(
     runningTurnId &&
@@ -3475,6 +4195,7 @@ export function App() {
             onSelect={selectInspector}
             planProposalFeedbackDrafts={planProposalFeedbackDrafts}
             planProposals={desktop.planProposals}
+            sentComposerContextsByTurnId={desktop.sentComposerContextsByTurnId}
           />
         </section>
 
@@ -3487,6 +4208,26 @@ export function App() {
             }
           />
         )}
+
+        {activeThreadCodeProposalSet?.status === "ready" &&
+          activeThreadCodeProposalSet.options.length > 0 &&
+          !activeVisualDecision && (
+            <CodeProposalOptionStrip
+              previewSet={activeThreadCodeProposalSet}
+              onOpen={() =>
+                openCodeProposalInspector(
+                  activeThreadCodeProposalSet.projectId,
+                  activeThreadCodeProposalSet.proposalSetId,
+                )
+              }
+              onSelect={(optionId) =>
+                selectCodeProposal(
+                  activeThreadCodeProposalSet.proposalSetId,
+                  optionId,
+                )
+              }
+            />
+          )}
 
         {composerMockupPreviewSet &&
           composerMockupPreviewSet.mockups.length > 0 &&
@@ -3505,13 +4246,6 @@ export function App() {
               }
             />
           )}
-
-        <ActiveTurnProgressPill
-          active={activeTurnState?.status === "inProgress"}
-          progress={activeTurnProgress}
-          startedAt={activeTurnState?.startedAt ?? null}
-          onReview={(item) => selectInspector({ type: "fileChange", item })}
-        />
 
         <Composer
           attachments={attachments}
@@ -3565,7 +4299,9 @@ export function App() {
           activeThread={activeThread}
           previewProject={previewProject}
           planPreviewProposal={selectedPlanPreviewProposal}
-          appPreviewContext={selectedAppPreviewContext}
+          appPreviewContexts={selectedAppPreviewContexts}
+          codeProposalCanShowLive={selectedCodeProposalCanShowLive}
+          codeProposalSet={selectedCodeProposalSet}
           mockupPreviewSet={selectedMockupPreviewSet}
           mockupCanShowLive={selectedMockupCanShowLive}
           mockupPreviewLiveResetToken={mockupPreviewLiveResetToken}
@@ -3583,6 +4319,10 @@ export function App() {
           onAttachAppPreviewMark={attachAppPreviewMark}
           onAttachMockupPreviewMark={attachMockupPreviewMark}
           onBuildBaselineApp={requestBaselineApp}
+          onBuildCodeProposal={(previewSet, option) =>
+            stageBuildCodeProposal(previewSet, option)
+          }
+          onSelectCodeProposal={selectCodeProposal}
           onBuildMockup={(previewSet, mockup) =>
             stageBuildMockup(previewSet, mockup)
           }
@@ -3786,6 +4526,7 @@ function latestVisualDecision(
   if (!thread) return null;
   for (const turn of [...thread.turns].reverse()) {
     if (turn.status === "inProgress") continue;
+    if (turnContainsText(turn, SAVED_MOCKUP_REVIEW_SENTINEL)) continue;
     const decision = parseVisualDecisionStrip(finalAgentText(turn));
     if (!decision) continue;
     const id = `${thread.id}:${turn.id}`;
@@ -3794,6 +4535,29 @@ function latestVisualDecision(
     return { id, turnId: turn.id, decision };
   }
   return null;
+}
+
+function turnContainsText(turn: Turn, needle: string) {
+  return turn.items.some((item) => threadItemContainsText(item, needle));
+}
+
+function threadItemContainsText(item: ThreadItem, needle: string): boolean {
+  if (item.type === "userMessage") {
+    return item.content.some(
+      (part) =>
+        part.type === "text" &&
+        typeof part.text === "string" &&
+        part.text.includes(needle),
+    );
+  }
+  if (
+    (item.type === "agentMessage" || item.type === "reasoning") &&
+    "text" in item &&
+    typeof item.text === "string"
+  ) {
+    return item.text.includes(needle);
+  }
+  return false;
 }
 
 function visualDecisionStillValid(
@@ -3880,6 +4644,9 @@ const EXISTING_APP_VISUAL_DECISION_SENTINEL =
   "[Codex Existing App Visual Decision Context]";
 const EXISTING_APP_PREVIEW_FIRST_SENTINEL =
   "[Codex Existing App Preview First Context]";
+const LIVE_OVERLAY_PROPOSAL_SENTINEL = "[Codex Live Overlay Proposal Context]";
+const CODE_PROPOSAL_WORKSPACE_SENTINEL =
+  "[Codex Code Proposal Workspace Context]";
 const SAVED_MOCKUP_REVIEW_SENTINEL = "[Codex Saved Mockup Review Context]";
 const VISUAL_DECISION_SELECTION_SENTINEL = "[Codex Visual Decision Selection]";
 
@@ -3918,6 +4685,10 @@ function isExistingAppVisualDecisionPrompt(prompt: string) {
 
 function isExistingAppPreviewFirstPrompt(prompt: string) {
   return prompt.trimStart().startsWith(EXISTING_APP_PREVIEW_FIRST_SENTINEL);
+}
+
+function isLiveOverlayProposalPrompt(prompt: string) {
+  return prompt.trimStart().startsWith(LIVE_OVERLAY_PROPOSAL_SENTINEL);
 }
 
 function isMockupReviewPrompt(prompt: string) {
@@ -4063,8 +4834,220 @@ function visualDecisionOptionCreatesMockups(option: VisualDecisionOption) {
   const text = [option.id, option.label, option.description, option.prompt]
     .join(" ")
     .toLowerCase();
+  if (visualDecisionOptionCreatesCodeProposal(option)) return false;
+  if (visualDecisionOptionCreatesLiveOverlay(option)) return false;
   if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
   return /\b(mockup|mockups|wireframe|wireframes|preview|previews|layout option|layout options|visual option|visual options|visual direction|visual directions|direction|directions|concept|concepts)\b/.test(
+    text,
+  );
+}
+
+function visualDecisionOptionCreatesCodeProposal(option: VisualDecisionOption) {
+  const text = [option.id, option.label, option.description, option.prompt]
+    .join(" ")
+    .toLowerCase();
+  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
+  return /\b(runnable\s+proposal|proposal\s+workspace|code[-\s]?backed|temporary\s+workspace|candidate\s+app|candidate\s+apps)\b/.test(
+    text,
+  );
+}
+
+function codeProposalOptionIds(
+  option: VisualDecisionOption,
+): Array<"A" | "B" | "C"> {
+  const text = [option.id, option.label, option.description, option.prompt]
+    .join(" ")
+    .toLowerCase();
+  if (/\b(3|three)\b/.test(text)) return ["A", "B", "C"];
+  if (/\b(2|two)\b/.test(text)) return ["A", "B"];
+  if (/\b(options|directions|variants|candidates|concepts)\b/.test(text)) {
+    return ["A", "B", "C"];
+  }
+  return ["A"];
+}
+
+function codeProposalOptionIdsForPrompt(
+  prompt: string,
+  wantsOptions: boolean,
+): Array<"A" | "B" | "C"> {
+  const text = prompt.toLowerCase();
+  if (/\b(3|three)\b/.test(text)) return ["A", "B", "C"];
+  if (/\b(2|two)\b/.test(text)) {
+    return ["A", "B"];
+  }
+  if (wantsOptions || /\b(options|directions|variants|candidates|concepts)\b/.test(text)) {
+    return ["A", "B", "C"];
+  }
+  return ["A"];
+}
+
+function codeProposalAddOptionRequest(
+  prompt: string,
+  previewSet: CodeProposalSet,
+): CodeProposalAddOptionRequest | null {
+  const text = prompt.toLowerCase();
+  if (isCodeProposalImplementationCommitment(prompt)) return null;
+  const requestedOptionId = requestedCodeProposalTargetOptionId(prompt);
+  const hasAddIntent =
+    /\b(add|create|new|another|additional|one more)\b/.test(text) ||
+    Boolean(requestedOptionId);
+  if (!hasAddIntent) return null;
+  const optionId = requestedOptionId ?? nextMissingCodeProposalOptionId(previewSet);
+  if (!optionId) return null;
+  const sourceOptionId =
+    sourceCodeProposalOptionId(prompt, previewSet) ??
+    previewSet.selectedOptionId ??
+    previewSet.options[0]?.id ??
+    null;
+  return { optionId, sourceOptionId };
+}
+
+function codeProposalAddOptionBlockReason(
+  prompt: string,
+  previewSet: CodeProposalSet,
+): string | null {
+  if (isCodeProposalImplementationCommitment(prompt)) return null;
+  const unsupportedTarget = unsupportedCodeProposalOptionLabel(prompt);
+  if (unsupportedTarget) return codeProposalOptionLimitMessage(unsupportedTarget);
+  const text = prompt.toLowerCase();
+  const hasAddIntent = /\b(add|create|new|another|additional|one more)\b/.test(
+    text,
+  );
+  if (!hasAddIntent) return null;
+  if (requestedCodeProposalTargetOptionId(prompt)) return null;
+  if (!nextMissingCodeProposalOptionId(previewSet)) {
+    return "This proposal set already has A, B, and C. Canvas v2 currently supports three active comparison options at once. Ask me to revise/replace one of A, B, or C, or start a fresh proposal set.";
+  }
+  return null;
+}
+
+function unsupportedCodeProposalOptionLabel(prompt: string) {
+  const targetLabel = requestedCodeProposalTargetLabel(prompt);
+  if (targetLabel && !isSupportedCodeProposalOptionLabel(targetLabel)) {
+    return targetLabel;
+  }
+  const sourceLabel = sourceCodeProposalOptionLabel(prompt);
+  if (sourceLabel && !isSupportedCodeProposalOptionLabel(sourceLabel)) {
+    return sourceLabel;
+  }
+  const optionMatches = [...prompt.matchAll(/\boption\s+([a-z])\b/gi)];
+  const unsupported = optionMatches
+    .map((match) => match[1]?.toUpperCase() ?? "")
+    .find((label) => Boolean(label) && !isSupportedCodeProposalOptionLabel(label));
+  return unsupported || null;
+}
+
+function codeProposalOptionLimitMessage(optionLabel: string) {
+  return `Option ${optionLabel.toUpperCase()} is not available here. Canvas v2 currently supports up to three active proposal options at once: A, B, and C. Ask me to revise/replace A, B, or C, or start a fresh proposal set.`;
+}
+
+function requestedCodeProposalTargetOptionId(
+  prompt: string,
+): "A" | "B" | "C" | null {
+  const value = requestedCodeProposalTargetLabel(prompt);
+  return isCodeProposalOptionId(value) ? value : null;
+}
+
+function requestedCodeProposalTargetLabel(prompt: string): string | null {
+  const matches = [
+    ...prompt.matchAll(
+      /\b(?:add|create|new|another|additional|one\s+more|make|as|called|label(?:ed)?)\s+(?:it\s+)?(?:an?\s+)?(?:option\s+)?([a-z])\b/gi,
+    ),
+  ];
+  const last = matches[matches.length - 1]?.[1]?.toUpperCase();
+  if (last) return last;
+  const addMatch = prompt.match(/\badd\s+option\s+([a-z])\b/i);
+  return addMatch?.[1]?.toUpperCase() ?? null;
+}
+
+function sourceCodeProposalOptionId(
+  prompt: string,
+  previewSet: CodeProposalSet,
+): "A" | "B" | "C" | null {
+  const value = sourceCodeProposalOptionLabel(prompt);
+  if (!isCodeProposalOptionId(value)) return null;
+  return previewSet.options.some((option) => option.id === value)
+    ? value
+    : null;
+}
+
+function sourceCodeProposalOptionLabel(prompt: string): string | null {
+  const match = prompt.match(
+    /\b(?:based\s+on|from|like|derive(?:d)?\s+from|using)\s+(?:option\s+)?([a-z])\b/i,
+  );
+  return match?.[1]?.toUpperCase() ?? null;
+}
+
+function isCodeProposalOptionId(
+  value: string | null | undefined,
+): value is "A" | "B" | "C" {
+  return value === "A" || value === "B" || value === "C";
+}
+
+function isSupportedCodeProposalOptionLabel(value: string | null | undefined) {
+  return isCodeProposalOptionId(value?.toUpperCase());
+}
+
+function nextMissingCodeProposalOptionId(
+  previewSet: CodeProposalSet,
+): "A" | "B" | "C" | null {
+  const existing = new Set(previewSet.options.map((option) => option.id));
+  return (["A", "B", "C"] as const).find((id) => !existing.has(id)) ?? null;
+}
+
+function visualDecisionOptionCreatesLiveOverlay(option: VisualDecisionOption) {
+  const text = [option.id, option.label, option.description, option.prompt]
+    .join(" ")
+    .toLowerCase();
+  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
+  return (
+    text.includes("codex-plan-preview") ||
+    /\blive\s+(?:overlay|proposal|preview\s+proposal|preview\s+option)/.test(
+      text,
+    ) ||
+    /\btemporary\s+(?:live\s+)?(?:overlay|proposal|preview)\b/.test(text)
+  );
+}
+
+function shouldUseLiveOverlayProposal(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (
+    /\b(mockup|mockups|wireframe|wireframes|standalone\s+html|static\s+html)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(new\s+(?:page|route)|multi[-\s]?page|whole\s+app|entire\s+app|redesign\s+(?:the\s+)?(?:whole|entire)|navigation\s+structure|full\s+dashboard)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(settings|button|filter|menu|modal|drawer|panel|sheet|popover|toolbar|header|footer|nav|tab|placement|somewhere|where|option|options|direction|directions|variant|variants|preview)\b/.test(
+      text,
+    )
+  ) {
+    return true;
+  }
+  return text.length <= 220 && shouldOfferPlanPreview(prompt);
+}
+
+function shouldUseCodeProposalWorkspace(prompt: string) {
+  const text = prompt.toLowerCase();
+  if (/\b(runnable\s+proposal|proposal\s+workspace|candidate\s+app)\b/.test(text)) {
+    return true;
+  }
+  if (
+    /\b(mockup|mockups|wireframe|wireframes|standalone\s+html|static\s+html)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return /\b(runnable\s+proposal|proposal\s+workspace|candidate\s+app|new\s+(?:page|route|view)|multi[-\s]?page|whole\s+app|entire\s+app|redesign\s+(?:the\s+)?(?:whole|entire)|navigation\s+structure|full\s+dashboard|multi[-\s]?step\s+workflow|real\s+routing|route\s+and\s+state)\b/.test(
     text,
   );
 }
@@ -4110,6 +5093,8 @@ function visualDecisionSelectionPrompt(
   proposalSetId: string | null,
   artifactKind: PreviewArtifactKind | null,
   threadId: string | null,
+  liveContext = "",
+  codeProposal: PreparedProposalWorkspaces | null = null,
 ) {
   const storageRules =
     proposalSetId && artifactKind
@@ -4119,6 +5104,16 @@ function visualDecisionSelectionPrompt(
           threadId,
         )}`
       : "";
+  const liveOverlayRules = visualDecisionOptionCreatesLiveOverlay(action.option)
+    ? `\n\n${liveOverlayProposalOutputRules(
+        /\b(2|3|two|three|options|directions|variants)\b/i.test(
+          action.option.prompt,
+        ),
+      )}\n${liveContext}`
+    : "";
+  const codeProposalRules = codeProposal
+    ? `\n\n${codeProposalWorkspaceRules(codeProposal)}`
+    : "";
   return `${VISUAL_DECISION_SELECTION_SENTINEL}
 
 Selected desktop decision option:
@@ -4132,6 +5127,8 @@ ${action.option.prompt}
 
 The selected option is supporting context. The user-visible composer text below is authoritative if it differs from that context.
 ${storageRules}
+${liveOverlayRules}
+${codeProposalRules}
 
 User-visible composer text:
 ${visiblePrompt.trim() || visualDecisionComposerText(action.option)}`;
@@ -4154,13 +5151,13 @@ function liveAppReviewContext(
     }`,
   ];
   if (appMarks.length === 0) {
-    lines.push("- Attached Live marks: none");
+    lines.push("- Attached marks: none");
   } else {
-    lines.push("- Attached Live marks:");
+    lines.push("- Attached marks:");
     for (const mark of appMarks) {
       const area = mark.areaMark;
       lines.push(
-        `  - ${mark.markLabel || "Live mark"} route=${quotePromptValue(
+        `  - ${mark.markLabel || "Mark"} route=${quotePromptValue(
           area.route ?? mark.previewUrl,
           180,
         )} viewport=${mark.viewport} rect=${Math.round(area.x)},${Math.round(
@@ -4208,8 +5205,8 @@ Desktop state:
 
 Desktop visual-planning capabilities:
 - You can return a \`\`\`codex-decision-strip JSON block and the desktop will render those choices above the composer.
-- After the user chooses, you can save up to three local HTML concept mockups or wireframes under .codex/mockups and the desktop will show them in Mockup preview.
-- You can let the user revise a selected mockup, add another option, or build the selected mockup later.
+- After the user chooses, the desktop can prepare runnable code-backed proposal workspaces for A/B/C options and show them in Proposal Preview.
+- You can let the user revise a selected proposal, add another option, or apply the selected proposal later.
 - When a real app exists, the desktop can show live preview variants and App Mark context.
 
 Decision policy:
@@ -4238,23 +5235,23 @@ Decision strip format:
       "id": "wireframes",
       "label": "Show wireframes",
       "description": "Create lightweight layout options before implementation.",
-      "prompt": "Create 2 lightweight saved HTML wireframe options under .codex/mockups before implementation for this request: ..."
+      "prompt": "Create 2 lightweight runnable proposal workspace options before implementation for this request: ..."
     },
     {
       "id": "mockups",
       "label": "Show mockups",
       "description": "Create polished visual directions before implementation.",
-      "prompt": "Create 3 polished saved HTML mockup options under .codex/mockups before implementation for this request: ..."
+      "prompt": "Create 3 polished runnable proposal workspace options before implementation for this request: ..."
     }
   ]
 }
-- Make each option prompt self-contained. For wireframe/mockup prompts, include the .codex/mockups manifest rules below.
+- Make each option prompt self-contained. For wireframe/mockup prompts, say "runnable proposal workspace options" so the desktop prepares candidate folders.
 
-Mockup/wireframe artifact rules to include in visual option prompts:
-- Save standalone HTML files under .codex/mockups.
-- Save .codex/mockups/manifest.json with version 1, originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.
-- Use ids such as mockup-a, mockup-b, mockup-c and labels A, B, C.
-- For full demo or wireframe choices, include small local JavaScript interactions where useful: tabs switch, drawers/dialogs open, filters visibly change, forms accept text, and selected rows/cards can show a simple detail state. Keep it standalone; do not fake backend routes.
+Runnable proposal workspace rules to include in visual option prompts:
+- The desktop will prepare one isolated folder per option. Do not write .codex/mockups for these choices.
+- Create a complete runnable candidate app in each provided option folder; keep each option self-contained and previewable.
+- Use labels A, B, C and make each option meaningfully distinct.
+- For full demo or wireframe choices, include small local JavaScript interactions where useful: tabs switch, drawers/dialogs open, filters visibly change, forms accept text, and selected rows/cards can show a simple detail state. Keep it local; do not fake backend routes.
 - Do not build, scaffold, or implement the final app yet.
 - Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, fake backend routes, or platform-specific hardcoded user-app logic.
 
@@ -4287,7 +5284,9 @@ Desktop visual-planning capabilities:
 - You can return a \`\`\`codex-decision-strip JSON block and the desktop will render those choices above the composer.
 - For current apps, use current-app wording. Do not say the project is empty.
 - The user can build directly, ask for one review preview, or ask for two/three visual directions.
-- Review previews should be saved under .codex/mockups and opened by the desktop after the next turn.
+- For small current-app placement/control/menu/panel ideas, review previews should be temporary Live proposal metadata using a \`\`\`codex-plan-preview JSON block, not copied saved HTML and not visible Codex chrome inside the app.
+- For serious new pages, routing/state, full redesigns, dashboards, or multi-step workflows, visual directions should be runnable proposal workspace options so the desktop can preview and later apply the selected code.
+- Use saved .codex/mockups only when the user explicitly asks for mockups/wireframes or the proposal is too broad for an honest Live overlay.
 
 Decision policy:
 - If the request is a broad UX/UI/product/workflow change and the user did not explicitly ask to build directly or view first, return a current-app decision strip.
@@ -4310,26 +5309,29 @@ Decision strip format:
       "id": "quick-preview",
       "label": "Show quick preview",
       "description": "Create one review-only preview before implementation.",
-      "prompt": "Create one saved HTML review preview under .codex/mockups for this current-app change, without changing real app implementation files: ..."
+      "prompt": "Create one temporary live proposal using a codex-plan-preview JSON block for this current-app change, without changing real app implementation files or adding visible Codex chrome inside the app: ..."
     },
     {
       "id": "preview-directions",
       "label": "Show 2-3 directions",
       "description": "Compare a few possible UX directions first.",
-      "prompt": "Create 2 or 3 saved HTML preview directions under .codex/mockups for this current-app change, without changing real app implementation files: ..."
+      "prompt": "Create 2 or 3 temporary live proposal options using a codex-plan-preview JSON block for this current-app change, without changing real app implementation files or adding visible Codex chrome inside the app: ..."
     }
   ]
 }
 
-Review artifact rules to include in preview option prompts:
-- Save standalone HTML files under .codex/mockups.
-- Save .codex/mockups/manifest.json with version 1, originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.
-- For one preview, use label "Preview". For multiple directions, use labels A, B, C.
+Live proposal metadata rules to include in preview option prompts:
+- Return a short product-facing response plus one codex-plan-preview JSON block on the next turn.
+- Do not include Markdown code fences or triple backticks inside decision-strip JSON string values.
+- Do not change app implementation files yet.
+- Do not save .codex/mockups for these small current-app options.
+- Do not ask the desktop to render \`Proposed\` banners, fake CTA buttons, generic proposal cards, or other Codex-authored UI chrome inside the app surface. Use highlights for \`Show changes\` instead.
+- For one preview, return one variant. For multiple directions, return A/B/C variants.
+- For serious new pages, routing/state, full redesigns, dashboards, or multi-step workflows, make the relevant option prompt say "Create 2 or 3 runnable proposal workspace options..." instead of asking for codex-plan-preview metadata. If the selected option prompt asks for runnable proposal workspace options, do not return a codex-plan-preview block; the desktop will prepare isolated folders and pass their paths in the next turn.
 - Name proposed options after user-facing workflow concepts from the plan, not after placement or component buckets.
 - Reflect the existing app's visible style, layout language, density, palette, typography, and likely current route. Do not pretend a nonexistent page is live.
 - If a Live/App mark is attached below, scope the preview direction to that area unless the user text says otherwise.
-- For each proposal, add a highlights array to its manifest entry when useful. Each highlight should name a changed visual area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. Highlights are soft review overlays only, not implementation chrome.
-- Keep it standalone and review-only. Do not change app implementation files yet.
+- For each variant, add a highlights array with at least one changed visual area when practical. Each highlight should name the changed area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. Highlights are soft review overlays only, not implementation chrome.
 - Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, fake backend routes, or platform-specific hardcoded user-app logic.
 
 Original user request:
@@ -4378,6 +5380,140 @@ Original user request:
 ${originalPrompt.trim()}`;
 }
 
+function liveOverlayProposalPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus,
+  wantsOptions: boolean,
+  planModeWasOn: boolean,
+  liveContext: string,
+) {
+  const entries = status.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  return `${LIVE_OVERLAY_PROPOSAL_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project already has app files: yes
+- Meaningful entries: ${entries}
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- The user asked to review a visual direction before implementation.
+${liveContext}
+
+${liveOverlayProposalOutputRules(wantsOptions)}
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function codeProposalWorkspacePrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus,
+  wantsOptions: boolean,
+  planModeWasOn: boolean,
+  liveContext: string,
+  prepared: PreparedProposalWorkspaces,
+) {
+  const entries = status.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project already has app files: ${status.empty ? "no" : "yes"}
+- Meaningful entries: ${entries}
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- The user asked to review ${wantsOptions ? "runnable options" : "a runnable proposal"} before implementation.
+${liveContext}
+
+${codeProposalWorkspaceRules(prepared)}
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function codeProposalAddOptionPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus | null,
+  planModeWasOn: boolean,
+  liveContext: string,
+  previewSet: CodeProposalSet,
+  prepared: PreparedProposalWorkspaces,
+  request: CodeProposalAddOptionRequest,
+) {
+  const entries = status?.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  const existingOptions = previewSet.options.map((option) => {
+    const source = option.id === request.sourceOptionId ? " [source]" : "";
+    return `- Option ${option.id}: ${option.workspacePath}${source}`;
+  });
+  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project already has app files: ${status?.empty ? "no" : "yes"}
+- Meaningful entries: ${entries}
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- The user is adding or revising Option ${request.optionId} inside an existing runnable proposal set.
+- Keep the existing proposal set active so the user can compare ${previewSet.options.map((option) => option.id).join("/")} with Option ${request.optionId}.
+${liveContext}
+
+Existing proposal options:
+${existingOptions.join("\n")}
+
+${codeProposalWorkspaceRules(prepared)}
+
+Additional proposal rules:
+- Work only inside the prepared Option ${request.optionId} folder. Do not edit the live project and do not edit existing option folders such as A or B.
+- Keep the option label as Option ${request.optionId}; do not rename it to Option A just because this turn has one prepared folder.
+- The desktop supports at most three active comparison options at once: A, B, and C. If the user asks for Option D or more simultaneous options in follow-up, say that honestly and ask whether to revise/replace A, B, or C or start a fresh proposal set.
+${request.sourceOptionId ? `- Use Option ${request.sourceOptionId} as the visual/code starting point when useful, then apply the user's requested differences in Option ${request.optionId}.` : "- Use the current live project and existing options as visual context, then create the requested option."}
+- Stop when Option ${request.optionId} is ready. The desktop will keep it beside the existing options for comparison.
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function liveOverlayProposalOutputRules(wantsOptions: boolean) {
+  return `Live proposal metadata rules:
+- This is a review-only proposal turn. You may inspect the project, but do not edit app implementation files and do not create saved .codex/mockups artifacts.
+- Return a concise product-facing response plus exactly one fenced \`\`\`codex-plan-preview JSON block.
+- The JSON block must be a single object shaped like: {"version":1,"summary":"...","variants":[{"id":"A","title":"...","tradeoff":"...","placement":"topbar","summary":"...","route":"...","viewState":"...","targetRegion":"...","highlights":[],"components":[]}]}.
+- Use the Live app as the base. The desktop will select the proposal in Live Preview and use highlights for \`Show changes\`; it will not render fake Codex UI inside the user's app, so do not duplicate the full app into static HTML.
+- Do not describe or request visible Codex proposal chrome inside the app surface: no \`Proposed\` banners, fake CTA buttons, generic proposal cards, DOM tags, CSS boxes, or placeholder controls such as \`Open settings\`.
+- Return ${wantsOptions ? "two or three variants with ids A/B/C" : "one variant with id A"}.
+- Each variant must have version-compatible fields: id, title, tradeoff, placement, summary, and components.
+- placement must be one of: topbar, sidePanel, modal.
+- Components may use kind button, panel, menu, modal, input, or badge, with label, body, and optional actionLabel as metadata for implementation context, not as fake controls to render in the app.
+- Add route, viewState, or targetRegion on each variant when it helps the user understand where the proposal applies.
+- Add a highlights array for each variant when practical. Each highlight needs id, label, note, and areaMark with x, y, width, height, viewportWidth, viewportHeight, optional route, note, and createdAt. Use the current visible app viewport as the coordinate basis when known; otherwise use a reasonable 1440x900 desktop basis.
+- Highlights power the "Show changes" overlay and must not appear in accepted app UI.
+- If the request is too broad for honest Live proposal metadata, say that briefly and return the smallest useful proposal rather than editing files.
+- Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, and fake backend routes.`;
+}
+
+function codeProposalWorkspaceRules(prepared: PreparedProposalWorkspaces) {
+  const optionLines = prepared.options.map(
+    (option) => `- Option ${option.id}: ${option.workspacePath}`,
+  );
+  return `Runnable proposal workspace rules:
+- This is a review-only proposal turn. The desktop already copied the live project into isolated option folders under the current working directory.
+- Work only inside the listed option folders. Do not edit the original live project path and do not write .codex/mockups artifacts for this turn.
+- Build each requested option as a runnable candidate app in its own folder. Preserve the existing project conventions in that folder when present.
+- If the folder is empty, create the smallest complete runnable web app needed for that option, including index.html/CSS/JS or package files only when useful.
+- Keep options meaningfully distinct and label final answer sections by Option A/B/C.
+- The desktop supports at most three active comparison options at once: A, B, and C. If the user asks for Option D or more simultaneous options, say that plainly and ask whether to revise/replace A, B, or C or start a fresh proposal set instead.
+- Stop after the proposal workspaces are ready. The desktop will diff the selected option and apply it to Live if the user accepts it.
+
+Prepared proposal folders:
+${optionLines.join("\n")}`;
+}
+
 function savedMockupReviewPrompt(
   userPrompt: string,
   previewSet: MockupPreviewSet,
@@ -4408,13 +5544,25 @@ Saved options:
 ${optionLines.join("\n")}
 
 Decision policy:
+- Do not return a codex-decision-strip block, fixed questionnaire, or generic action choices for this saved mockup review path. Do the relevant saved preview work directly, then summarize what changed.
 - Let the user's request drive the next step; do not show or ask a fixed questionnaire.
-- If they ask to combine, change, improve, or explore options, update or create saved ${previewArtifactDisplayName(
+- The selected saved option is supporting context only. If the user-visible request conflicts with it, follow the user-visible request.
+- Treat exploratory implementation wording as review/proposal intent when placement or workflow is still vague. Phrases like "looking to implement", "thinking of adding", "somewhere", "where should", "show it first", or "where it should be" should update or create a proposal preview first, not change real app files.
+- If the user asks for another/new option and names a label such as "Option C", create or update that labeled saved option in the same proposal set folder. For example, "create another wireframe based on B, but make it C" means keep B untouched, derive a new C file from B, add C to manifest.json, and set selectedMockupId to C.
+- If the user asks for another option without a label, use the next available A/B/C label in the same proposal set.
+- Canvas v2 supports at most three active saved preview options at once: A, B, and C. If the user asks for Option D or more simultaneous options, do not silently relabel it as A/B/C; say the limit plainly and ask whether to revise/replace A, B, or C or start a fresh proposal set.
+- If they ask to combine, change, improve, explore, place, preview, show, or decide where something should go, update or create saved ${previewArtifactDisplayName(
     previewSet.artifactKind,
     2,
     "lower",
   )} inside ${previewSet.baseDir} and stop before real implementation.
-- If they explicitly ask to build or implement, implement the real app from the selected or described ${previewArtifactActionName(
+- When updating or creating saved ${previewArtifactDisplayName(
+    previewSet.artifactKind,
+    2,
+    "lower",
+  )}, update the manifest entry summaries and add or refresh a highlights array for each changed visual area whenever practical. Each highlight should name the changed area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. These highlights power the preview "Show changes" overlay and must not appear inside accepted app UI.
+- If a changed area cannot be bounded confidently, say that plainly in the response instead of inventing a fake highlight.
+- Only implement the real app when the user explicitly commits with wording such as "implement option A", "implement now", "build selected", "apply this", "make this real", or "use option A and implement". In that case, build from the selected or described ${previewArtifactActionName(
     previewSet.artifactKind,
   )} direction.
 - If their intent is ambiguous between revising the ${previewArtifactActionName(
@@ -4430,6 +5578,111 @@ function mockupVisibleOptionName(mockup: SavedMockup) {
   const label = (mockup.label || "").trim();
   if (/^[A-Z]$/i.test(label)) return `option ${label.toUpperCase()}`;
   return "selected preview";
+}
+
+function isSavedMockupImplementationCommitment(prompt: string) {
+  const text = prompt.trim().toLowerCase();
+  if (!text) return false;
+  if (
+    /\b(?:looking|thinking|considering|planning)\s+to\s+implement\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return (
+    /\bbuild\s+(?:selected|this|that|it|option\s+[abc]|the\s+selected)\b/.test(
+      text,
+    ) ||
+    /\bapply\s+(?:this|that|it|option\s+[abc]|the\s+selected)\b/.test(text) ||
+    /\bmake\s+(?:this|that|it|option\s+[abc]|the\s+selected)\s+real\b/.test(
+      text,
+    ) ||
+    /\bimplement\s+(?:now|this|that|it|option\s+[abc]|the\s+selected|selected)\b/.test(
+      text,
+    ) ||
+    /\buse\s+option\s+[abc]\b.*\bimplement\b/.test(text) ||
+    /\bi\s+like\s+(?:this|that|it)\b.*\bimplement\b/.test(text) ||
+    /\bplease\s+implement\s+(?:this|that|it|option\s+[abc])\b/.test(text)
+  );
+}
+
+function isCodeProposalImplementationCommitment(prompt: string) {
+  return isSavedMockupImplementationCommitment(prompt);
+}
+
+function optionIdFromText(prompt: string): "A" | "B" | "C" | null {
+  const match = prompt.match(/\boption\s+([abc])\b|\b([abc])\b/i);
+  const value = (match?.[1] || match?.[2] || "").toUpperCase();
+  return value === "A" || value === "B" || value === "C" ? value : null;
+}
+
+function updateCodeProposalOption(
+  previewSet: CodeProposalSet,
+  optionId: "A" | "B" | "C",
+  patch: Partial<CodeProposalOption>,
+): CodeProposalSet {
+  return {
+    ...previewSet,
+    options: previewSet.options.map((option) =>
+      option.id === optionId ? { ...option, ...patch } : option,
+    ),
+    updatedAt: Date.now(),
+  };
+}
+
+function sortCodeProposalOptions(options: CodeProposalOption[]) {
+  const order = new Map<"A" | "B" | "C", number>([
+    ["A", 0],
+    ["B", 1],
+    ["C", 2],
+  ]);
+  return [...options].sort(
+    (left, right) => (order.get(left.id) ?? 99) - (order.get(right.id) ?? 99),
+  );
+}
+
+function removeRecordKey<T>(
+  record: Record<string, T>,
+  key: string | null | undefined,
+) {
+  if (!key || !(key in record)) return record;
+  const next = { ...record };
+  delete next[key];
+  return next;
+}
+
+function codeProposalChangeSummary(changes: CodeProposalFileChange[]) {
+  if (changes.length === 0) return "No file changes detected yet.";
+  const created = changes.filter((change) => change.kind === "created").length;
+  const updated = changes.filter((change) => change.kind === "updated").length;
+  const deleted = changes.filter((change) => change.kind === "deleted").length;
+  return [
+    created ? `${created} created` : "",
+    updated ? `${updated} updated` : "",
+    deleted ? `${deleted} deleted` : "",
+  ]
+    .filter(Boolean)
+    .join(", ");
+}
+
+function markMockupProposalSetAsHistory(
+  desktop: DesktopState,
+  proposalSetId: string,
+): DesktopState {
+  if (!proposalSetId) return desktop;
+  return {
+    ...desktop,
+    mockupActiveProposalSetIdsByThreadId: Object.fromEntries(
+      Object.entries(desktop.mockupActiveProposalSetIdsByThreadId).filter(
+        ([, activeProposalSetId]) => activeProposalSetId !== proposalSetId,
+      ),
+    ),
+    mockupHistoryProposalSetIds: {
+      ...desktop.mockupHistoryProposalSetIds,
+      [proposalSetId]: true,
+    },
+  };
 }
 
 function latestAcceptedPlanProposalForThread(
@@ -4566,6 +5819,35 @@ function planProposalRevisionPrompt(
   ].join("\n");
 }
 
+function liveOverlayProposalRevisionPrompt(
+  proposal: PlanProposal,
+  feedback = "",
+  attachedPreview = "",
+) {
+  const feedbackText = feedback.trim();
+  const visibleRequest = feedbackText || "Please revise the proposal.";
+  const contextLines = [
+    "Live overlay proposal revision rules:",
+    "- Revise the previous temporary Live proposal; do not edit implementation files yet.",
+    "- Return a concise product-facing response plus exactly one fenced ```codex-plan-preview JSON block.",
+    "- Keep the proposal based on the current Live app, not copied static HTML.",
+    "- Keep option titles, tradeoffs, components, and highlights aligned.",
+    "- For menus, filters, drawers, hover states, and similar click consequences, describe the same-screen state clearly instead of inventing separate pages.",
+  ];
+  const previewText = attachedPreview.trim();
+  if (previewText) {
+    contextLines.push("", "Selected preview context:", previewText);
+  }
+  return [
+    visibleRequest,
+    "",
+    "Project context explicitly attached by the user:",
+    ...contextLines,
+    "",
+    `Original proposal request: ${proposal.prompt}`,
+  ].join("\n");
+}
+
 function planProposalAcceptPrompt(attachedPreview = "") {
   const previewText = attachedPreview.trim();
   if (!previewText) {
@@ -4576,6 +5858,21 @@ function planProposalAcceptPrompt(attachedPreview = "") {
     "",
     "Project context explicitly attached by the user:",
     "Selected live app preview guidance. This supports the accepted plan; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
+    "",
+    previewText,
+  ].join("\n");
+}
+
+function liveOverlayProposalAcceptPrompt(attachedPreview = "") {
+  const previewText = attachedPreview.trim();
+  if (!previewText) {
+    return "I accept this proposal. Implement it now.";
+  }
+  return [
+    "I accept this proposal. Implement it now.",
+    "",
+    "Project context explicitly attached by the user:",
+    "Selected live app proposal guidance. This supports the accepted change; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
     "",
     previewText,
   ].join("\n");
@@ -4600,7 +5897,7 @@ function promptWithPlanModeContext(prompt: string) {
     "Plan Mode: investigate and propose the plan first.",
     "Do not edit app implementation files or run implementation commands unless the user accepts the plan.",
     "When visual review is the plan itself, you may create review-only artifacts under .codex/mockups; these are preview records, not app implementation.",
-    "For an existing running app, prefer temporary live preview variants when enough context exists. Use .codex/mockups for blank projects, missing surfaces, or when a saved review artifact is clearer.",
+    "For an existing running app, prefer temporary live preview variants when enough context exists. The desktop uses proposal metadata and Show changes highlights, not visible Codex-authored UI inside the app. Use .codex/mockups for blank projects, missing surfaces, or when a saved review artifact is clearer.",
     "If the user later accepts the plan, implementation can proceed in a separate turn.",
     "Return a clear product-facing plan. Keep source-level details only where they make the plan accurate.",
     "If the request creates hidden prompt/message state, parallel recovery paths, duplicated ownership, or estimate-vs-observed confusion, challenge the risky literal request and offer a safer plan in product language before implementation steps.",
@@ -4657,7 +5954,7 @@ function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
   const mark = context.areaMark;
   const lines = [
     `@AppMark project="${quotePromptValue(context.projectName, 80)}"`,
-    `mark=${quotePromptValue(context.markLabel || "Live mark 1", 80)}`,
+    `mark=${quotePromptValue(context.markLabel || "Mark 1", 80)}`,
     `previewUrl=${quotePromptValue(context.previewUrl, 160)}`,
     `route=${quotePromptValue(mark.route ?? context.previewUrl, 180)}`,
     `viewport=${context.viewport}`,
@@ -4731,6 +6028,27 @@ function composerContextsForProject(
   return contexts.filter((context) => context.projectId === projectId);
 }
 
+function dedupeComposerContexts(contexts: ComposerContextReference[]) {
+  const seen = new Set<string>();
+  const deduped: ComposerContextReference[] = [];
+  for (const context of contexts) {
+    const key = composerContextIdentity(context);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    deduped.push(context);
+  }
+  return deduped;
+}
+
+function pruneSentComposerContextsByTurnId(
+  contextsByTurnId: Record<string, ComposerContextReference[]>,
+) {
+  const entries = Object.entries(contextsByTurnId).filter(
+    ([, contexts]) => contexts.length > 0,
+  );
+  return Object.fromEntries(entries.slice(-80));
+}
+
 function nextMockupMarkNumber(
   contexts: ComposerContextReference[],
   projectId: string,
@@ -4762,7 +6080,7 @@ function composerContextIdentity(context: ComposerContextReference) {
 function composerContextSearchLabel(context: ComposerContextReference) {
   if (context.type === "appPreview") {
     return `${context.projectName} App Preview ${
-      context.markLabel || "Live mark 1"
+      context.markLabel || "Mark 1"
     } ${context.previewUrl}`;
   }
   return `${context.projectName} ${context.markLabel} ${previewArtifactDisplayName(
@@ -4831,7 +6149,15 @@ function sameInspectorSelection(
       return right.type === "appPreview" && left.projectId === right.projectId;
     case "mockupPreview":
       return (
-        right.type === "mockupPreview" && left.projectId === right.projectId
+        right.type === "mockupPreview" &&
+        left.projectId === right.projectId &&
+        left.proposalSetId === right.proposalSetId
+      );
+    case "codeProposalPreview":
+      return (
+        right.type === "codeProposalPreview" &&
+        left.projectId === right.projectId &&
+        left.proposalSetId === right.proposalSetId
       );
     case "planPreview":
       return (

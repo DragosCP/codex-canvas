@@ -36,23 +36,26 @@ These rules describe how this project is managed on top of the upstream Codex re
 - Every active plan should show enough status that the owner can tell what is done, what is next, and what is blocked.
 - When creating, discussing, or revising a plan, write it as a user workflow first: define the UI/UX contract, the visible user states, the decision points, and the smallest useful interaction before describing product intent or implementation mechanics.
 - If a plan introduces a new surface, card, button, approval path, preview behavior, or Plan Mode behavior, make the UI/UX placement explicit enough that another agent should not have to invent it from product direction alone.
+- Canvas v2 preview header changes require explicit owner consent before implementation. Any future plan touching App Preview, Mockup Preview, proposal previews, or Canvas v2 must restate and preserve the locked header button contract from `docs/UI-UX.md`; backend/performance plans must not change that header by accident.
 
 ## Latest Implemented Plan Memory
 
 - Keep summaries for only the latest 5 implemented plans and their main discussion lessons.
 - Each summary should be one or two lines. This section is orientation memory, not a changelog.
 - When a sixth implemented plan is added, remove the oldest summary so the second becomes first and the sixth becomes fifth.
-- P20 - Prompt Wrapper And Legacy Canvas Cleanup: removed active legacy Canvas/editor concepts, scrubbed old persisted visual-planning state, and kept prompt wrappers intent-preserving. Main lesson: hidden control context must never become the user-facing request.
-- P19 - Visible Build And Live Proposal Lifecycle: made build-selected, existing-app proposals, Plan Mode preview revisions, and mockup history respect visible text, marks, and Live comparison. Main lesson: proposal context supports user text; it does not outrank it.
-- P19b - Active Proposal History And Preview Header: fixed post-build history mockups leaking into current-app proposals, added adjustable proposal highlights, and stabilized Live/Compare header chrome. Main lesson: decision-only turns must not activate saved artifacts.
-- P21 - Live Turn Progress Lifecycle: kept first-send prompts visible through thread refresh, added shared live progress summaries with inline editing rows and an above-composer changed-lines pill, and grouped final file-change cards. Main lesson: active-turn UI needs a local observable progress model that survives app-server list/read lag.
 - P23b - Unified Preview Shell And Overflow: made the preview button land on `Live`, kept proposal tabs thread-owned, reset compare views to `Live` on chat switch, and pushed lower-priority header actions into `...` before a third row appears. Main lesson: preview chrome needs one stable priority order across Live and proposal states.
+- P25 - Live Overlay And Temp Code Proposals: routed small existing-app preview choices to temporary Live overlays with A/B/C, proposal highlights, and explicit accept handoff instead of copied HTML. Main lesson: streamed hidden preview blocks must survive completion but never leak into chat text.
+- P25b - Code-Backed Proposal Workspaces: generated serious A/B/C proposals in isolated runnable workspaces and promoted accepted options into Live by patch instead of rebuild. Main lesson: hidden proposal metadata must be deduped from visible chat, and backend proposal changes must preserve the locked Canvas v2 preview header.
+- P26 - Canvas V2 P25b Regression Recovery: restored composer-first `Build selected`, proposal `Mark area`, non-stuck proposal apply, and one-row header overflow after P25b regressions. Main lesson: code-backed proposal acceleration must remain underneath the locked Canvas v2 interaction contract.
+- P26b - Composer Image Attachments: enabled native local image chips, transcript thumbnails, fullscreen preview, and visual mark/change chips for composer and chat. Main lesson: attachments and preview marks can share presentation UI while keeping hidden mark metadata and Canvas v2 header behavior untouched.
 
 ## Product And UX Principles
 
 - The fewer clicks the user has to make, the better.
 - Do not build admin-style debugging features unless the owner explicitly asks for them.
 - Prefer end-user workflow clarity over exposing internal machinery.
+- Live proposal previews must not inject visible Codex proposal chrome into the user's app surface. Use preview header state and `Show changes` marks, not `Proposed` banners, fake buttons, or generic proposal cards inside the app.
+- Canvas v2 preview header is owner-locked. Live stopped shows `Preview`, `Detect`, `URL`; Live running shows `Desktop`/`Mobile`, `Mark area`, `Reload`, `Stop`, `Open`; A/B/C proposal tabs show `Desktop`/`Mobile`, `Changes` when present, `Mark area`, `Build selected`. The header stays one row: `Live | A | B | C` keeps a fixed compare slot and right-side actions collapse to icon-only/`...` before they can overlap it. Do not change order, labels, grouping, visibility, or header layout without explicit owner consent.
 - Avoid stale route flashes, stale previous-screen UI, and jarring loading transitions.
 - Avoid boxes inside boxes and panels inside panels unless there is a clear product reason.
 - Keep the product feeling like a focused SPA where navigation is fast, stable, and predictable.

@@ -3,6 +3,8 @@ import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
 import { previewArtifactDisplayName } from "../mockupArtifacts";
 import type {
+  CodeProposalOption,
+  CodeProposalSet,
   ComposerAppPreviewContext,
   ComposerMockupPreviewContext,
   InspectorSelection,
@@ -17,6 +19,7 @@ import type {
   ThreadItem,
   Turn,
 } from "../types";
+import { CodeProposalPreview } from "./CodeProposalPreview";
 import {
   LiveAppPreview,
   type LiveAppPreviewMarkMeta,
@@ -31,7 +34,9 @@ export function Inspector(props: {
   activeThread: Thread | null;
   previewProject: Project | null;
   planPreviewProposal: PlanProposal | null;
-  appPreviewContext: ComposerAppPreviewContext | null;
+  appPreviewContexts: ComposerAppPreviewContext[];
+  codeProposalCanShowLive: boolean;
+  codeProposalSet: CodeProposalSet | null;
   mockupPreviewSet: MockupPreviewSet | null;
   mockupCanShowLive: boolean;
   mockupPreviewLiveResetToken: number;
@@ -71,6 +76,14 @@ export function Inspector(props: {
     },
   ) => void;
   onBuildBaselineApp: (project: Project) => void;
+  onBuildCodeProposal: (
+    previewSet: CodeProposalSet,
+    option: CodeProposalOption,
+  ) => void;
+  onSelectCodeProposal: (
+    proposalSetId: string,
+    optionId: "A" | "B" | "C",
+  ) => void;
   onBuildMockup: (previewSet: MockupPreviewSet, mockup: SavedMockup) => void;
   onResetMockupProposalHighlights: (
     previewSet: MockupPreviewSet,
@@ -84,6 +97,7 @@ export function Inspector(props: {
   const previewSelected =
     props.selection.type === "appPreview" ||
     props.selection.type === "planPreview" ||
+    props.selection.type === "codeProposalPreview" ||
     props.selection.type === "mockupPreview";
   const mockupPreviewProjectId =
     props.selection.type === "mockupPreview" ? props.selection.projectId : null;
@@ -148,7 +162,7 @@ export function Inspector(props: {
       {props.selection.type === "appPreview" && props.previewProject && (
         <LiveAppPreview
           project={props.previewProject}
-          areaMark={props.appPreviewContext?.areaMark ?? null}
+          appPreviewContexts={props.appPreviewContexts}
           onBuildBaselineRequest={props.onBuildBaselineApp}
           onAreaMarkChange={(areaMark, meta) =>
             props.previewProject &&
@@ -156,10 +170,24 @@ export function Inspector(props: {
           }
         />
       )}
+      {props.selection.type === "codeProposalPreview" && (
+        <CodeProposalPreview
+          appPreviewContexts={props.appPreviewContexts}
+          canShowLive={props.codeProposalCanShowLive}
+          onBuild={props.onBuildCodeProposal}
+          onBuildBaselineRequest={props.onBuildBaselineApp}
+          onMarkArea={(project, areaMark, meta) =>
+            props.onAttachAppPreviewMark(project, areaMark, meta)
+          }
+          onSelect={props.onSelectCodeProposal}
+          previewSet={props.codeProposalSet}
+          project={props.previewProject}
+        />
+      )}
       {mockupPreviewProjectId && (
         <MockupPreview
           mode={props.mockupPreviewMode}
-          appPreviewAreaMark={props.appPreviewContext?.areaMark ?? null}
+          appPreviewContexts={props.appPreviewContexts}
           canShowLive={props.mockupCanShowLive}
           forceLiveToken={props.mockupPreviewLiveResetToken}
           markContexts={props.mockupPreviewMarks}
@@ -453,6 +481,8 @@ function inspectorTitle(selection: InspectorSelection) {
       return "App Preview";
     case "mockupPreview":
       return "Mockup Preview";
+    case "codeProposalPreview":
+      return "Proposal Preview";
     case "planPreview":
       return "App Preview";
     case "command":

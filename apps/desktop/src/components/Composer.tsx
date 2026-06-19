@@ -2,8 +2,6 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   FileText,
   Image as ImageIcon,
   ListChecks,
@@ -27,12 +25,16 @@ import {
 import { attachmentStatusLabel } from "../attachments";
 import { contextDetails } from "../contextMeter";
 import {
-  desktopFileUrl,
   desktopInvoke,
   desktopPathForFile,
 } from "../desktopBridge";
 import { permissionPresets } from "../localState";
 import { previewArtifactDisplayName } from "../mockupArtifacts";
+import {
+  composerContextPreviewImage,
+  composerContextVisualLabel,
+  composerContextVisualTitle,
+} from "../previewContextImages";
 import type {
   ComposerAttachment,
   ComposerContextReference,
@@ -42,6 +44,11 @@ import type {
   SandboxMode,
   ThreadTokenUsage,
 } from "../types";
+import {
+  ImagePreviewLightbox,
+  usePreviewImageSource,
+  type PreviewImageItem,
+} from "./ImagePreviewLightbox";
 
 const effortOptions: Array<{
   value: ProjectSettings["effort"];
@@ -53,7 +60,6 @@ const effortOptions: Array<{
   { value: "xhigh", label: "Extra High" },
 ];
 
-const imagePreviewCache = new Map<string, string>();
 const COMPOSER_MAX_ROWS = 7;
 
 export function Composer(props: {
@@ -100,6 +106,16 @@ export function Composer(props: {
   const imageAttachments = props.attachments.filter(
     (attachment) => attachment.kind === "image",
   );
+  const attachmentPreviewImages: PreviewImageItem[] = imageAttachments.map(
+    (attachment) => ({
+      id: attachmentPreviewImageId(attachment.id),
+      title: attachment.name,
+      alt: attachment.name,
+      path: attachment.path,
+    }),
+  );
+  const contextPreviewImages = props.contexts.map(composerContextPreviewImage);
+  const previewImages = [...attachmentPreviewImages, ...contextPreviewImages];
 
   useLayoutEffect(() => {
     resizeComposerTextarea(textareaRef.current);
@@ -121,33 +137,12 @@ export function Composer(props: {
 
   useEffect(() => {
     if (previewIndex === null) return;
-    if (imageAttachments.length === 0) {
+    if (previewImages.length === 0) {
       setPreviewIndex(null);
-    } else if (previewIndex >= imageAttachments.length) {
-      setPreviewIndex(imageAttachments.length - 1);
+    } else if (previewIndex >= previewImages.length) {
+      setPreviewIndex(previewImages.length - 1);
     }
-  }, [imageAttachments.length, previewIndex]);
-
-  useEffect(() => {
-    if (previewIndex === null || imageAttachments.length === 0) return;
-
-    function handlePreviewKeys(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setPreviewIndex(null);
-        return;
-      }
-      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-      event.preventDefault();
-      setPreviewIndex((current) => {
-        if (current === null) return current;
-        const direction = event.key === "ArrowRight" ? 1 : -1;
-        return (current + direction + imageAttachments.length) % imageAttachments.length;
-      });
-    }
-
-    window.addEventListener("keydown", handlePreviewKeys);
-    return () => window.removeEventListener("keydown", handlePreviewKeys);
-  }, [imageAttachments.length, previewIndex]);
+  }, [previewImages.length, previewIndex]);
 
   useEffect(() => {
     function togglePlanMode(event: KeyboardEvent) {
@@ -243,15 +238,17 @@ export function Composer(props: {
       {props.attachments.length > 0 && (
         <div className="attachment-strip" aria-label="Added files">
           {props.attachments.map((attachment) => {
-            const imageIndex = imageAttachments.findIndex(
-              (image) => image.id === attachment.id,
+            const previewImageIndex = previewImages.findIndex(
+              (image) => image.id === attachmentPreviewImageId(attachment.id),
             );
             return (
               <AttachmentCard
                 key={attachment.id}
                 attachment={attachment}
                 onPreview={
-                  imageIndex === -1 ? undefined : () => setPreviewIndex(imageIndex)
+                  previewImageIndex === -1
+                    ? undefined
+                    : () => setPreviewIndex(previewImageIndex)
                 }
                 onRemove={() => props.onRemoveAttachment(attachment.id)}
               />
@@ -273,20 +270,20 @@ export function Composer(props: {
 
       {props.contexts.length > 0 && (
         <div className="composer-context-strip" aria-label="Added context">
-          {props.contexts.map((context) => (
-            <button
-              key={composerContextKey(context)}
-              type="button"
-              className="composer-context-chip"
-              title={`Remove ${composerContextChipTitle(context)}`}
-              onClick={() => props.onRemoveContext(context)}
-            >
-              {composerContextChipIcon(context)}
-              <span>{composerContextMentionLabel(context)}</span>
-              <small>{composerContextChipLabel(context)}</small>
-              <X size={13} />
-            </button>
-          ))}
+          {props.contexts.map((context) => {
+            const previewImageIndex = previewImages.findIndex(
+              (image) => image.id === `context:${context.id}`,
+            );
+            return (
+              <ComposerContextChip
+                key={composerContextKey(context)}
+                context={context}
+                onPreview={() => setPreviewIndex(previewImageIndex)}
+                onRemove={() => props.onRemoveContext(context)}
+                previewDisabled={previewImageIndex === -1}
+              />
+            );
+          })}
         </div>
       )}
 
@@ -512,9 +509,9 @@ export function Composer(props: {
         <div className="composer-status error-line">{props.sendError}</div>
       )}
 
-      {previewIndex !== null && imageAttachments[previewIndex] && (
-        <ImageLightbox
-          attachments={imageAttachments}
+      {previewIndex !== null && previewImages[previewIndex] && (
+        <ImagePreviewLightbox
+          images={previewImages}
           index={previewIndex}
           onClose={() => setPreviewIndex(null)}
           onSelect={setPreviewIndex}
@@ -552,20 +549,17 @@ function composerContextKey(context: ComposerContextReference) {
   return context.id;
 }
 
+function attachmentPreviewImageId(attachmentId: string) {
+  return `attachment:${attachmentId}`;
+}
+
 function composerContextChipTitle(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${context.projectName} ${context.markLabel || "Live mark 1"}`;
-  }
-  if (context.type === "mockupPreview") {
-    return `${context.projectName} ${context.markLabel}`;
-  }
-  return "";
+  return composerContextVisualTitle(context);
 }
 
 function composerContextChipLabel(context: ComposerContextReference) {
   if (context.type === "appPreview") {
-    const host = context.previewUrl.replace(/^https?:\/\//i, "");
-    return `${context.projectName} - ${host}`;
+    return "";
   }
   if (context.type === "mockupPreview") {
     return `${context.projectName} - ${previewArtifactDisplayName(
@@ -578,13 +572,49 @@ function composerContextChipLabel(context: ComposerContextReference) {
 }
 
 function composerContextMentionLabel(context: ComposerContextReference) {
-  if (context.type === "appPreview") return context.markLabel || "Live mark 1";
-  if (context.type === "mockupPreview") return context.markLabel;
-  return "";
+  return composerContextVisualLabel(context);
 }
 
-function composerContextChipIcon(_context: ComposerContextReference) {
-  return <MousePointer2 size={13} />;
+function ComposerContextChip(props: {
+  context: ComposerContextReference;
+  onPreview: () => void;
+  onRemove: () => void;
+  previewDisabled: boolean;
+}) {
+  const image = composerContextPreviewImage(props.context);
+  const previewUrl = usePreviewImageSource(image);
+  const label = composerContextMentionLabel(props.context);
+  const detail = composerContextChipLabel(props.context);
+  return (
+    <div className="composer-context-chip visual" title={composerContextChipTitle(props.context)}>
+      <button
+        type="button"
+        className="composer-context-preview"
+        onClick={props.onPreview}
+        disabled={props.previewDisabled}
+        aria-label={`Preview ${label}`}
+      >
+        <span className="composer-context-thumb" aria-hidden="true">
+          {previewUrl ? (
+            <img src={previewUrl} alt="" />
+          ) : (
+            <MousePointer2 size={18} />
+          )}
+        </span>
+        <span>{label}</span>
+        <small hidden={!detail}>{detail}</small>
+      </button>
+      <button
+        type="button"
+        className="composer-context-remove"
+        onClick={props.onRemove}
+        aria-label={`Remove ${label}`}
+        title="Remove"
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
 }
 
 function AttachmentCard(props: {
@@ -593,8 +623,15 @@ function AttachmentCard(props: {
   onRemove: () => void;
 }) {
   const status = attachmentStatusLabel(props.attachment);
-  const previewUrl = useImagePreview(
-    props.attachment.kind === "image" ? props.attachment.path : null,
+  const previewUrl = usePreviewImageSource(
+    props.attachment.kind === "image"
+      ? {
+          id: attachmentPreviewImageId(props.attachment.id),
+          title: props.attachment.name,
+          alt: props.attachment.name,
+          path: props.attachment.path,
+        }
+      : null,
   );
   return (
     <div
@@ -639,75 +676,6 @@ function AttachmentCard(props: {
   );
 }
 
-function ImageLightbox(props: {
-  attachments: ComposerAttachment[];
-  index: number;
-  onClose: () => void;
-  onSelect: (index: number) => void;
-}) {
-  const attachment = props.attachments[props.index];
-  const previewUrl = useImagePreview(attachment.path);
-  const multiple = props.attachments.length > 1;
-
-  function move(direction: -1 | 1) {
-    props.onSelect(
-      (props.index + direction + props.attachments.length) %
-        props.attachments.length,
-    );
-  }
-
-  return (
-    <div
-      className="image-lightbox"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) props.onClose();
-      }}
-    >
-      <button
-        type="button"
-        className="image-lightbox-close"
-        onClick={props.onClose}
-        aria-label="Close preview"
-      >
-        <X size={21} />
-      </button>
-      {multiple && (
-        <button
-          type="button"
-          className="image-lightbox-nav previous"
-          onClick={() => move(-1)}
-          aria-label="Previous image"
-        >
-          <ChevronLeft size={24} />
-        </button>
-      )}
-      <div className="image-lightbox-stage">
-        {previewUrl ? (
-          <img src={previewUrl} alt="" />
-        ) : (
-          <div className="image-lightbox-empty">
-            <ImageIcon size={28} />
-            <span>Preview unavailable</span>
-          </div>
-        )}
-      </div>
-      {multiple && (
-        <button
-          type="button"
-          className="image-lightbox-nav next"
-          onClick={() => move(1)}
-          aria-label="Next image"
-        >
-          <ChevronRight size={24} />
-        </button>
-      )}
-    </div>
-  );
-}
-
 function ContextMeter(props: { usage: ThreadTokenUsage | null }) {
   const details = contextDetails(props.usage);
   return (
@@ -728,48 +696,6 @@ function ContextMeter(props: { usage: ThreadTokenUsage | null }) {
       </span>
     </button>
   );
-}
-
-function useImagePreview(path: string | null) {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(() =>
-    path ? (imagePreviewCache.get(path) ?? null) : null,
-  );
-
-  useEffect(() => {
-    if (!path) {
-      setPreviewUrl(null);
-      return;
-    }
-
-    const cached = imagePreviewCache.get(path);
-    if (cached) {
-      setPreviewUrl(cached);
-      return;
-    }
-
-    let cancelled = false;
-    const fallbackUrl = imagePreviewUrl(path);
-    const preview = desktopInvoke<string>("read_image_data_url", { path });
-    if (!preview) {
-      setPreviewUrl(fallbackUrl);
-      return;
-    }
-
-    preview
-      .then((dataUrl) => {
-        imagePreviewCache.set(path, dataUrl);
-        if (!cancelled) setPreviewUrl(dataUrl);
-      })
-      .catch(() => {
-        if (!cancelled) setPreviewUrl(fallbackUrl);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-
-  return previewUrl;
 }
 
 function permissionLabel(id: SandboxMode) {
@@ -805,24 +731,4 @@ function shortModelLabel(label: string) {
     .replace(/^GPT-/i, "")
     .replace(/^gpt-/i, "")
     .replace(/^Codex /i, "");
-}
-
-function imagePreviewUrl(path: string) {
-  if (!path) return null;
-  const nativePath = nativeFilePath(path);
-  const desktopUrl = desktopFileUrl(nativePath);
-  if (desktopUrl) return desktopUrl;
-  if (/^[A-Za-z]:[\\/]/.test(nativePath)) {
-    return encodeURI(`file:///${nativePath.replace(/\\/g, "/")}`);
-  }
-  if (nativePath.startsWith("/")) return encodeURI(`file://${nativePath}`);
-  return null;
-}
-
-function nativeFilePath(path: string) {
-  const wslMatch = path.match(/^\/mnt\/([A-Za-z])\/(.+)$/);
-  if (wslMatch) {
-    return `${wslMatch[1].toUpperCase()}:\\${wslMatch[2].replace(/\//g, "\\")}`;
-  }
-  return path;
 }

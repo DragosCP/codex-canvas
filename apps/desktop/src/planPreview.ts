@@ -4,6 +4,7 @@ import type {
   PlanPreviewPlacement,
   PlanPreviewSpec,
   PlanPreviewSessionState,
+  ProposalHighlight,
 } from "./types";
 
 const uiWords = /\b(ui|ux|screen|page|view|layout|button|menu|modal|drawer|panel|sidebar|form|input|card|table|list|filter|sort|tab|toolbar|header|footer|nav|navigation|preview|visual|workflow|interaction|click|hover|dropdown|popover|dialog|settings|dashboard)\b/i;
@@ -64,6 +65,17 @@ export function planPreviewDecisionSummary(record: {
       `Preview behavior: ${variant.summary}`,
       `Tradeoff: ${variant.tradeoff}`,
     );
+    if (variant.route?.trim()) lines.push(`Target route: ${variant.route.trim()}`);
+    if (variant.targetRegion?.trim()) {
+      lines.push(`Target region: ${variant.targetRegion.trim()}`);
+    }
+    if (variant.highlights?.length) {
+      lines.push(
+        `Proposal highlights: ${variant.highlights
+          .map((highlight) => `${highlight.label}: ${highlight.note}`)
+          .join("; ")}`,
+      );
+    }
   }
   if (record.previewAreaMark) {
     const mark = record.previewAreaMark;
@@ -89,7 +101,16 @@ export function planPreviewDecisionSummary(record: {
 function normalizePlanPreviewSpec(
   value: Partial<PlanPreviewSpec>,
 ): PlanPreviewSpec | null {
-  if (value.version !== 1 || !Array.isArray(value.variants)) return null;
+  if (value.version != null && value.version !== 1) return null;
+  if (!Array.isArray(value.variants)) return null;
+  const topLevelRoute = cleanText(
+    (value as Record<string, unknown>).route,
+    180,
+  );
+  const topLevelViewState = cleanText(
+    (value as Record<string, unknown>).viewState,
+    120,
+  );
   const variants = value.variants
     .map((variant, index) => {
       if (!variant || typeof variant !== "object") return null;
@@ -113,6 +134,11 @@ function normalizePlanPreviewSpec(
         tradeoff: cleanText(variant.tradeoff, 140),
         placement,
         summary,
+        route: cleanText(variant.route, 180) || topLevelRoute || undefined,
+        viewState:
+          cleanText(variant.viewState, 120) || topLevelViewState || undefined,
+        targetRegion: cleanText(variant.targetRegion, 120) || undefined,
+        highlights: normalizeHighlights(variant.highlights, id),
         components: Array.isArray(variant.components)
           ? variant.components
               .map((component) => {
@@ -164,6 +190,52 @@ function normalizeComponentKind(value: unknown): PlanPreviewComponentKind | null
     : null;
 }
 
+function normalizeHighlights(
+  value: unknown,
+  variantId: "A" | "B" | "C",
+): ProposalHighlight[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const highlights = value
+    .map((highlight, index) => {
+      if (!highlight || typeof highlight !== "object") return null;
+      const raw = highlight as Record<string, unknown>;
+      const areaMark = normalizeAreaMark(raw.areaMark ?? raw);
+      if (!areaMark) return null;
+      const label =
+        cleanText(raw.label, 48) || `Change ${variantId}${index + 1}`;
+      return {
+        id: cleanText(raw.id, 80) || `${variantId.toLowerCase()}-change-${index + 1}`,
+        label,
+        note: cleanText(raw.note, 160) || label,
+        areaMark,
+      };
+    })
+    .filter((highlight): highlight is ProposalHighlight => Boolean(highlight))
+    .slice(0, 5);
+  return highlights.length > 0 ? highlights : undefined;
+}
+
+function normalizeAreaMark(value: unknown): PlanPreviewAreaMark | null {
+  if (!value || typeof value !== "object") return null;
+  const raw = value as Partial<PlanPreviewAreaMark>;
+  const width = positiveNumber(raw.width);
+  const height = positiveNumber(raw.height);
+  const viewportWidth = positiveNumber(raw.viewportWidth);
+  const viewportHeight = positiveNumber(raw.viewportHeight);
+  if (!width || !height || !viewportWidth || !viewportHeight) return null;
+  return {
+    x: finiteNumber(raw.x),
+    y: finiteNumber(raw.y),
+    width,
+    height,
+    viewportWidth,
+    viewportHeight,
+    route: cleanText(raw.route, 180) || undefined,
+    note: cleanText(raw.note, 160),
+    createdAt: positiveNumber(raw.createdAt) || Date.now(),
+  };
+}
+
 function cleanText(value: unknown, maxLength: number) {
   if (typeof value !== "string") return "";
   const normalized = value.replace(/\s+/g, " ").trim();
@@ -176,4 +248,8 @@ function positiveNumber(value: unknown) {
   return typeof value === "number" && Number.isFinite(value) && value > 0
     ? value
     : 0;
+}
+
+function finiteNumber(value: unknown) {
+  return typeof value === "number" && Number.isFinite(value) ? Math.max(0, value) : 0;
 }

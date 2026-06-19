@@ -77,6 +77,9 @@ export type DesktopState = {
   pinnedThreadIds: string[];
   expandedProjectIds: string[];
   planProposals: Record<string, PlanProposal>;
+  sentComposerContextsByTurnId: Record<string, ComposerContextReference[]>;
+  codeProposalSets: Record<string, CodeProposalSet>;
+  codeProposalActiveSetIdsByThreadId: Record<string, string>;
   mockupActiveProposalSetIdsByThreadId: Record<string, string>;
   mockupHistoryProposalSetIds: Record<string, boolean>;
   layout: LayoutState;
@@ -97,6 +100,11 @@ export type InspectorSelection =
     }
   | {
       type: "mockupPreview";
+      projectId: string;
+      proposalSetId: string;
+    }
+  | {
+      type: "codeProposalPreview";
       projectId: string;
       proposalSetId: string;
     }
@@ -138,6 +146,47 @@ export type MockupPreviewSet = {
   mockups: SavedMockup[];
 };
 
+export type CodeProposalStatus =
+  | "preparing"
+  | "generating"
+  | "ready"
+  | "applying"
+  | "applied"
+  | "failed"
+  | "history";
+
+export type CodeProposalFileChange = {
+  kind: "created" | "updated" | "deleted";
+  path: string;
+  hash: string;
+  size: number;
+};
+
+export type CodeProposalOption = {
+  id: "A" | "B" | "C";
+  title: string;
+  summary: string;
+  workspacePath: string;
+  status: CodeProposalStatus;
+  changedFiles: CodeProposalFileChange[];
+  appliedAt?: number;
+};
+
+export type CodeProposalSet = {
+  proposalSetId: string;
+  projectId: string;
+  threadId: string | null;
+  turnId: string | null;
+  rootPath: string;
+  originalPrompt: string;
+  selectedOptionId: "A" | "B" | "C" | null;
+  options: CodeProposalOption[];
+  status: CodeProposalStatus;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
 export type ProposalHighlight = {
   id: string;
   label: string;
@@ -168,6 +217,7 @@ export type ComposerAppPreviewContext = {
   markLabel?: string;
   markNumber?: number;
   areaMark: PlanPreviewAreaMark;
+  thumbnailDataUrl?: string;
 };
 
 export type ComposerMockupPreviewContext = {
@@ -185,6 +235,7 @@ export type ComposerMockupPreviewContext = {
   filePath: string;
   viewport: "desktop" | "mobile";
   areaMark: PlanPreviewAreaMark;
+  thumbnailDataUrl?: string;
   source?: "userMark" | "proposalHighlight";
   highlightId?: string;
 };
@@ -199,7 +250,7 @@ export type PlanProposalStatus =
   | "declined"
   | "superseded";
 
-export type PlanProposalKind = "plan" | "safer_alternative";
+export type PlanProposalKind = "plan" | "safer_alternative" | "live_proposal";
 
 export type PlanProposal = {
   id: string;
@@ -242,6 +293,10 @@ export type PlanPreviewVariant = {
   tradeoff: string;
   placement: PlanPreviewPlacement;
   summary: string;
+  route?: string;
+  viewState?: string;
+  targetRegion?: string;
+  highlights?: ProposalHighlight[];
   components: PlanPreviewComponent[];
 };
 
@@ -268,7 +323,7 @@ export type PlanPreviewAreaMark = {
 export type PlanPreviewCleanupStatus =
   | "idle"
   | "clean"
-  | "injected"
+  | "selected"
   | "reset"
   | "failed"
   | "unavailable";

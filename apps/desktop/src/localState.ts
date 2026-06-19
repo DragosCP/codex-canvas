@@ -1,5 +1,8 @@
 import type {
   ComposerContextReference,
+  CodeProposalFileChange,
+  CodeProposalSet,
+  CodeProposalStatus,
   DesktopState,
   PlanProposal,
   PlanProposalKind,
@@ -12,6 +15,7 @@ import type {
   PreviewArtifactKind,
   Project,
   ProjectSettings,
+  ProposalHighlight,
   BackendMode,
   SandboxMode,
 } from "./types";
@@ -61,6 +65,9 @@ export function createDefaultState(): DesktopState {
     pinnedThreadIds: [],
     expandedProjectIds: [],
     planProposals: {},
+    sentComposerContextsByTurnId: {},
+    codeProposalSets: {},
+    codeProposalActiveSetIdsByThreadId: {},
     mockupActiveProposalSetIdsByThreadId: {},
     mockupHistoryProposalSetIds: {},
     layout: {
@@ -95,6 +102,13 @@ export function loadDesktopState(): DesktopState {
       pinnedThreadIds: stringArray(parsed.pinnedThreadIds),
       expandedProjectIds: stringArray(parsed.expandedProjectIds),
       planProposals: normalizePlanProposals(parsed.planProposals),
+      sentComposerContextsByTurnId: normalizeSentComposerContextsByTurnId(
+        parsed.sentComposerContextsByTurnId,
+      ),
+      codeProposalSets: normalizeCodeProposalSets(parsed.codeProposalSets),
+      codeProposalActiveSetIdsByThreadId: stringRecord(
+        parsed.codeProposalActiveSetIdsByThreadId,
+      ),
       mockupActiveProposalSetIdsByThreadId: stringRecord(
         parsed.mockupActiveProposalSetIdsByThreadId,
       ),
@@ -124,6 +138,108 @@ export function loadDesktopState(): DesktopState {
   } catch {
     return fallback;
   }
+}
+
+function normalizeCodeProposalSets(
+  value: unknown,
+): Record<string, CodeProposalSet> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: Record<string, CodeProposalSet> = {};
+  for (const [proposalSetId, raw] of Object.entries(
+    value as Record<string, Partial<CodeProposalSet>>,
+  )) {
+    if (!raw || typeof raw !== "object") continue;
+    const projectId = stringValue(raw.projectId);
+    const rootPath = stringValue(raw.rootPath);
+    if (!projectId || !rootPath) continue;
+    const options = Array.isArray(raw.options)
+      ? raw.options
+          .map((option) => {
+            if (!option || typeof option !== "object") return null;
+            const id = option.id === "A" || option.id === "B" || option.id === "C"
+              ? option.id
+              : null;
+            const workspacePath = stringValue(option.workspacePath);
+            if (!id || !workspacePath) return null;
+            return {
+              id,
+              title: stringValue(option.title) || `Option ${id}`,
+              summary: stringValue(option.summary),
+              workspacePath,
+              status: codeProposalStatus(option.status),
+              changedFiles: normalizeCodeProposalChanges(option.changedFiles),
+              appliedAt: positiveNumber(option.appliedAt) || undefined,
+            };
+          })
+          .filter((option): option is NonNullable<typeof option> =>
+            Boolean(option),
+          )
+      : [];
+    if (options.length === 0) continue;
+    const selectedOptionId =
+      raw.selectedOptionId === "A" ||
+      raw.selectedOptionId === "B" ||
+      raw.selectedOptionId === "C"
+        ? raw.selectedOptionId
+        : options[0]?.id ?? null;
+    normalized[proposalSetId] = {
+      proposalSetId,
+      projectId,
+      threadId: stringValue(raw.threadId) || null,
+      turnId: stringValue(raw.turnId) || null,
+      rootPath,
+      originalPrompt: stringValue(raw.originalPrompt),
+      selectedOptionId,
+      options,
+      status: codeProposalStatus(raw.status),
+      error: stringValue(raw.error) || undefined,
+      createdAt: numberValue(raw.createdAt),
+      updatedAt: numberValue(raw.updatedAt),
+    };
+  }
+  return normalized;
+}
+
+function normalizeCodeProposalChanges(
+  value: unknown,
+): CodeProposalFileChange[] {
+  if (!Array.isArray(value)) return [];
+  return value
+    .map((change) => {
+      if (!change || typeof change !== "object") return null;
+      const kind =
+        change.kind === "created" ||
+        change.kind === "updated" ||
+        change.kind === "deleted"
+          ? change.kind
+          : null;
+      const path = stringValue(change.path);
+      if (!kind || !path) return null;
+      return {
+        kind,
+        path,
+        hash: stringValue(change.hash),
+        size: numberValue(change.size),
+      };
+    })
+    .filter((change): change is CodeProposalFileChange => Boolean(change));
+}
+
+function codeProposalStatus(value: unknown): CodeProposalStatus {
+  if (value === "applying") {
+    return "ready";
+  }
+  if (
+    value === "preparing" ||
+    value === "generating" ||
+    value === "ready" ||
+    value === "applied" ||
+    value === "failed" ||
+    value === "history"
+  ) {
+    return value;
+  }
+  return "ready";
 }
 
 function stringArray(value: unknown): string[] {
@@ -188,7 +304,14 @@ function normalizePlanProposals(value: unknown): Record<string, PlanProposal> {
 function normalizePlanPreviewSpec(value: unknown): PlanPreviewSpec | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<PlanPreviewSpec>;
-  if (raw.version !== 1 || !Array.isArray(raw.variants)) return null;
+  if (raw.version != null && raw.version !== 1) return null;
+  if (!Array.isArray(raw.variants)) return null;
+  const topLevelRoute = stringValue(
+    (value as Record<string, unknown>).route,
+  );
+  const topLevelViewState = stringValue(
+    (value as Record<string, unknown>).viewState,
+  );
   const variants = raw.variants
     .map((variant) => {
       if (!variant || typeof variant !== "object") return null;
@@ -209,6 +332,11 @@ function normalizePlanPreviewSpec(value: unknown): PlanPreviewSpec | null {
         tradeoff: stringValue(variant.tradeoff),
         placement,
         summary: stringValue(variant.summary),
+        route: stringValue(variant.route) || topLevelRoute || undefined,
+        viewState:
+          stringValue(variant.viewState) || topLevelViewState || undefined,
+        targetRegion: stringValue(variant.targetRegion) || undefined,
+        highlights: normalizeProposalHighlights(variant.highlights, id),
         components: Array.isArray(variant.components)
           ? variant.components
               .map((component) => {
@@ -260,6 +388,33 @@ function normalizePlanPreviewAreaMark(value: unknown): PlanPreviewAreaMark | nul
   };
 }
 
+function normalizeProposalHighlights(
+  value: unknown,
+  variantId: "A" | "B" | "C",
+): ProposalHighlight[] | undefined {
+  if (!Array.isArray(value)) return undefined;
+  const highlights = value
+    .map((highlight, index) => {
+      if (!highlight || typeof highlight !== "object") return null;
+      const raw = highlight as Record<string, unknown>;
+      const areaMark = normalizePlanPreviewAreaMark(raw.areaMark ?? raw);
+      if (!areaMark) return null;
+      const label =
+        stringValue(raw.label) || `Change ${variantId}${index + 1}`;
+      return {
+        id:
+          stringValue(raw.id) ||
+          `${variantId.toLowerCase()}-change-${index + 1}`,
+        label,
+        note: stringValue(raw.note) || label,
+        areaMark,
+      };
+    })
+    .filter((highlight): highlight is ProposalHighlight => Boolean(highlight))
+    .slice(0, 5);
+  return highlights.length > 0 ? highlights : undefined;
+}
+
 function normalizePlanPreviewSession(value: unknown): PlanPreviewSessionState | null {
   if (!value || typeof value !== "object") return null;
   const raw = value as Partial<PlanPreviewSessionState>;
@@ -278,11 +433,14 @@ function normalizePlanPreviewSession(value: unknown): PlanPreviewSessionState | 
 
 function planPreviewCleanupStatus(value: unknown): PlanPreviewCleanupStatus {
   return value === "clean" ||
+    value === "selected" ||
     value === "injected" ||
     value === "reset" ||
     value === "failed" ||
     value === "unavailable"
-    ? value
+    ? value === "injected"
+      ? "selected"
+      : value
     : "idle";
 }
 
@@ -320,9 +478,11 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
         projectName,
         previewUrl,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
-        markLabel: stringValue(rawContext.markLabel) || "Live mark 1",
+        markLabel: stringValue(rawContext.markLabel) || "Mark 1",
         markNumber: positiveNumber(rawContext.markNumber) || 1,
         areaMark,
+        thumbnailDataUrl:
+          normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
       });
       continue;
     }
@@ -355,6 +515,8 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
         filePath,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
         areaMark,
+        thumbnailDataUrl:
+          normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
         source:
           rawContext.source === "proposalHighlight"
             ? "proposalHighlight"
@@ -364,6 +526,26 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
     }
   }
   return contexts;
+}
+
+function normalizeSentComposerContextsByTurnId(
+  value: unknown,
+): Record<string, ComposerContextReference[]> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: Record<string, ComposerContextReference[]> = {};
+  for (const [turnId, rawContexts] of Object.entries(
+    value as Record<string, unknown>,
+  )) {
+    if (!turnId.trim()) continue;
+    const contexts = normalizeComposerContexts(rawContexts);
+    if (contexts.length > 0) normalized[turnId] = contexts;
+  }
+  return normalized;
+}
+
+function normalizedThumbnailDataUrl(value: unknown) {
+  if (typeof value !== "string") return "";
+  return value.startsWith("data:image/") ? value : "";
 }
 
 function normalizeArtifactKind(value: unknown): PreviewArtifactKind {
@@ -395,7 +577,9 @@ function planProposalStatus(value: unknown): PlanProposalStatus {
 }
 
 function planProposalKind(value: unknown): PlanProposalKind {
-  return value === "safer_alternative" ? "safer_alternative" : "plan";
+  if (value === "safer_alternative") return "safer_alternative";
+  if (value === "live_proposal") return "live_proposal";
+  return "plan";
 }
 
 export function saveDesktopState(state: DesktopState) {
@@ -430,10 +614,29 @@ function compactDesktopStateForStorage(
   state: DesktopState,
   level: StorageCompactionLevel = "normal",
 ): DesktopState {
-  void level;
+  if (level === "aggressive" || level === "emergency") {
+    return {
+      ...state,
+      sentComposerContextsByTurnId:
+        level === "emergency"
+          ? {}
+          : stripComposerContextThumbnails(state.sentComposerContextsByTurnId),
+    };
+  }
   return {
     ...state,
   };
+}
+
+function stripComposerContextThumbnails(
+  contextsByTurnId: Record<string, ComposerContextReference[]>,
+) {
+  return Object.fromEntries(
+    Object.entries(contextsByTurnId).map(([turnId, contexts]) => [
+      turnId,
+      contexts.map((context) => ({ ...context, thumbnailDataUrl: undefined })),
+    ]),
+  );
 }
 
 export function createProject(

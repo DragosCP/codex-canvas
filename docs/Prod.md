@@ -19,7 +19,7 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - App Preview is the visual surface for existing runnable projects.
 - Mockup Preview is the visual surface for saved review artifacts under `.codex/mockups`.
 - Do not add a top-level visual mode beside Plan Mode unless the owner explicitly changes this direction later.
-- If the user draws a marked area in App Preview or Mockup Preview, the app automatically attaches that visual context to the composer as a removable chip.
+- If the user draws a marked area in App Preview or Mockup Preview, the app automatically attaches that visual context to the composer as a removable picture chip.
 - The user should not need to understand mode combinations. In plain behavior: Plan Mode means "show me first"; preview marks mean "use this visual area as context."
 
 ## Live App Direction
@@ -27,12 +27,13 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - Current product direction: the live running app is the preferred visual planning surface for existing projects.
 - In Plan Mode, visible proposals may be temporarily shown against the real app so the user can understand the proposed feature before approving implementation.
 - When the user has not specified a precise design, Codex may offer up to three visual preview options before asking the user to manually mark a location.
-- The app does not build three code implementations for options. It loads one live app preview and swaps temporary preview variants or review artifacts.
-- Proposed UI should look and behave like app UI, with a clear temporary/proposed treatment. It should not appear as DOM tags, CSS boxes, or coordinate overlays.
+- For lightweight Live overlay proposals, the app does not build three code implementations for options. It loads one live app preview and swaps temporary preview variants or review artifacts. Serious P25b proposals may use isolated runnable A/B/C workspaces.
+- Live proposal state should be represented by desktop preview chrome and optional `Show changes` marks, not by visible Codex UI injected into the user's app. Do not render `Proposed` banners, generic proposal cards, fake buttons, DOM tags, CSS boxes, or coordinate overlays inside the app preview.
+- Implemented direction: serious new-app, new-page, redesign, and large UI proposals can become code-backed proposal workspaces. In that lane, A/B/C are isolated runnable project versions with stored patches, and accepting one promotes its patch into Live instead of asking Codex to recreate the proposal from prose.
 - Location feedback should be lightweight: the user can mark an area on a snapshot/live preview and describe what should happen there. The mark is temporary communication context, not durable geometry.
-- Area marking must work outside Plan Mode. A normal chat user can draw a rectangle in the app preview; the composer immediately gains a compact chip such as `Live mark 1`, and the next message sends that mark context.
+- Area marking must work outside Plan Mode. A normal chat user can draw a rectangle in the app preview; the composer immediately gains a compact picture chip such as `Mark 1`, and the next message sends that mark context.
 - Plan acceptance turns the approved preview and plan into real implementation work. It must not silently save visual planning artifacts.
-- If injection into the live app is unavailable, Codex should fall back to screenshot marking, saved review artifacts, or text planning instead of pretending it has precise UI control.
+- If live proposal metadata or change marks are unavailable, Codex should fall back to screenshot marking, saved review artifacts, or text planning instead of pretending it has precise UI control.
 - App Preview should be run/stop oriented, not port-list oriented. `Run Preview` is primary; detecting existing localhost apps and manually entering a URL are fallback actions.
 - Blank projects should not show fake previews or a builder dashboard before the user has stated intent. The empty App Preview state stays quiet.
 
@@ -45,7 +46,9 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - If an existing-app user asks to view a change before implementation but leaves the proposal shape open, Codex should show the current-app decision strip first. A clear single-preview request creates one review preview; a clear multiple-directions request creates A/B/C review previews.
 - Saved review mockups are user-visible preview artifacts. The user should not need to browse `.codex/mockups` manually to inspect what Codex created.
 - When a real app exists and proposed mockups/review previews exist, the preview surface should offer quick visual comparison: `Live | Preview` for one proposal or `Live | A | B | C` for multiple options. `Live` means the current implementation, not a generated mockup.
+- For small existing-app placement/control/menu/panel ideas, the preferred review preview is now a temporary live overlay proposal, not copied standalone HTML. Saved mockups stay for explicit mockup/wireframe requests, blank projects, broad exploration, and fallback.
 - After a saved mockup is built into the real app, that starting set becomes history/reference only. It must not come back as active current-app proposal tabs or an above-composer selector; fresh current-app proposals come from the new request.
+- Normal follow-up feature requests after building a saved mockup must not edit the old saved Option A/B/C as the active proposal. They should route from current Live state, using direct build, lightweight Live proposal, code-backed proposal workspace, or a fresh saved mockup set depending on intent.
 - Do not show a blank `Live` tab for projects with no app structure. If app structure exists but the preview is stopped, `Live` can show the normal start/detect/use-URL state.
 - Existing generated mockups are reviewable artifacts. They should not be expanded into a separate editor product unless explicitly revived.
 
@@ -54,10 +57,10 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - Plan Mode activation, including `Shift+Tab`, must not navigate or open a visual surface by itself.
 - A plan can expose visual review only through explicit actions such as `Show app preview`, `Compare options`, opening App/Mockup Preview, or attaching marked-area context.
 - Plan Mode forbids implementation-file changes until the user accepts, but it may create tightly scoped review-only preview artifacts such as `.codex/mockups` when visual planning is the work being reviewed.
-- Existing-app Plan Mode should prefer temporary live preview variants when possible. Blank projects or injection failures can use saved mockup artifacts as review material.
+- Existing-app Plan Mode should prefer temporary live preview variants when possible. Blank projects or proposal-preview failures can use saved mockup artifacts as review material.
 - `Yes, implement this plan` proceeds with the real project/code work. It may use the selected preview option or marked-area context as guidance, but it must not silently save visual planning artifacts.
 - `No, and tell Codex what to do differently` sends typed feedback plus any active preview option/marked-area context.
-- `Dismiss Esc` drops the current plan decision and removes temporary injected preview UI.
+- `Dismiss Esc` drops the current plan decision and clears temporary proposal state and marks.
 - After successful implementation, prefer reloading the live app preview and comparing it to the accepted plan preview.
 
 ## Implementation State
@@ -66,21 +69,27 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - Implemented: React/TypeScript desktop shell with sidebar, chat/composer, inspector, app-server connection states, Electron shell, native app-server sidecar bridge, optional WSL app-server bridge, account/model visibility, streamed assistant responses, command cards, and cancellation.
 - Implemented: in-app Codex account recovery with ChatGPT browser login, device-code fallback, API-key fallback, login completion refresh, and signed-out send blocking for OpenAI-hosted models.
 - Implemented: Windows Electron run/build lane with a staged native Codex app-server sidecar and Electron-owned local bridge. Installer packaging is still pending for the Electron shell.
-- Implemented: Electron-controlled App Preview with a real app webview, remembered per-project preview URLs, honest unavailable states, normal-chat `App mark` composer chips, Plan Mode variants, temporary guest-page UI injection, cleanup/reset, route/viewport/interaction tracking, and accept/revise preview context handoff.
+- Implemented: Electron-controlled App Preview with a real app webview, remembered per-project preview URLs, honest unavailable states, normal-chat `App mark` composer chips, Plan Mode variants, temporary proposal metadata, cleanup/reset, route/viewport/interaction tracking, and accept/revise preview context handoff.
 - Implemented: state-based App Preview chrome with `Run Preview`, `Stop`, `Reload`, viewport selection, `Mark area`, external open, secondary URL entry, existing-preview detection, and managed per-project preview start/stop for common local web apps.
 - Implemented: saved A/B/C HTML mockup artifacts can be reviewed from a compact selector, opened in Mockup Preview, marked with named multi-option composer chips, compared against `Live`, and built from without exposing internal prompt payloads or auto-sending commitment actions.
-- Implemented: empty-project broad UI starts use an LLM-generated decision strip in a read-only/no-approval first turn, with no file creation until the user chooses. This first decision turn hides the normal activity transcript and shows only a quiet preparing state plus the final decision UI; later wireframe/mockup/build turns still show normal progress. Decision/control payloads are hidden from chat text.
+- Implemented: empty-project broad UI starts use an LLM-generated decision strip in a read-only/no-approval first turn, with no file creation until the user chooses. This first decision turn hides the normal activity transcript and shows only a quiet preparing state plus the final decision UI; later runnable proposal/mockup/build turns still show normal progress. Decision/control payloads are hidden from chat text.
 - Implemented: after `Build selected`, saved mockups become history/reference pages and the app server preview lifecycle owns running the final local app; build-selected prompts should not launch preview servers inside the agent turn.
 - Implemented: build-selected and visual proposal sends preserve editable visible composer text for chat, sidebar, Activity, and transcript display. Selected mockup/preview/mark context is hidden supporting guidance, and visible user edits win on conflict.
 - Implemented: active agent turns show live user-facing progress while files are being produced, using streamed app-server file-change data when available and a bounded Electron workspace snapshot fallback for observable text-file line deltas during quiet write periods. The current UI keeps first-send chat state stable, shows inline `Editing file` rows, adds an above-composer changed-lines pill, and collapses final file output into one grouped summary instead of repeated `Edited 1 file` cards.
 - Implemented: visual decisions are state-aware across empty and existing projects. Empty-project decisions disappear after meaningful app files or saved mockups exist; broad current-app UI prompts can offer direct build, quick preview, or two/three directions; explicit view-first/options prompts create review-only `.codex/mockups` artifacts and open Mockup Preview automatically.
-- Implemented: Mockup Preview can compare proposed artifacts against the current app with `Live | Preview` or `Live | A | B | C` when app structure exists. Blank projects hide `Live`; stopped app previews show the normal start/detect/use-URL controls. Live marks use `Live mark 1` chips.
+- Implemented: Mockup Preview can compare proposed artifacts against the current app with `Live | Preview` or `Live | A | B | C` when app structure exists. Blank projects hide `Live`; stopped app previews show the normal start/detect/use-URL controls. Preview marks use simple labels such as `Mark 1`.
 - Implemented: built starting mockups stay history-only, current-app decisions generate fresh proposal sets, proposal highlights are adjustable supporting context, and Live/Preview Compare share a stable compact header.
 - Implemented: the preview button lands on `Live`, proposal tabs are scoped to the active chat, switching chats resets the compare shell back to `Live`, and compact preview headers push lower-priority controls into `...` before a third row appears.
 - Implemented: Plan Mode distinguishes app implementation files from review-only preview artifacts, keeps implementation gated until accept, names selected preview options in the accept path, sends marked preview context through the revise path, and treats `Build selected` from a preview as an explicit editable acceptance step.
+- Implemented: normal-chat existing-app preview choices can create lightweight Live overlay proposals with `Live | Proposal` or `Live | A | B | C`, per-option proposal highlights, `Show changes`, and explicit accept-to-implement handoff. Hidden proposal blocks are preserved through streamed completion and stripped from chat text.
+- Implemented: after a saved mockup is built, that proposal set is removed from active routing and treated as history so later feature requests work from current Live instead of silently editing old Option A/B/C.
+- Implemented: P25b code-backed proposal workspaces create app-owned isolated A/B/C folders, run proposal generation inside those folders, preview selected options through App Preview, add requested C options beside existing A/B when possible, and apply clean selected proposals to Live through desktop-owned file operations with conflict checks. Requests beyond A/B/C are blocked honestly instead of silently relabeled.
+- Implemented: composer image attachments can be dragged or picked, shown as compact removable composer chips, sent as native local image inputs, opened fullscreen, and shown again as thumbnails in the chat transcript.
+- Implemented: App Preview and Mockup Preview user marks plus attached agent change marks render as picture chips in the composer and sent chat transcript, with fullscreen preview, while preserving their hidden rectangle context for Codex.
+- Implemented: sent preview mark chips move into the chat transcript and clear from the composer, while decision-choice follow-ups can still reattach that sent visual context. Saved mockup review turns now route direct requests such as `Option C based on B` to saved preview updates instead of surfacing a generic decision strip.
 - Implemented: P20 removed the old coordinate-based visual editor product from active desktop code and current product direction. Old persisted state for that removed feature is ignored during load.
 - Current direction: keep visual planning as one focused live-app/mockup-preview workflow and avoid rebuilding separate graph/proof/design-editor surfaces unless the owner explicitly asks later.
-- Current direction: keep App Preview on Electron browser control surfaces. Do not revive Tauri or old overlay/editor models for this workflow.
+- Current direction: keep App Preview on Electron browser control surfaces and avoid rebuilding old overlay/editor models for this workflow.
 - Current direction: in the demo workflow, chat plus App Preview is the primary surface.
 - Current direction: mockup-first reuses the A/B/C preview decision model where useful, but the trigger is project state plus explicit user choice, not a broad keyword detector. The above-composer mockup strip is selection only; commit actions belong in Mockup Preview after the user has looked at the option. After the user sends `Build selected`, the mockups become history/reference pages instead of an active decision strip.
 - Current direction: make the agent aware of visual-planning capabilities through compact session/resume guidance plus small per-turn factual state, not a large repeated meta prompt before every user message.

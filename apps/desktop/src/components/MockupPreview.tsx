@@ -47,7 +47,7 @@ type HighlightDrag = {
 
 export function MockupPreview(props: {
   mode: "active" | "history";
-  appPreviewAreaMark: ComposerAppPreviewContext["areaMark"] | null;
+  appPreviewContexts: ComposerAppPreviewContext[];
   canShowLive: boolean;
   forceLiveToken?: number;
   markContexts: ComposerMockupPreviewContext[];
@@ -68,6 +68,7 @@ export function MockupPreview(props: {
       source?: ComposerMockupPreviewContext["source"];
       viewport?: ComposerMockupPreviewContext["viewport"];
       highlightId?: string;
+      thumbnailDataUrl?: string;
     },
   ) => void;
   onResetHighlightContexts: (
@@ -113,12 +114,15 @@ export function MockupPreview(props: {
   const showViewportSelect = toolbarWidth < 950;
   const showViewportIconOnly = toolbarWidth < 790;
   const useCompactActionLabels = toolbarWidth < 860;
-  const overflowBuildAction = toolbarWidth < 670;
-  const overflowResetAction = toolbarWidth < 620;
-  const overflowChangesAction = toolbarWidth < 620;
+  const overflowBuildAction = toolbarWidth < 760;
+  const overflowResetAction = toolbarWidth < 640;
+  const overflowChangesAction = toolbarWidth < 440;
   const showTabSelect = toolbarWidth < 440;
-  const overflowMarkAction = toolbarWidth < 500;
+  const overflowMarkAction = toolbarWidth < 620;
+  const showChangesIconOnly = toolbarWidth < 620;
   const selectedHighlights = selected?.highlights ?? [];
+  const hasSelectedHighlights = selectedHighlights.length > 0;
+  const shouldExposeChangesControl = canShowLive || hasSelectedHighlights;
   const selectedMarks = props.markContexts.filter(
     (mark) =>
       mark.projectId === props.previewSet?.projectId &&
@@ -139,12 +143,12 @@ export function MockupPreview(props: {
   const showTitleChip = false;
   const showSummaryChip = false;
   const showChangesInline =
-    selectedHighlights.length > 0 &&
+    shouldExposeChangesControl &&
     !overflowChangesAction;
   const showResetInline =
     hasAdjustedHighlights && !overflowResetAction;
   const showChangesInMenu =
-    selectedHighlights.length > 0 && !showChangesInline;
+    shouldExposeChangesControl && !showChangesInline;
   const showResetInMenu = hasAdjustedHighlights && !showResetInline;
   const showBuildInline = !historyMode && !overflowBuildAction;
   const showBuildInMenu = !historyMode && overflowBuildAction;
@@ -152,7 +156,11 @@ export function MockupPreview(props: {
   const showMarkInMenu = overflowMarkAction;
   const markActionLabel =
     useCompactActionLabels && toolbarWidth < 760 ? "Mark" : "Mark area";
-  const changesActionLabel = showHighlights ? "Hide" : "Changes";
+  const changesActionLabel = !hasSelectedHighlights
+    ? "No changes"
+    : showHighlights
+      ? "Hide"
+      : "Changes";
   const resetActionLabel = useCompactActionLabels ? "Reset" : "Reset changes";
   const buildActionLabel = useCompactActionLabels ? "Build" : "Build selected";
   const showMoreMenu =
@@ -225,7 +233,7 @@ export function MockupPreview(props: {
     );
   }
 
-  function finishMark(event: PointerEvent<HTMLDivElement>) {
+  async function finishMark(event: PointerEvent<HTMLDivElement>) {
     if (!marking || !draftMark || !props.previewSet || !selected) return;
     const point = pointerPoint(event) ?? {
       x: draftMark.currentX,
@@ -248,7 +256,11 @@ export function MockupPreview(props: {
       note: "",
       createdAt: Date.now(),
     };
-    props.onMarkArea(props.previewSet, selected, areaMark, { viewport });
+    const thumbnailDataUrl = await captureMockupThumbnail(areaMark);
+    props.onMarkArea(props.previewSet, selected, areaMark, {
+      viewport,
+      thumbnailDataUrl,
+    });
   }
 
   function beginHighlightAdjust(
@@ -324,7 +336,7 @@ export function MockupPreview(props: {
     }));
   }
 
-  function finishHighlightAdjust(
+  async function finishHighlightAdjust(
     event: PointerEvent<HTMLDivElement | HTMLButtonElement>,
   ) {
     if (!highlightDrag || !props.previewSet || !selected) return;
@@ -335,14 +347,48 @@ export function MockupPreview(props: {
         highlightKey(selected.id, highlightDrag.highlightId, viewport)
       ] ?? highlightDrag.startMark;
     const moved = !sameAreaMark(adjusted, highlightDrag.startMark);
+    const label = highlightDrag.label;
+    const highlightId = highlightDrag.highlightId;
     setHighlightDrag(null);
     if (!moved) return;
+    const thumbnailDataUrl = await captureMockupThumbnail(adjusted);
     props.onMarkArea(props.previewSet, selected, adjusted, {
-      label: highlightDrag.label,
+      label,
       source: "proposalHighlight",
       viewport,
-      highlightId: highlightDrag.highlightId,
+      highlightId,
+      thumbnailDataUrl,
     });
+  }
+
+  async function captureMockupThumbnail(areaMark: PlanPreviewAreaMark) {
+    const stage = stageRef.current;
+    if (!stage || !selected) return undefined;
+    const frame = stage.querySelector<HTMLIFrameElement>(".mockup-preview-frame");
+    if (!frame) return undefined;
+    const stageRect = stage.getBoundingClientRect();
+    const frameRect = frame.getBoundingClientRect();
+    const frameLeft = frameRect.left - stageRect.left;
+    const frameTop = frameRect.top - stageRect.top;
+    const rawX = areaMark.x - frameLeft;
+    const rawY = areaMark.y - frameTop;
+    const cropX = clamp(rawX, 0, frameRect.width);
+    const cropY = clamp(rawY, 0, frameRect.height);
+    const cropRight = clamp(rawX + areaMark.width, 0, frameRect.width);
+    const cropBottom = clamp(rawY + areaMark.height, 0, frameRect.height);
+    const crop = {
+      x: cropX,
+      y: cropY,
+      width: cropRight - cropX,
+      height: cropBottom - cropY,
+    };
+    if (crop.width < 4 || crop.height < 4) return undefined;
+    return renderMockupHtmlThumbnail(
+      selected.html,
+      crop,
+      Math.max(1, Math.round(frameRect.width)),
+      Math.max(1, Math.round(frameRect.height)),
+    );
   }
 
   function pointerPoint(event: PointerEvent<HTMLElement>) {
@@ -433,7 +479,10 @@ export function MockupPreview(props: {
       options={tabOptions}
     />
   ) : (
-    <div className="preview-segmented" aria-label="Preview options">
+    <div
+      className="preview-segmented preview-compare-options"
+      aria-label="Preview options"
+    >
       {canShowLive && (
         <button
           className={liveSelected ? "active" : ""}
@@ -515,7 +564,7 @@ export function MockupPreview(props: {
         <LiveAppPreview
           compareTabOptions={tabOptions}
           project={props.project}
-          areaMark={props.appPreviewAreaMark}
+          appPreviewContexts={props.appPreviewContexts}
           compareTabs={tabs}
           statusLabel={historyMode ? "History reference" : "Live app"}
           titleLabel="Compare"
@@ -555,6 +604,36 @@ export function MockupPreview(props: {
         {!liveSelected && (
           <div className="preview-actions mockup-preview-actions">
             {viewportControls}
+            {showChangesInline && (
+              <button
+                aria-label={
+                  hasSelectedHighlights
+                    ? showHighlights
+                      ? "Hide change areas"
+                      : "Show change areas"
+                    : "No saved change highlights for this option"
+                }
+                className={`ghost-button ${
+                  showChangesIconOnly ? "icon-only" : ""
+                }`}
+                disabled={!hasSelectedHighlights}
+                onClick={() => {
+                  if (!hasSelectedHighlights) return;
+                  setShowHighlights((current) => !current);
+                }}
+                title={
+                  hasSelectedHighlights
+                    ? showHighlights
+                      ? "Hide change areas"
+                      : "Show change areas"
+                    : "No saved change highlights for this option"
+                }
+                type="button"
+              >
+                {showHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
+                {!showChangesIconOnly && changesActionLabel}
+              </button>
+            )}
             {showMarkInline && (
               <button
                 className={marking ? "ghost-button active" : "ghost-button"}
@@ -570,17 +649,6 @@ export function MockupPreview(props: {
                 type="button"
               >
                 <MousePointer2 size={15} /> {markActionLabel}
-              </button>
-            )}
-            {showChangesInline && (
-              <button
-                className="ghost-button"
-                onClick={() => setShowHighlights((current) => !current)}
-                title={showHighlights ? "Hide change areas" : "Show change areas"}
-                type="button"
-              >
-                {showHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
-                {changesActionLabel}
               </button>
             )}
             {showResetInline && (
@@ -617,6 +685,24 @@ export function MockupPreview(props: {
                 </button>
                 {moreMenuOpen && (
                 <div className="more-actions-menu">
+                  {showChangesInMenu && (
+                    <button
+                      onClick={() => {
+                        if (!hasSelectedHighlights) return;
+                        setShowHighlights((current) => !current);
+                        setMoreMenuOpen(false);
+                      }}
+                      disabled={!hasSelectedHighlights}
+                      type="button"
+                    >
+                      {showHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
+                      {!hasSelectedHighlights
+                        ? "No changes"
+                        : showHighlights
+                          ? "Hide changes"
+                          : "Show changes"}
+                    </button>
+                  )}
                   {showMarkInMenu && (
                     <button
                       onClick={() => {
@@ -628,18 +714,6 @@ export function MockupPreview(props: {
                     >
                       <MousePointer2 size={15} />
                       {marking ? "Stop marking" : "Mark area"}
-                    </button>
-                  )}
-                  {showChangesInMenu && (
-                    <button
-                      onClick={() => {
-                        setShowHighlights((current) => !current);
-                        setMoreMenuOpen(false);
-                      }}
-                      type="button"
-                    >
-                      {showHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
-                      {showHighlights ? "Hide changes" : "Show changes"}
                     </button>
                   )}
                   {showResetInMenu && (
@@ -688,7 +762,9 @@ export function MockupPreview(props: {
             className="mockup-preview-mark-capture"
             onPointerDown={beginMark}
             onPointerMove={updateMark}
-            onPointerUp={finishMark}
+            onPointerUp={(event) => {
+              void finishMark(event);
+            }}
           />
         )}
         {showHighlights &&
@@ -700,7 +776,9 @@ export function MockupPreview(props: {
                 beginHighlightAdjust(event, highlight, "move")
               }
               onPointerMove={updateHighlightAdjust}
-              onPointerUp={finishHighlightAdjust}
+              onPointerUp={(event) => {
+                void finishHighlightAdjust(event);
+              }}
               style={markStyle(adjustedHighlightArea(highlight))}
               title={highlight.note || highlight.label}
             >
@@ -712,7 +790,9 @@ export function MockupPreview(props: {
                   beginHighlightAdjust(event, highlight, "resize")
                 }
                 onPointerMove={updateHighlightAdjust}
-                onPointerUp={finishHighlightAdjust}
+                onPointerUp={(event) => {
+                  void finishHighlightAdjust(event);
+                }}
                 type="button"
               />
             </div>
@@ -793,4 +873,86 @@ function sameAreaMark(left: PlanPreviewAreaMark, right: PlanPreviewAreaMark) {
 
 function clamp(value: number, min: number, max: number) {
   return Math.min(max, Math.max(min, value));
+}
+
+async function renderMockupHtmlThumbnail(
+  html: string,
+  crop: { x: number; y: number; width: number; height: number },
+  sourceWidth: number,
+  sourceHeight: number,
+) {
+  try {
+    const parsed = new DOMParser().parseFromString(html, "text/html");
+    const serializer = new XMLSerializer();
+    const styleMarkup = Array.from(parsed.head.querySelectorAll("style"))
+      .map((style) => serializer.serializeToString(style))
+      .join("");
+    const bodyMarkup = Array.from(parsed.body.childNodes)
+      .map((node) => serializer.serializeToString(node))
+      .join("");
+    const bodyClass = escapeXmlAttribute(parsed.body.className || "");
+    const bodyStyle = escapeXmlAttribute(parsed.body.getAttribute("style") || "");
+    const documentMarkup = `
+      <body xmlns="http://www.w3.org/1999/xhtml"
+        class="${bodyClass}"
+        style="margin:0;width:${sourceWidth}px;min-height:${sourceHeight}px;overflow:hidden;${bodyStyle}">
+        <style>
+          html, body { margin: 0; width: ${sourceWidth}px; min-height: ${sourceHeight}px; overflow: hidden; }
+          * { box-sizing: border-box; }
+        </style>
+        ${styleMarkup}
+        ${bodyMarkup}
+      </body>
+    `;
+    const svg = `
+      <svg xmlns="http://www.w3.org/2000/svg" width="${sourceWidth}" height="${sourceHeight}" viewBox="0 0 ${sourceWidth} ${sourceHeight}">
+        <foreignObject width="100%" height="100%">${documentMarkup}</foreignObject>
+      </svg>
+    `;
+    const image = await loadThumbnailImage(
+      `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`,
+    );
+    const targetWidth = 220;
+    const targetHeight = clamp(
+      Math.round(targetWidth * (crop.height / crop.width)),
+      96,
+      160,
+    );
+    const canvas = document.createElement("canvas");
+    canvas.width = targetWidth;
+    canvas.height = targetHeight;
+    const context = canvas.getContext("2d");
+    if (!context) return undefined;
+    context.drawImage(
+      image,
+      crop.x,
+      crop.y,
+      crop.width,
+      crop.height,
+      0,
+      0,
+      targetWidth,
+      targetHeight,
+    );
+    return canvas.toDataURL("image/jpeg", 0.76);
+  } catch {
+    return undefined;
+  }
+}
+
+function loadThumbnailImage(src: string) {
+  return new Promise<HTMLImageElement>((resolve, reject) => {
+    const image = new Image();
+    image.onload = () => resolve(image);
+    image.onerror = () => reject(new Error("Unable to render mockup thumbnail"));
+    image.src = src;
+  });
+}
+
+function escapeXmlAttribute(value: string) {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/"/g, "&quot;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
 }

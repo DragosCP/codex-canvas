@@ -40,12 +40,26 @@ export function parseVisualDecisionStrip(
 
 export function stripVisualDecisionBlocks(text: string) {
   return stripLooseDecisionJson(
-    text
-      .replace(DECISION_BLOCK_PATTERN, "")
-      .replace(/```codex-decision-strip[\s\S]*$/i, ""),
+    stripFencedDecisionBlocks(text),
   )
     .replace(/\n{3,}/g, "\n\n")
     .trim();
+}
+
+function stripFencedDecisionBlocks(text: string) {
+  const fencePattern = /```codex-decision-strip/i;
+  let next = text;
+  for (;;) {
+    const match = fencePattern.exec(next);
+    if (!match) return next;
+    const start = match.index;
+    const finalFence = next.lastIndexOf("```");
+    if (finalFence > start) {
+      next = `${next.slice(0, start)}${next.slice(finalFence + 3)}`;
+      continue;
+    }
+    return next.slice(0, start);
+  }
 }
 
 function normalizeOption(
@@ -118,7 +132,7 @@ function looksLikeDecisionJson(value: string) {
     normalized.includes('"options"') &&
     normalized.includes('"prompt"') &&
     normalized.includes('"label"') &&
-    /\b(build-direct|wireframe|mockup|show wireframes|show mockups|build directly)\b/i.test(
+    /\b(build-direct|quick-preview|preview-directions|wireframe|mockup|runnable proposal|proposal workspace|candidate app|show quick preview|show 2-3 directions|show wireframes|show mockups|build directly)\b/i.test(
       value,
     )
   );

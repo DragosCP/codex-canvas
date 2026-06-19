@@ -43,6 +43,8 @@ export function threadTitle(thread: Thread): string {
   if (existingDecisionTitle) return existingDecisionTitle;
   const existingPreviewTitle = friendlyExistingAppPreviewFirstTitle(title);
   if (existingPreviewTitle) return existingPreviewTitle;
+  const codeProposalTitle = friendlyCodeProposalWorkspaceTitle(title);
+  if (codeProposalTitle) return codeProposalTitle;
   const mockupReviewTitle = friendlySavedMockupReviewTitle(title);
   if (mockupReviewTitle) return mockupReviewTitle;
   const visualDecisionTitle = friendlyVisualDecisionSelectionTitle(title);
@@ -100,6 +102,15 @@ function friendlyExistingAppPreviewFirstTitle(text: string) {
   return request ? compactTitle(request) : "Preview current app change";
 }
 
+function friendlyCodeProposalWorkspaceTitle(text: string) {
+  const request = extractOriginalRequestForSentinel(
+    text,
+    "[Codex Code Proposal Workspace Context]",
+  );
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Create runnable proposal";
+}
+
 function scrubInternalThreadTitle(title: string) {
   if (title.includes("[Codex Saved Mockup Review Context]")) {
     return `Review saved ${savedArtifactLabel(title, 2)}`;
@@ -112,6 +123,9 @@ function scrubInternalThreadTitle(title: string) {
   }
   if (title.includes("[Codex Existing App Preview First Context]")) {
     return "Preview current app change";
+  }
+  if (title.includes("[Codex Code Proposal Workspace Context]")) {
+    return "Create runnable proposal";
   }
   if (title.includes("[Codex Visual Decision Selection]")) {
     return "Use selected option";
@@ -375,7 +389,11 @@ export function ensureTurn(turns: Turn[], turn: Turn): Turn[] {
 export function replaceTurn(turns: Turn[], turn: Turn): Turn[] {
   if (!turns.some((existing) => existing.id === turn.id))
     return [...turns, turn];
-  return turns.map((existing) => (existing.id === turn.id ? turn : existing));
+  return turns.map((existing) =>
+    existing.id === turn.id
+      ? { ...turn, items: mergeThreadItems(turn.items, existing.items) }
+      : existing,
+  );
 }
 
 export function mergeThreadWithLocalState(
@@ -432,7 +450,10 @@ function mergeTurnWithLocalState(incoming: Turn, local: Turn | undefined) {
     };
   }
 
-  return incoming;
+  return {
+    ...incoming,
+    items: mergeThreadItems(incoming.items, local.items),
+  };
 }
 
 function shouldPreserveLocalThreadStatus(incoming: Thread, local: Thread) {

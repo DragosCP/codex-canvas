@@ -39,9 +39,10 @@ Unify the preview surface so the user always understands where they are: `Live` 
   - `Desktop | Mobile`
   - `Mark area`
   - context-specific actions
-- The header may use two rows.
-- It must not grow to a third row.
-- Before a third row would appear, lower-priority actions move under `...`.
+- The Canvas v2 preview header is owner-locked. Future plans must preserve the exact current button labels, order, grouping, and visibility from `docs/UI-UX.md` unless the owner explicitly consents to a header change.
+- The header must stay one row.
+- `Live | A | B | C` keeps a fixed compare slot, and right-side actions collapse to icon-only/`...` before they can overlap or move the compare switch.
+- Before a second row would appear, lower-priority actions move under `...`.
 - Title, summary, route, and status chips truncate or collapse before the core controls disappear.
 
 ### 3. Cleaner Live Preview Actions

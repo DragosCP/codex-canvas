@@ -1,7 +1,7 @@
 param(
     [ValidateSet("real", "mock")]
     [string]$Backend = "real",
-    [ValidateSet("desktop", "tauri", "browser")]
+    [ValidateSet("desktop", "browser")]
     [string]$Shell = "desktop",
     [switch]$NoOpen
 )
@@ -98,12 +98,6 @@ if ($Shell -eq "desktop") {
 
     Write-Host "Codex Local Electron is starting. A native window should open shortly."
     exit 0
-}
-
-if ($Shell -eq "tauri") {
-    Write-Host "The Tauri shell was removed on this branch."
-    Write-Host "Use: .\run-codex-desktop-ui.ps1 -Shell desktop -Backend real"
-    exit 1
 }
 
 $BackendPort = if ($Backend -eq "real") { 48890 } else { 48888 }

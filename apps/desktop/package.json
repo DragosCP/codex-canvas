@@ -17,8 +17,11 @@
     "sidecar:stage": "node ../../scripts/stage-desktop-sidecar.mjs",
     "test:compaction-render": "node ../../scripts/p03-compaction-render-test.mjs",
     "test:context-meter": "node ../../scripts/p03-context-meter-test.mjs",
-    "test:p19": "node ../../scripts/p19-plan-preview-parser-test.mjs",
-    "test:p20": "node ../../scripts/p20-active-canvas-absence-test.mjs && node ../../scripts/p20-prompt-wrapper-title-test.mjs && node ../../scripts/p20-local-state-legacy-canvas-test.mjs"
+    "test:p19": "node ../../scripts/p19-plan-preview-parser-test.mjs && node ../../scripts/p19-live-preview-marks-test.mjs",
+    "test:p20": "node ../../scripts/p20-active-canvas-absence-test.mjs && node ../../scripts/p20-prompt-wrapper-title-test.mjs && node ../../scripts/p20-local-state-legacy-canvas-test.mjs",
+    "test:p24": "node ../../scripts/p24-saved-proposal-review-prompt-test.mjs",
+    "test:p25": "node ../../scripts/p25-live-overlay-proposal-test.mjs",
+    "test:p25b": "node ../../scripts/p25b-saved-mockup-history-guard-test.mjs && node ../../scripts/p25b-code-proposal-workspace-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

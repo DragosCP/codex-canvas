@@ -5,6 +5,12 @@ const fs = require("node:fs");
 const http = require("node:http");
 const net = require("node:net");
 const path = require("node:path");
+const {
+  addProposalWorkspaceOption,
+  applyProposalWorkspace,
+  diffProposalWorkspace,
+  prepareProposalWorkspaces,
+} = require("./proposal-workspaces.cjs");
 
 const APP_SERVER_PORT = 48889;
 const BRIDGE_PORT = 48890;
@@ -132,6 +138,32 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
         String(args.projectPath ?? ""),
         String(args.proposalSetId ?? ""),
       );
+    case "proposal_workspaces_prepare":
+      return prepareProposalWorkspaces({
+        cacheRoot: proposalWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        proposalSetId: String(args.proposalSetId ?? ""),
+        optionIds: Array.isArray(args.optionIds)
+          ? args.optionIds.map(String)
+          : [],
+      });
+    case "proposal_workspace_add_option":
+      return addProposalWorkspaceOption({
+        cacheRoot: proposalWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        proposalSetId: String(args.proposalSetId ?? ""),
+        optionId: String(args.optionId ?? ""),
+        sourceWorkspacePath: args.sourceWorkspacePath
+          ? nativeFilePath(String(args.sourceWorkspacePath))
+          : "",
+      });
+    case "proposal_workspace_diff":
+      return diffProposalWorkspace(nativeFilePath(String(args.workspacePath ?? "")));
+    case "proposal_workspace_apply":
+      return applyProposalWorkspace({
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        workspacePath: nativeFilePath(String(args.workspacePath ?? "")),
+      });
     case "workspace_progress_snapshot":
       return workspaceProgressSnapshot(args);
     case "workspace_progress_stop":
@@ -937,7 +969,14 @@ function previewFailureReason(record) {
 async function stopManagedPreviewRecord(record) {
   managedPreviewProcesses.delete(previewProcessKey(record.projectDir));
   if (record.kind === "static") {
-    await new Promise((resolve) => record.server.close(resolve));
+    await new Promise((resolve) => {
+      const timer = setTimeout(resolve, 1000);
+      record.server.close(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+      record.server.closeAllConnections?.();
+    });
     record.exited = true;
     return;
   }
@@ -1894,6 +1933,10 @@ function readImageDataUrl(filePath) {
   if (!mime) throw new Error("Unsupported image type.");
   const bytes = fs.readFileSync(nativePath);
   return `data:${mime};base64,${bytes.toString("base64")}`;
+}
+
+function proposalWorkspacesRoot() {
+  return path.join(app.getPath("userData"), "proposal-workspaces");
 }
 
 function nativeFilePath(filePath) {

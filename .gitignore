@@ -75,6 +75,10 @@ apply_patch/
 # coverage
 coverage/
 
+# local verification artifacts
+.codex-screenshots/
+artifacts/
+
 # personal files
 personal/
 vision-weaver-main/
