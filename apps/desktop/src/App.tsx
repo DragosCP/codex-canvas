@@ -2440,11 +2440,12 @@ export function App() {
         : activeThreadCodeProposalSetId
           ? (desktop.codeProposalSets[activeThreadCodeProposalSetId] ?? null)
         : null;
-    if (
+    const codeProposalImplementationCommitment = Boolean(
       selectedCodeProposalSet &&
-      visiblePrompt &&
-      isCodeProposalImplementationCommitment(visiblePrompt)
-    ) {
+        visiblePrompt &&
+        isCodeProposalImplementationCommitment(visiblePrompt),
+    );
+    if (selectedCodeProposalSet && codeProposalImplementationCommitment) {
       const unsupportedOption = unsupportedCodeProposalOptionLabel(visiblePrompt);
       if (unsupportedOption) {
         setSendError(codeProposalOptionLimitMessage(unsupportedOption));
@@ -2464,12 +2465,6 @@ export function App() {
         setSendError("Choose a proposal option before applying it.");
         return;
       }
-      await applyCodeProposal(selectedCodeProposalSet, option);
-      setComposerText("");
-      setAttachments([]);
-      setComposerContexts([]);
-      setVisualDecisionComposerAction(null);
-      return;
     }
     const codeProposalOptionBlockReason = selectedCodeProposalSet
       ? codeProposalAddOptionBlockReason(
@@ -2495,7 +2490,24 @@ export function App() {
     let artifactKind: PreviewArtifactKind | null = null;
     let cwdOverride: string | null = null;
 
-    if (selectedCodeProposalSet && addCodeProposalOptionRequest) {
+    if (selectedCodeProposalSet && codeProposalImplementationCommitment) {
+      const requestedOptionId =
+        optionIdFromText(visiblePrompt) ??
+        selectedCodeProposalSet.selectedOptionId ??
+        selectedCodeProposalSet.options[0]?.id ??
+        null;
+      proposalSetId = selectedCodeProposalSet.proposalSetId;
+      prompt = codeProposalReviewPrompt(
+        visiblePrompt,
+        activeProject,
+        status,
+        planModeWasOn,
+        liveContext,
+        selectedCodeProposalSet,
+        requestedOptionId,
+      );
+      settings = { ...settings, planMode: false };
+    } else if (selectedCodeProposalSet && addCodeProposalOptionRequest) {
       proposalSetId = selectedCodeProposalSet.proposalSetId;
       const codeProposal = await prepareAdditionalCodeProposalOption(
         activeProject,
@@ -5474,6 +5486,58 @@ Additional proposal rules:
 - The desktop supports at most three active comparison options at once: A, B, and C. If the user asks for Option D or more simultaneous options in follow-up, say that honestly and ask whether to revise/replace A, B, or C or start a fresh proposal set.
 ${request.sourceOptionId ? `- Use Option ${request.sourceOptionId} as the visual/code starting point when useful, then apply the user's requested differences in Option ${request.optionId}.` : "- Use the current live project and existing options as visual context, then create the requested option."}
 - Stop when Option ${request.optionId} is ready. The desktop will keep it beside the existing options for comparison.
+
+Original user request:
+${originalPrompt.trim()}`;
+}
+
+function codeProposalReviewPrompt(
+  originalPrompt: string,
+  project: Project,
+  status: ProjectEmptyStatus | null,
+  planModeWasOn: boolean,
+  liveContext: string,
+  previewSet: CodeProposalSet,
+  requestedOptionId: "A" | "B" | "C" | null,
+) {
+  const entries = status?.meaningfulEntries.length
+    ? status.meaningfulEntries.slice(0, 12).join(", ")
+    : "app files detected";
+  const selected =
+    previewSet.options.find((option) => option.id === requestedOptionId) ??
+    previewSet.options.find(
+      (option) => option.id === previewSet.selectedOptionId,
+    ) ??
+    previewSet.options[0] ??
+    null;
+  const existingOptions = previewSet.options.map(
+    (option) =>
+      `- Option ${option.id}: ${option.title}; ${option.summary || "No summary saved."}; workspace=${option.workspacePath}${option.id === selected?.id ? " [selected]" : ""}`,
+  );
+  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
+
+Desktop state:
+- Project: ${project.name}
+- Project path: ${project.path}
+- Project already has app files: ${status?.empty ? "no" : "yes"}
+- Meaningful entries: ${entries}
+- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
+- The user is responding to an existing runnable proposal set.
+- Selected option: ${selected ? `Option ${selected.id} (${selected.workspacePath})` : "none"}
+- This request was sent to the agent instead of being desktop-fast-applied. The composer is the decision surface; the agent must decide whether to revise the proposal or build Live.
+${liveContext}
+
+Existing proposal options:
+${existingOptions.join("\n")}
+
+Decision policy:
+- The visible user request is authoritative. Do not silently promote a proposal to Live if the user is really asking to revise the proposal first.
+- If the user explicitly asks to build/implement/apply the selected option into Live, edit the real project at ${project.path}. Use the selected option workspace as source/reference and incorporate any attached marks or extra typed changes.
+- If the user asks to tweak, revise, compare, or show changes before implementation, edit only the relevant proposal option workspace and stop before changing Live.
+- If the intent is ambiguous between revising the proposal and implementing Live, ask one concise product-facing question instead of applying.
+- Do not rename Option ${selected?.id ?? "A"} or create a fresh A-only proposal when the user is referring to an existing option.
+- Canvas v2 supports at most three active comparison options: A, B, and C. If the user asks for more, say that plainly.
+- Keep the final response product-facing and summarize whether you changed Live, changed a proposal option, or need a decision.
 
 Original user request:
 ${originalPrompt.trim()}`;

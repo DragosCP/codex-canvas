@@ -128,10 +128,25 @@ assert.match(
   /function stageBuildCodeProposal[\s\S]*setComposerText\(`Implement option \$\{option\.id\}`\)/,
   "code-backed proposal Build selected should stage editable composer text",
 );
+assert.doesNotMatch(
+  appSource,
+  /await applyCodeProposal\(selectedCodeProposalSet,\s*option\);/,
+  "composer sends must not desktop-fast-apply code-backed proposals",
+);
 assert.match(
   appSource,
-  /isCodeProposalImplementationCommitment\(visiblePrompt\)[\s\S]*await applyCodeProposal\(selectedCodeProposalSet, option\);[\s\S]*setComposerText\(""\);[\s\S]*setAttachments\(\[\]\);[\s\S]*setComposerContexts\(\[\]\);/,
-  "code-backed proposal Send/Enter apply should clean up composer text, attachments, and context chips",
+  /codeProposalReviewPrompt\(\s*visiblePrompt,\s*activeProject,[\s\S]*selectedCodeProposalSet,[\s\S]*requestedOptionId,\s*\)/,
+  "code-backed proposal implementation requests should go through an agent review turn",
+);
+assert.doesNotMatch(
+  appSource,
+  /function isCleanCodeProposalApplyRequest/,
+  "composer direct-apply gating helper should not exist; the composer always sends an agent turn",
+);
+assert.match(
+  appSource,
+  /function codeProposalReviewPrompt[\s\S]*sent to the agent instead of being desktop-fast-applied[\s\S]*If the user explicitly asks to build\/implement\/apply the selected option into Live/,
+  "agent review prompt should explain that composer acceptance is an agent decision, not instant desktop promotion",
 );
 assert.match(
   appSource,

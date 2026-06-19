@@ -16,6 +16,7 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 
 - Chat is the default work surface.
 - Plan Mode is the permission mode: Codex thinks, previews, and asks before writing app implementation files.
+- Canvas Mode is the visual conversation mode direction: when active, user messages are interpreted against the current Canvas state and visual references unless the user clearly changes topic. It can coexist with Plan Mode.
 - App Preview is the visual surface for existing runnable projects.
 - Mockup Preview is the visual surface for saved review artifacts under `.codex/mockups`.
 - Do not add a top-level visual mode beside Plan Mode unless the owner explicitly changes this direction later.
@@ -25,6 +26,8 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 ## Live App Direction
 
 - Current product direction: the live running app is the preferred visual planning surface for existing projects.
+- Current product direction: Canvas should become a first-class agent capability for UI/UX/workflow/layout collaboration, not a collection of special-case prompt wrappers. For visual requests, the agent should be able to create, inspect, revise, mark, and build Canvas proposals through one product contract without asking the user to reason about internal storage paths.
+- Current product direction: one visual change should produce one Canvas proposal by default. A/B/C is reserved for explicit alternatives or genuinely different UX directions, and lightweight visual patch proposals should handle small changes before heavier code-backed workspaces are used.
 - In Plan Mode, visible proposals may be temporarily shown against the real app so the user can understand the proposed feature before approving implementation.
 - When the user has not specified a precise design, Codex may offer up to three visual preview options before asking the user to manually mark a location.
 - For lightweight Live overlay proposals, the app does not build three code implementations for options. It loads one live app preview and swaps temporary preview variants or review artifacts. Serious P25b proposals may use isolated runnable A/B/C workspaces.
@@ -91,6 +94,8 @@ This repository is a local Codex desktop copy built on top of the upstream Codex
 - Current direction: keep visual planning as one focused live-app/mockup-preview workflow and avoid rebuilding separate graph/proof/design-editor surfaces unless the owner explicitly asks later.
 - Current direction: keep App Preview on Electron browser control surfaces and avoid rebuilding old overlay/editor models for this workflow.
 - Current direction: in the demo workflow, chat plus App Preview is the primary surface.
+- Current direction: unify Live overlays, saved mockups, code-backed workspaces, user marks, and agent change marks behind a Canvas proposal registry/capability so the agent can do the visual heavy lifting while the existing Canvas v2 header contract stays locked.
+- Current direction: chips created from Canvas marks, agent change marks, and plan recommendations should be Visual References with backing route, viewport, proposal, option, screenshot, bounds, notes, and source metadata when available. Plan Mode should pin those references as evidence so later implementation uses the visual story the user approved.
 - Current direction: mockup-first reuses the A/B/C preview decision model where useful, but the trigger is project state plus explicit user choice, not a broad keyword detector. The above-composer mockup strip is selection only; commit actions belong in Mockup Preview after the user has looked at the option. After the user sends `Build selected`, the mockups become history/reference pages instead of an active decision strip.
 - Current direction: make the agent aware of visual-planning capabilities through compact session/resume guidance plus small per-turn factual state, not a large repeated meta prompt before every user message.
 - Current direction: a shareable demo package should use the native sidecar lane or a polished viewer/demo mode, not the WSL/Node dev bridge.

@@ -38,9 +38,10 @@ When Codex creates proposal A/B/C for a new app, new page, redesign, or substant
   - The preview header shows `Live | A | B | C`, but `Live` is blank/stopped until one proposal is accepted.
   - A/B/C are real preview apps, not copied static mockup pages.
 - When the user accepts A:
-  - the patch behind A is promoted into the real project folder;
-  - `Live` reloads from the real project;
-  - A can remain briefly as `Source` or `Accepted proposal` for verification, then becomes history.
+  - the composer stages visible text such as `Implement option A`;
+  - pressing Enter sends an agent turn with the selected proposal workspace as context;
+  - Codex decides whether to revise A, ask a clarifying question, or build Live from the prepared proposal code plus any marks/typed changes;
+  - `Live` reloads only after the agent has actually changed the real project.
 
 ### 2. Existing App, Big UI Or New Page
 
@@ -66,8 +67,9 @@ When Codex creates proposal A/B/C for a new app, new page, redesign, or substant
 
 ### 4. Accepting A Proposal
 
-- Accepting a code-backed proposal applies the selected proposal patch to the real project.
-- The accept path should be fast and deterministic when the real project has not changed since the proposal baseline.
+- Accepting a code-backed proposal starts from the selected proposal workspace instead of rebuilding from prose.
+- The accept path should be fast and deterministic when the real project has not changed since the proposal baseline, but the composer path must still send an agent turn first so the visible chat owns the decision.
+- Preserve the user's visible prompt in chat and let Codex handle the decision before Live changes, especially when the composer includes additional instructions, marks, or attachments.
 - Codex may run a short follow-up verification/fix turn after patch application, but it must not regenerate the whole proposal from prose.
 - If the real project changed after the proposal was created, the user should see an honest conflict/stale state instead of a silent best-effort rewrite.
 

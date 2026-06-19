@@ -28,11 +28,13 @@
 - `PlanPreviewSpec` carries optional route, view state, target region, and per-variant proposal highlights. Highlights are rendered by Live Preview only when the user chooses `Show changes`; they are supporting review metadata, not accepted app UI.
 - Streamed agent text can contain hidden preview JSON that app-server completion payloads may omit. Desktop buffers streamed final-agent message text per turn and merges it into the completed turn before parsing so preview specs survive completion/list refresh.
 - P25b architecture: serious new-app, new-page, redesign, and large UI proposals can use isolated code-backed proposal workspaces. Desktop owns workspace creation, baseline snapshots, diff/patch computation, preview lifecycle, and promotion checks; app-server turns still do the Codex work inside those proposal workspace paths rather than creating a parallel agent runtime. Cleanup/history polish remains future work.
+- P27 direction: unify live overlay proposals, saved mockups, code-backed proposal workspaces, user marks, and agent change marks behind a Canvas proposal registry/capability. The registry should give prompt wrappers and future agent-facing Canvas operations one source of truth for proposal identity, storage pointers, lifecycle state, options, marks, and selected context while preserving the app-server runtime boundary.
 
 ## Plan Mode
 
 - Plan Mode is an implementation gate: no app implementation file changes until the user accepts.
 - Plan proposals store project/thread/turn identity, the original prompt, attached App/Mockup mark contexts, optional live preview metadata, status, kind, and timestamps.
+- P28 direction: visual plans should pin Visual References, not just current mark context. A Visual Reference should preserve the backing project/thread/proposal/option/route/viewport/screenshot/bounds/note/source metadata needed to implement the visual story later.
 - Plan acceptance starts a normal implementation turn. It may include selected preview or mark context as guidance, but it does not save visual review artifacts as durable project memory.
 - Plan revision sends typed feedback plus any selected preview or mark context. Revision stays in Plan Mode and should remain product-facing.
 - Plan Mode may create review-only `.codex/mockups` artifacts when visual review is itself the plan, but implementation still waits for explicit acceptance.

@@ -17,6 +17,7 @@
 
 - Plan Mode is the permission mode: no app implementation changes until the user accepts.
 - App Preview and Mockup Preview are visual surfaces: they help the user understand and steer plans.
+- Canvas Mode is the visual conversation mode direction: when active, follow-up messages inherit the current Canvas proposal, option, marks, route, and viewport unless the user clearly changes topic. Canvas Mode may coexist with Plan Mode.
 - Do not add a separate top-level visual mode beside Plan Mode.
 - Normal chat can attach preview context by action alone. If the user draws a rectangle in the live app preview without Plan Mode, add a removable composer chip automatically.
 - Plan Mode plus a UI-relevant request should automatically offer visual review through the live app preview or saved review artifacts.
@@ -38,9 +39,11 @@
 - Before a new current-app proposal set is generated, the preview surface should show `Live` only. Old starting mockups built into the app are history/reference and must not reappear as compare tabs or above-composer selectors.
 - The app-preview button is the direct path to `Live`. If the current chat owns proposals, the same preview surface adds `Live | Preview` or `Live | A | B | C` without a second preview mode or extra transition layer.
 - Proposed options should preserve the live app's visual system whenever possible: layout, palette, typography, density, and brand. Do not inject visible Codex proposal chrome, banners, `Proposed` labels, greyed/tinted bars, or fake CTA buttons into the user's app preview. Use the desktop preview header and optional `Show changes` marks to communicate proposal state.
-- P25b behavior: for serious runnable proposals such as a new app, new page, redesign, or large workflow change, A/B/C behave like isolated proposal branches. The user still sees `Live | A | B | C`, but accepting a clean option promotes its prepared code into Live instead of making Codex rebuild the proposal. Cleanup/history and richer revision UX are still being refined.
+- P25b behavior: for serious runnable proposals such as a new app, new page, redesign, or large workflow change, A/B/C behave like isolated proposal branches. The user still sees `Live | A | B | C`, and the prepared code is available as implementation source/context so Codex does not need to rebuild the design from scratch. Cleanup/history and richer revision UX are still being refined.
 - For code-backed proposal revisions, `add Option C based on B` means add or refresh a real `C` workspace inside the current proposal set, keep existing A/B available for comparison, and select C. A one-option follow-up must not be relabeled as `A` just because only one new workspace was generated.
 - Canvas v2 currently supports three active comparison options at once: A, B, and C. If the user asks for Option D or a fourth simultaneous option, Codex must say that honestly before generation and ask whether to revise/replace A/B/C or start a fresh proposal set; it must not silently remap D to A/B/C.
+- Pressing Enter from the composer on a code-backed proposal must always send a normal agent turn with proposal context. Do not desktop-fast-promote A/B/C directly from composer text, even for clean text such as `Implement option A`; Codex must decide whether to revise the proposal, build Live with changes, or ask a clarifying question.
+- Canvas should default to one proposal for one visual change. Use A/B/C only when the user asks for alternatives or when the alternatives are materially different UX directions. Small button, copy, visibility, emphasis, and simple placement changes should prefer a lightweight visual patch proposal over copied app workspaces.
 - Compare options must be authored from the actual agent plan. Do not expose generic placement-template labels as the main user-facing alternatives.
 - Option labels should name concrete product workflows, such as `Countdown cards`, `Deadline lane`, or `Reminder sheet`. The written plan and preview tabs should use the same option names, summaries, and tradeoffs.
 - If the agent has one real proposed direction, show `Live | Preview`; do not invent fake A/B/C variants. If A/B/C are shown, each option must be visually distinct and represent a different user workflow.
@@ -114,6 +117,7 @@
 - Do not show both a root URL field and a duplicate root-route chip. Show route/location metadata when it adds information, such as after navigation or a non-root route.
 - `Mark area` lets the user draw a temporary rectangle on the app or snapshot and explain what should move or change there.
 - In normal chat, finishing a mark should add a `Mark 1` composer picture chip automatically. The user can then type naturally, send the prompt, remove the chip, or click it for fullscreen preview. Do not include project names, IPs, or route noise in the visible chip label.
+- Canvas chips are Visual References, not just images. Behind each chip, preserve enough project/thread/proposal/option/route/viewport/screenshot/bounds/note/source context for the agent to understand and for Plan Mode to pin as evidence later.
 - `Mark area` is an escape hatch after the options miss or need refinement, not the primary way users design from scratch.
 - Area marks disappear after revision, acceptance, or dismissal. They are not saved as durable layers.
 - Preview unavailable states should offer direct next steps: choose URL, start app command, retry, or continue with a screenshot/text plan.
@@ -131,6 +135,7 @@
 - For review-only mockup artifacts created during Plan Mode, `Revise` keeps Plan Mode on and sends typed feedback plus marks; `Build selected` stages editable implementation text and turns Plan Mode off as the explicit accept path.
 - If the plan is a safer alternative, option 1 should say that plainly, such as `Yes, implement safer plan`.
 - App preview proposals, selected variants, and area marks are supporting visual context for the plan. They do not save project memory on plan acceptance.
+- Visual plans should pin the Visual References they depend on. Later implementation should use those pinned references rather than whatever Canvas currently shows.
 - Option 1 can use the selected preview variant or marked area as implementation guidance.
 - Option 2 can send typed feedback, selected variant context, area marks, or any combination.
 - After implementation, prefer reloading the live app preview and comparing it to the accepted plan preview.
