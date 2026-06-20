@@ -33,6 +33,10 @@ import type {
 } from "../types";
 import { stripPlanPreviewBlocks } from "../planPreview";
 import {
+  projectRelativeDisplayPath,
+  proposalWorkspaceDisplayPath,
+} from "../proposalWorkspaceDisplay";
+import {
   compactCommand,
   diffLineCounts,
   formatFileProgressDelta,
@@ -190,8 +194,7 @@ function TurnView(props: {
   const hasVisualDecision = finalItems.some((item) =>
     Boolean(parseVisualDecisionStrip(item.text)),
   );
-  const isQuietEmptyProjectDecisionTurn =
-    isEmptyProjectVisualPlanningDecisionTurn(props.turn);
+  const isQuietCanvasQuestionTurn = isCanvasQuestionDecisionTurn(props.turn);
   const activityItems = props.turn.items.filter((item) =>
     isActivityItem(item, props.turn.status),
   );
@@ -215,11 +218,11 @@ function TurnView(props: {
       {props.turn.error && (
         <div className="error-line">{turnErrorMessage(props.turn.error)}</div>
       )}
-      {isQuietEmptyProjectDecisionTurn &&
+      {isQuietCanvasQuestionTurn &&
         props.turn.status === "inProgress" && (
           <p className="turn-quiet-status">Preparing choices...</p>
         )}
-      {!isQuietEmptyProjectDecisionTurn &&
+      {!isQuietCanvasQuestionTurn &&
         (activityItems.length > 0 || props.turn.status === "inProgress") && (
           <TurnActivity
             activeProject={props.activeProject}
@@ -245,7 +248,7 @@ function TurnView(props: {
       {props.planProposal &&
         finalItems.length > 0 &&
         !hasVisualDecision &&
-        shouldShowPlanProposalReview(props.planProposal) && (
+        shouldShowPlanProposalReview(props.planProposal, props.turn.status) && (
           <PlanProposalReview
             proposal={props.planProposal}
             onAccept={props.onAcceptPlanProposal}
@@ -274,14 +277,14 @@ function TurnView(props: {
   );
 }
 
-function isEmptyProjectVisualPlanningDecisionTurn(turn: Turn) {
+function isCanvasQuestionDecisionTurn(turn: Turn) {
   return turn.items.some(
     (item) =>
       item.type === "userMessage" &&
       item.content.some(
         (part) =>
           part.type === "text" &&
-          Boolean(extractEmptyProjectVisualPlanningRequest(part.text)),
+          Boolean(extractCanvasQuestionRequest(part.text)),
       ),
   );
 }
@@ -517,8 +520,6 @@ function PlanProposalReview(props: {
   }, [props.proposal.previewAreaMark]);
   const acceptLabel = planAcceptLabel(props.proposal, selectedPreviewVariant);
   const canShowPendingPreview = pending && hasPlanUiImpact(props.proposal);
-  const proposalNoun =
-    props.proposal.proposalKind === "live_proposal" ? "proposal" : "plan";
   function submitDecision() {
     if (decision === "accept") {
       props.onAccept(props.proposal);
@@ -536,7 +537,7 @@ function PlanProposalReview(props: {
       {pending ? (
         <div
           className="plan-decision"
-          aria-label={`Implement this ${proposalNoun}?`}
+          aria-label="Implement this plan?"
           onKeyDown={(event) => {
             if (event.key === "Escape") {
               event.preventDefault();
@@ -548,7 +549,7 @@ function PlanProposalReview(props: {
             }
           }}
         >
-          <strong>Implement this {proposalNoun}?</strong>
+          <strong>Implement this plan?</strong>
           <div className="plan-decision-options">
             <button
               className={decision === "accept" ? "selected" : ""}
@@ -572,9 +573,7 @@ function PlanProposalReview(props: {
                   props.onFeedbackChange(event.target.value);
                 }}
                 onFocus={() => setDecision("revise")}
-                placeholder={`No, and tell Codex what to ${
-                  proposalNoun === "proposal" ? "show differently" : "do differently"
-                }`}
+                placeholder="No, and tell Codex what to do differently"
                 rows={props.feedbackDraft ? 3 : 1}
                 value={props.feedbackDraft}
               />
@@ -584,7 +583,7 @@ function PlanProposalReview(props: {
                     ? "Includes preview mark"
                     : selectedPreviewVariant
                       ? `Option ${selectedPreviewVariant.id} selected`
-                      : "Preview selected"}
+                      : "Visual reference selected"}
                 </small>
               )}
             </label>
@@ -636,7 +635,12 @@ function PlanProposalReview(props: {
   );
 }
 
-function shouldShowPlanProposalReview(proposal: PlanProposal) {
+export function shouldShowPlanProposalReview(
+  proposal: PlanProposal,
+  turnStatus?: Turn["status"],
+) {
+  if (turnStatus === "inProgress") return false;
+  if (proposal.proposalKind === "live_proposal") return false;
   if (isNoPlanProposalRequest(proposal.prompt)) return false;
   if (isReadOnlyPlanningNoteRequest(proposal.prompt)) return false;
   return proposal.status === "pending" || proposal.status === "accepted" || proposal.status === "declined";
@@ -663,13 +667,6 @@ function planAcceptLabel(
   if (proposal.proposalKind === "safer_alternative") {
     return "Yes, implement safer plan";
   }
-  if (proposal.proposalKind === "live_proposal") {
-    if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
-      return `Build option ${selectedVariant.id}`;
-    }
-    if (selectedVariant) return "Build selected proposal";
-    return "Build proposal";
-  }
   if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
     return `Implement option ${selectedVariant.id}`;
   }
@@ -678,17 +675,15 @@ function planAcceptLabel(
 }
 
 function planProposalTitle(proposal: PlanProposal) {
-  if (proposal.proposalKind === "live_proposal") return "Proposal";
   return proposal.proposalKind === "safer_alternative" ? "Safer plan" : "Plan";
 }
 
 function planReviewText(proposal: PlanProposal) {
   if (proposal.previewSpec?.variants.length) {
     return proposal.previewSpec.variants.length > 1
-      ? "Live proposal options ready."
-      : "Live proposal ready.";
+      ? "Preview options ready."
+      : "Preview ready.";
   }
-  if (proposal.proposalKind === "live_proposal") return "Proposal ready.";
   return "Plan ready.";
 }
 
@@ -1280,6 +1275,10 @@ function documentPath(path: string, activeProject: Project) {
 }
 
 function friendlyPath(path: string, activeProject: Project) {
+  const proposalPath = proposalWorkspaceDisplayPath(path);
+  if (proposalPath) return proposalPath;
+  const relativePath = projectRelativeDisplayPath(path, activeProject.path);
+  if (relativePath) return relativePath;
   return friendlyText(path, activeProject).replace(/^\.\//, "");
 }
 
@@ -1287,9 +1286,22 @@ function friendlyText(text: string, activeProject: Project) {
   if (!text) return text;
   const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
   const escapedProjectPath = escapeRegExp(projectPath);
-  return stripInternalEvidenceSurface(
-    stripPlanPreviewBlocks(stripVisualDecisionBlocks(trimInternalContextTail(text))),
-  ).replace(new RegExp(escapedProjectPath, "g"), ".");
+  return sanitizeInternalCanvasText(
+    stripInternalEvidenceSurface(
+      stripPlanPreviewBlocks(stripVisualDecisionBlocks(trimInternalContextTail(text))),
+    ).replace(new RegExp(escapedProjectPath, "g"), "."),
+  );
+}
+
+function sanitizeInternalCanvasText(text: string) {
+  return text
+    .replace(/\bprepared A, B, and C folders\b/gi, "Options A, B, and C")
+    .replace(/\bprepared option folders\b/gi, "proposal options")
+    .replace(/\boption folders\b/gi, "proposal options")
+    .replace(/\bproposal metadata\b/gi, "proposal details")
+    .replace(/\bprepared folders\b/gi, "proposal options")
+    .replace(/\bworkspace paths?\b/gi, "proposal details")
+    .replace(/\btemp paths?\b/gi, "proposal details");
 }
 
 type FriendlyUserDisplay = {
@@ -1315,19 +1327,9 @@ function mapUserDisplayText(
       visible.indexOf(userRequestMarker) + userRequestMarker.length,
     );
   }
-  const visualPlanningRequest =
-    extractEmptyProjectVisualPlanningRequest(visible);
-  if (visualPlanningRequest) {
-    return { text: friendlyText(visualPlanningRequest, activeProject) };
-  }
-  const existingDecisionRequest =
-    extractExistingAppVisualDecisionRequest(visible);
-  if (existingDecisionRequest) {
-    return { text: friendlyText(existingDecisionRequest, activeProject) };
-  }
-  const existingPreviewRequest = extractExistingAppPreviewFirstRequest(visible);
-  if (existingPreviewRequest) {
-    return { text: friendlyText(existingPreviewRequest, activeProject) };
+  const canvasQuestionRequest = extractCanvasQuestionRequest(visible);
+  if (canvasQuestionRequest) {
+    return { text: friendlyText(canvasQuestionRequest, activeProject) };
   }
   const liveOverlayProposalRequest = extractLiveOverlayProposalRequest(visible);
   if (liveOverlayProposalRequest) {
@@ -1388,24 +1390,10 @@ function mockupActionLabel(title: string) {
   return title;
 }
 
-function extractEmptyProjectVisualPlanningRequest(text: string) {
+function extractCanvasQuestionRequest(text: string) {
   return extractOriginalRequestForSentinel(
     text,
-    "[Codex Empty Project Visual Planning Context]",
-  );
-}
-
-function extractExistingAppVisualDecisionRequest(text: string) {
-  return extractOriginalRequestForSentinel(
-    text,
-    "[Codex Existing App Visual Decision Context]",
-  );
-}
-
-function extractExistingAppPreviewFirstRequest(text: string) {
-  return extractOriginalRequestForSentinel(
-    text,
-    "[Codex Existing App Preview First Context]",
+    "[Codex Canvas Question Context]",
   );
 }
 

@@ -68,6 +68,7 @@ export function createDefaultState(): DesktopState {
     sentComposerContextsByTurnId: {},
     codeProposalSets: {},
     codeProposalActiveSetIdsByThreadId: {},
+    codeProposalCompareSetIdsByThreadId: {},
     mockupActiveProposalSetIdsByThreadId: {},
     mockupHistoryProposalSetIds: {},
     layout: {
@@ -108,6 +109,9 @@ export function loadDesktopState(): DesktopState {
       codeProposalSets: normalizeCodeProposalSets(parsed.codeProposalSets),
       codeProposalActiveSetIdsByThreadId: stringRecord(
         parsed.codeProposalActiveSetIdsByThreadId,
+      ),
+      codeProposalCompareSetIdsByThreadId: stringRecord(
+        parsed.codeProposalCompareSetIdsByThreadId,
       ),
       mockupActiveProposalSetIdsByThreadId: stringRecord(
         parsed.mockupActiveProposalSetIdsByThreadId,
@@ -469,6 +473,13 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
       const areaMark = normalizePlanPreviewAreaMark(rawContext.areaMark);
       const previewUrl = stringValue(rawContext.previewUrl);
       if (!areaMark || !previewUrl) continue;
+      const markNumber = positiveNumber(rawContext.markNumber) || 1;
+      const source =
+        rawContext.source === "proposalHighlight"
+          ? "proposalHighlight"
+          : rawContext.source === "userMark"
+            ? "userMark"
+            : undefined;
       contexts.push({
         type: "appPreview",
         id:
@@ -478,11 +489,17 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
         projectName,
         previewUrl,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
-        markLabel: stringValue(rawContext.markLabel) || "Mark 1",
-        markNumber: positiveNumber(rawContext.markNumber) || 1,
+        markLabel: normalizeVisualContextLabel(
+          stringValue(rawContext.markLabel),
+          source,
+          markNumber,
+        ),
+        markNumber,
         areaMark,
         thumbnailDataUrl:
           normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
+        source,
+        highlightId: stringValue(rawContext.highlightId) || undefined,
       });
       continue;
     }
@@ -497,7 +514,10 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
       const proposalSetId = stringValue(rawContext.proposalSetId);
       const artifactKind = normalizeArtifactKind(rawContext.artifactKind);
       if (!areaMark || !mockupId || !filePath) continue;
-      const fallbackMarkLabel = `Area ${mockupLabel || mockupId} mark ${markNumber}`;
+      const source =
+        rawContext.source === "proposalHighlight"
+          ? "proposalHighlight"
+          : "userMark";
       contexts.push({
         type: "mockupPreview",
         id:
@@ -510,22 +530,37 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
         mockupId,
         mockupLabel: mockupLabel || mockupId,
         mockupTitle: mockupTitle || mockupLabel || mockupId,
-        markLabel: stringValue(rawContext.markLabel) || fallbackMarkLabel,
+        markLabel: normalizeVisualContextLabel(
+          stringValue(rawContext.markLabel),
+          source,
+          markNumber,
+        ),
         markNumber,
         filePath,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
         areaMark,
         thumbnailDataUrl:
           normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
-        source:
-          rawContext.source === "proposalHighlight"
-            ? "proposalHighlight"
-            : "userMark",
+        source,
         highlightId: stringValue(rawContext.highlightId) || undefined,
       });
     }
   }
   return contexts;
+}
+
+function normalizeVisualContextLabel(
+  label: string,
+  source: "userMark" | "proposalHighlight" | undefined,
+  number: number,
+) {
+  const trimmed = label.trim();
+  if (source === "proposalHighlight") {
+    if (/^change\s+\d+$/i.test(trimmed)) return trimmed;
+    return `Change ${number}`;
+  }
+  if (/^mark\s+\d+$/i.test(trimmed)) return trimmed;
+  return `Mark ${number}`;
 }
 
 function normalizeSentComposerContextsByTurnId(

@@ -34,22 +34,9 @@ try {
       expected: "Make checkout calmer",
     },
     {
-      name: "Empty project visual planning",
+      name: "Canvas question",
       input: [
-        "[Codex Empty Project Visual Planning Context]",
-        "",
-        "Desktop state:",
-        "- Project folder is effectively empty: yes",
-        "",
-        "Original user request:",
-        "Build a tiny habit tracker",
-      ].join("\n"),
-      expected: "Build a tiny habit tracker",
-    },
-    {
-      name: "Existing app decision",
-      input: [
-        "[Codex Existing App Visual Decision Context]",
+        "[Codex Canvas Question Context]",
         "",
         "Desktop state:",
         "- Project already has app files: yes",
@@ -60,14 +47,14 @@ try {
       expected: "Improve the dashboard navigation",
     },
     {
-      name: "Existing app preview first",
+      name: "Saved preview artifact creation",
       input: [
-        "[Codex Existing App Preview First Context]",
+        "[Codex Saved Mockup Review Context]",
         "",
         "Task:",
         "- Create one saved HTML review preview.",
         "",
-        "Original user request:",
+        "User request:",
         "Show me the settings redesign first",
       ].join("\n"),
       expected: "Show me the settings redesign first",

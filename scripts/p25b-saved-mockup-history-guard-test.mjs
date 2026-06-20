@@ -84,7 +84,7 @@ assert.match(
 );
 assert.match(
   detectorSource,
-  /implement\\s\+\(\?:now\|this\|that\|it\|option\\s\+\[abc\]/,
+  /implement\\s\+\(\?:now\|this\|that\|it\|\[abc\]\|option\\s\+\[abc\]/,
   "direct option implementation wording should be accepted",
 );
 assert.match(
@@ -100,8 +100,13 @@ assert.match(
 );
 assert.match(
   codeProposalPreviewSource,
-  /\.\.\.\(canShowLive\s*\?/,
-  "code-backed proposal preview should show the Live tab only when Live exists",
+  /const showLiveLane = Boolean\(project\)/,
+  "code-backed proposal preview should expose Live as a stopped build/drop lane when a project has proposal lanes",
+);
+assert.match(
+  codeProposalPreviewSource,
+  /\.\.\.\(showLiveLane\s*\?/,
+  "code-backed proposal preview should render the Live lane from lane availability, not only runnable Live state",
 );
 assert.match(
   codeProposalPreviewSource,
@@ -135,8 +140,13 @@ assert.doesNotMatch(
 );
 assert.match(
   appSource,
-  /codeProposalReviewPrompt\(\s*visiblePrompt,\s*activeProject,[\s\S]*selectedCodeProposalSet,[\s\S]*requestedOptionId,\s*\)/,
+  /codeProposalReviewPrompt\(\s*visiblePrompt,\s*activeProject,[\s\S]*selectedCodeProposalRoutingSet,[\s\S]*requestedOptionId,\s*\)/,
   "code-backed proposal implementation requests should go through an agent review turn",
+);
+assert.match(
+  appSource,
+  /codeProposalSetIsActiveForRouting/,
+  "applied code-backed proposal comparison sets must not catch new routing",
 );
 assert.doesNotMatch(
   appSource,
@@ -185,17 +195,17 @@ assert.doesNotMatch(
 );
 assert.match(
   liveAppPreviewSource,
-  /showDetectInline = stoppedPreview && !proposalToolbar/,
+  /showDetectInline = stoppedPreview && liveLaneActive/,
   "generated proposal tabs should not show Detect",
 );
 assert.match(
   liveAppPreviewSource,
-  /showUseUrlInline = stoppedPreview && !proposalToolbar/,
+  /showUseUrlInline = stoppedPreview && liveLaneActive/,
   "generated proposal tabs should not show URL",
 );
 assert.match(
   liveAppPreviewSource,
-  /runningPreview && !proposalToolbar && !overflowReloadAction/,
+  /runningPreview && liveLaneActive && !overflowReloadAction/,
   "generated proposal tabs should not show Reload",
 );
 

@@ -181,8 +181,10 @@ try {
   );
   assert.match(appTsx, /LIVE_OVERLAY_PROPOSAL_SENTINEL/);
   assert.match(appTsx, /liveOverlayProposalOnComplete/);
-  assert.match(appTsx, /Create one temporary live proposal/);
-  assert.match(appTsx, /Create 2 or 3 temporary live proposal options/);
+  assert.match(appTsx, /For small current-app visual ideas/);
+  assert.match(appTsx, /temporary live proposal with codex-plan-preview metadata/);
+  assert.match(appTsx, /Reason about the user's request and author the questionnaire yourself/);
+  assert.match(appTsx, /Do not copy fixed default wording/);
   assert.match(appTsx, /Do not describe or request visible Codex proposal chrome/);
   assert.match(appTsx, /placeholder controls such as \\`Open settings\\`/);
   assert.doesNotMatch(appTsx, /apply your proposal as temporary UI/);
@@ -206,7 +208,7 @@ try {
         options: [
           {
             id: "quick-preview",
-            label: "Show quick preview",
+            label: "Show 1 option",
             description: "Create one review-only preview.",
             prompt:
               "Return one fenced ```codex-plan-preview JSON block without editing files.",
@@ -221,7 +223,7 @@ try {
 
   assert.equal(
     parseVisualDecisionStrip(nestedFenceDecision)?.options[0].label,
-    "Show quick preview",
+    "Show 1 option",
   );
   assert.equal(stripVisualDecisionBlocks(nestedFenceDecision), "I can show this first.");
   assert.equal(

@@ -12,7 +12,8 @@
 - `docs/Arch.md`
 - `docs/Prod.md`
 - `docs/UI-UX.md`
-- `plans/P27-canvas-agent-capability.md`
+- `plans/done/P27-canvas-agent-capability.md`
+- `plans/done/P27-cool-canvas-lanes-and-header-consistency.md`
 - `plans/done/P24-proposal-preview-agent-marks-and-routing.md`
 - `plans/done/P25-live-overlay-and-temp-code-proposals.md`
 - `plans/done/P25b-code-backed-proposal-workspaces.md`
@@ -20,9 +21,9 @@
 
 ## Non-Negotiable Guardrail
 
-- Do not change the Canvas v2 preview header buttons, order, grouping, labels, visibility, compare switch placement, or one-row overflow behavior.
+- Do not change the Canvas v2 preview header buttons, order, grouping, labels, visibility, compare/lane placement, or overflow behavior.
 - This plan may touch composer mode state, chat chips, plan context, prompt routing, and visual reference persistence.
-- The locked header contract remains exactly as recorded in `docs/UI-UX.md`.
+- The locked header contract remains exactly as recorded in `docs/UI-UX.md` for this plan's scope. If P27-cool lands first, P28 should consume the lane-header contract rather than reintroducing the old one-row header.
 
 ## Problem
 

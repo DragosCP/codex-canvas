@@ -37,12 +37,8 @@ export function allItems(thread: Thread | null): ThreadItem[] {
 
 export function threadTitle(thread: Thread): string {
   const title = thread.name || thread.preview || "New chat";
-  const visualPlanningTitle = friendlyEmptyProjectVisualPlanningTitle(title);
-  if (visualPlanningTitle) return visualPlanningTitle;
-  const existingDecisionTitle = friendlyExistingAppVisualDecisionTitle(title);
-  if (existingDecisionTitle) return existingDecisionTitle;
-  const existingPreviewTitle = friendlyExistingAppPreviewFirstTitle(title);
-  if (existingPreviewTitle) return existingPreviewTitle;
+  const canvasQuestionTitle = friendlyCanvasQuestionTitle(title);
+  if (canvasQuestionTitle) return canvasQuestionTitle;
   const codeProposalTitle = friendlyCodeProposalWorkspaceTitle(title);
   if (codeProposalTitle) return codeProposalTitle;
   const mockupReviewTitle = friendlySavedMockupReviewTitle(title);
@@ -75,31 +71,13 @@ function friendlySavedMockupReviewTitle(text: string) {
   return request ? compactTitle(request) : `Review saved ${savedArtifactLabel(payload, 2)}`;
 }
 
-function friendlyEmptyProjectVisualPlanningTitle(text: string) {
+function friendlyCanvasQuestionTitle(text: string) {
   const request = extractOriginalRequestForSentinel(
     text,
-    "[Codex Empty Project Visual Planning Context]",
+    "[Codex Canvas Question Context]",
   );
   if (request == null) return null;
-  return request ? compactTitle(request) : "Start with visual options";
-}
-
-function friendlyExistingAppVisualDecisionTitle(text: string) {
-  const request = extractOriginalRequestForSentinel(
-    text,
-    "[Codex Existing App Visual Decision Context]",
-  );
-  if (request == null) return null;
-  return request ? compactTitle(request) : "Review current app change";
-}
-
-function friendlyExistingAppPreviewFirstTitle(text: string) {
-  const request = extractOriginalRequestForSentinel(
-    text,
-    "[Codex Existing App Preview First Context]",
-  );
-  if (request == null) return null;
-  return request ? compactTitle(request) : "Preview current app change";
+  return request ? compactTitle(request) : "Choose Canvas path";
 }
 
 function friendlyCodeProposalWorkspaceTitle(text: string) {
@@ -115,14 +93,8 @@ function scrubInternalThreadTitle(title: string) {
   if (title.includes("[Codex Saved Mockup Review Context]")) {
     return `Review saved ${savedArtifactLabel(title, 2)}`;
   }
-  if (title.includes("[Codex Empty Project Visual Planning Context]")) {
-    return "Start with visual options";
-  }
-  if (title.includes("[Codex Existing App Visual Decision Context]")) {
-    return "Review current app change";
-  }
-  if (title.includes("[Codex Existing App Preview First Context]")) {
-    return "Preview current app change";
+  if (title.includes("[Codex Canvas Question Context]")) {
+    return "Choose Canvas path";
   }
   if (title.includes("[Codex Code Proposal Workspace Context]")) {
     return "Create runnable proposal";

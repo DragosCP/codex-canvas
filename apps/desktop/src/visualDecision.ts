@@ -3,6 +3,13 @@ export type VisualDecisionOption = {
   label: string;
   description: string;
   prompt: string;
+  canvasAction?:
+    | "build_directly"
+    | "show_preview"
+    | "show_options"
+    | "add_option"
+    | "replace_option"
+    | "start_fresh";
 };
 
 export type VisualDecisionStrip = {
@@ -76,7 +83,21 @@ function normalizeOption(
     label,
     description: cleanText(record.description, 140),
     prompt,
+    canvasAction: normalizeCanvasAction(record.canvasAction),
   };
+}
+
+function normalizeCanvasAction(
+  value: unknown,
+): VisualDecisionOption["canvasAction"] {
+  return value === "build_directly" ||
+    value === "show_preview" ||
+    value === "show_options" ||
+    value === "add_option" ||
+    value === "replace_option" ||
+    value === "start_fresh"
+    ? value
+    : undefined;
 }
 
 function cleanText(value: unknown, maxLength: number) {

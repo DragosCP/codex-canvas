@@ -900,14 +900,8 @@ function scrubInternalSidebarTitle(title: string) {
   if (title.includes("[Codex Saved Mockup Review Context]")) {
     return `Review saved ${sidebarArtifactLabel(title, 2)}`;
   }
-  if (title.includes("[Codex Empty Project Visual Planning Context]")) {
-    return "Start with visual options";
-  }
-  if (title.includes("[Codex Existing App Visual Decision Context]")) {
-    return "Review current app change";
-  }
-  if (title.includes("[Codex Existing App Preview First Context]")) {
-    return "Preview current app change";
+  if (title.includes("[Codex Canvas Question Context]")) {
+    return "Choose Canvas path";
   }
   if (title.includes("[Codex Visual Decision Selection]")) {
     return "Use selected option";

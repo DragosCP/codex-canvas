@@ -111,8 +111,6 @@ export function MockupPreview(props: {
     compactMax: 1080,
     balancedMax: 1360,
   });
-  const showViewportSelect = toolbarWidth < 950;
-  const showViewportIconOnly = toolbarWidth < 790;
   const useCompactActionLabels = toolbarWidth < 860;
   const overflowBuildAction = toolbarWidth < 760;
   const overflowResetAction = toolbarWidth < 640;
@@ -154,8 +152,7 @@ export function MockupPreview(props: {
   const showBuildInMenu = !historyMode && overflowBuildAction;
   const showMarkInline = !overflowMarkAction;
   const showMarkInMenu = overflowMarkAction;
-  const markActionLabel =
-    useCompactActionLabels && toolbarWidth < 760 ? "Mark" : "Mark area";
+  const markActionLabel = "Mark area";
   const changesActionLabel = !hasSelectedHighlights
     ? "No changes"
     : showHighlights
@@ -445,19 +442,17 @@ export function MockupPreview(props: {
     mockupCount,
     "title",
   );
-  const tabOptions: PreviewToolbarSelectOption[] = [
-    ...(canShowLive
-      ? [
-          {
-            id: "live",
-            label: "Live",
-            title: "Current running app",
-            active: liveSelected,
-            onSelect: () => switchTab("live"),
-          },
-        ]
-      : []),
-    ...previewSet.mockups.map((mockup, index) => ({
+  const liveTabOption: PreviewToolbarSelectOption | null = canShowLive
+    ? {
+        id: "live",
+        label: "Live",
+        title: "Current running app",
+        active: liveSelected,
+        onSelect: () => switchTab("live"),
+      }
+    : null;
+  const proposalTabOptions: PreviewToolbarSelectOption[] =
+    previewSet.mockups.map((mockup, index) => ({
       id: mockup.id,
       label: previewArtifactTabLabel(
         previewSet.artifactKind,
@@ -470,90 +465,48 @@ export function MockupPreview(props: {
         switchTab("mockup");
         props.onSelect(mockup.id);
       },
-    })),
+    }));
+  const tabOptions: PreviewToolbarSelectOption[] = [
+    ...(canShowLive
+      ? [liveTabOption as PreviewToolbarSelectOption]
+      : []),
+    ...proposalTabOptions,
   ];
-  const tabs = showTabSelect ? (
+  const liveLaneTabs = liveTabOption ? (
+    <MockupLaneTabs ariaLabel="Live lane" options={[liveTabOption]} />
+  ) : null;
+  const proposalLaneTabs = showTabSelect ? (
     <PreviewToolbarSelect
-      ariaLabel="Preview options"
-      className="preview-toolbar-tab-select"
-      options={tabOptions}
+      ariaLabel="Proposal lanes"
+      className="preview-toolbar-tab-select canvas-lane-select"
+      options={proposalTabOptions}
     />
   ) : (
-    <div
-      className="preview-segmented preview-compare-options"
-      aria-label="Preview options"
-    >
-      {canShowLive && (
-        <button
-          className={liveSelected ? "active" : ""}
-          onClick={() => switchTab("live")}
-          title="Current running app"
-          type="button"
-        >
-          Live
-        </button>
-      )}
-      {previewSet.mockups.map((mockup, index) => (
-        <button
-          className={!liveSelected && mockup.id === selected.id ? "active" : ""}
-          key={mockup.id}
-          onClick={() => {
-            switchTab("mockup");
-            props.onSelect(mockup.id);
-          }}
-          title={mockup.title}
-          type="button"
-        >
-          {previewArtifactTabLabel(
-            previewSet.artifactKind,
-            mockup.label || String.fromCharCode(65 + index),
-            mockupCount,
-          )}
-        </button>
-      ))}
-    </div>
+    <MockupLaneTabs ariaLabel="Proposal lanes" options={proposalTabOptions} />
   );
 
-  const viewportOptions: PreviewToolbarSelectOption[] = [
-    {
-      id: "desktop",
-      label: "Desktop",
-      title: "Desktop viewport",
-      icon: <Monitor size={14} />,
-      active: viewport === "desktop",
-      onSelect: () => setViewport("desktop"),
-    },
-    {
-      id: "mobile",
-      label: "Mobile",
-      title: "Mobile viewport",
-      icon: <Smartphone size={14} />,
-      active: viewport === "mobile",
-      onSelect: () => setViewport("mobile"),
-    },
-  ];
-  const viewportControls = showViewportSelect ? (
-    <PreviewToolbarSelect
-      ariaLabel="Viewport"
-      className="preview-toolbar-viewport-select"
-      hideCurrentLabel={showViewportIconOnly}
-      options={viewportOptions}
-    />
-  ) : (
-    <div className="preview-segmented preview-viewport" aria-label="Viewport">
+  const viewportControls = (
+    <div
+      className="preview-segmented preview-viewport canvas-floating-viewport"
+      aria-label="Viewport"
+    >
       <button
+        aria-label="Desktop viewport"
         className={viewport === "desktop" ? "active" : ""}
         onClick={() => setViewport("desktop")}
+        title="Desktop viewport"
         type="button"
       >
-        <Monitor size={14} /> Desktop
+        <Monitor size={14} />
       </button>
       <button
+        aria-label="Mobile viewport"
         className={viewport === "mobile" ? "active" : ""}
         onClick={() => setViewport("mobile")}
+        title="Mobile viewport"
         type="button"
       >
-        <Smartphone size={14} /> Mobile
+        <Smartphone size={14} />
       </button>
     </div>
   );
@@ -565,9 +518,7 @@ export function MockupPreview(props: {
           compareTabOptions={tabOptions}
           project={props.project}
           appPreviewContexts={props.appPreviewContexts}
-          compareTabs={tabs}
           statusLabel={historyMode ? "History reference" : "Live app"}
-          titleLabel="Compare"
           viewport={viewport}
           onViewportChange={setViewport}
           onAreaMarkChange={(areaMark, meta) =>
@@ -582,28 +533,44 @@ export function MockupPreview(props: {
   return (
     <div className="mockup-preview-surface">
       <header
-        className="preview-toolbar mockup-preview-toolbar"
+        className="preview-toolbar mockup-preview-toolbar canvas-lane-toolbar"
         data-density={toolbarDensity}
         ref={toolbarRef}
       >
-        <div className="preview-toolbar-left">
-          <div className="preview-title-row">
-            <strong>{canShowLive ? "Compare" : `${artifactTitle} preview`}</strong>
-            <span>{historyMode ? "History" : "Proposal"}</span>
+        {liveLaneTabs && (
+          <div className="canvas-lane-row live">
+            <div className="preview-toolbar-left">
+              <div className="preview-title-row">
+                <strong>Live</strong>
+                <span>{historyMode ? "History reference" : "Current app"}</span>
+              </div>
+              <div className="preview-chip-row">
+                <span>Open Live to use app controls</span>
+              </div>
+            </div>
+            <div className="preview-toolbar-tabs">{liveLaneTabs}</div>
           </div>
-          <div className="preview-chip-row">
-            {showTitleChip && <span title={selected.title}>{selected.title}</span>}
-            {showSummaryChip && (selected.summary || selected.filePath) && (
-              <span title={selected.summary || selected.filePath}>
-                {selected.summary || selected.filePath}
-              </span>
-            )}
+        )}
+        <div className="canvas-lane-row proposals active">
+          <div className="preview-toolbar-left">
+            <div className="preview-title-row">
+              <strong>Proposals</strong>
+              <span>{historyMode ? "History" : "Selected"}</span>
+            </div>
+            <div className="preview-chip-row">
+              {showTitleChip && <span title={selected.title}>{selected.title}</span>}
+              {showSummaryChip && (selected.summary || selected.filePath) && (
+                <span title={selected.summary || selected.filePath}>
+                  {selected.summary || selected.filePath}
+                </span>
+              )}
+              {!showTitleChip && !showSummaryChip && (
+                <span>{canShowLive ? selected.title : `${artifactTitle} preview`}</span>
+              )}
+            </div>
           </div>
-        </div>
-        <div className="preview-toolbar-tabs">{tabs}</div>
-        {!liveSelected && (
+          <div className="preview-toolbar-tabs">{proposalLaneTabs}</div>
           <div className="preview-actions mockup-preview-actions">
-            {viewportControls}
             {showChangesInline && (
               <button
                 aria-label={
@@ -672,18 +639,18 @@ export function MockupPreview(props: {
               </button>
             )}
             {showMoreMenu && (
-              <div className="mockup-preview-more" ref={moreMenuRef}>
-                <button
-                  aria-expanded={moreMenuOpen}
-                  aria-label="More actions"
-                  className="more-actions-button"
-                  onClick={() => setMoreMenuOpen((current) => !current)}
-                  title="More actions"
-                  type="button"
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-                {moreMenuOpen && (
+            <div className="mockup-preview-more" ref={moreMenuRef}>
+              <button
+                aria-expanded={moreMenuOpen}
+                aria-label="More actions"
+                className="more-actions-button"
+                onClick={() => setMoreMenuOpen((current) => !current)}
+                title="More actions"
+                type="button"
+              >
+                <MoreHorizontal size={16} />
+              </button>
+              {moreMenuOpen && (
                 <div className="more-actions-menu">
                   {showChangesInMenu && (
                     <button
@@ -739,16 +706,17 @@ export function MockupPreview(props: {
                   </button>
                   )}
                 </div>
-                )}
-              </div>
+              )}
+            </div>
             )}
           </div>
-        )}
+        </div>
       </header>
       <div
         className={`mockup-preview-stage ${viewport} ${marking ? "marking" : ""}`}
         ref={stageRef}
       >
+        {viewportControls}
         <div className={`mockup-preview-frame-wrap ${viewport}`}>
           <iframe
             className="mockup-preview-frame"
@@ -813,6 +781,32 @@ export function MockupPreview(props: {
           />
         )}
       </div>
+    </div>
+  );
+}
+
+function MockupLaneTabs(props: {
+  ariaLabel: string;
+  options: PreviewToolbarSelectOption[];
+}) {
+  return (
+    <div
+      className="preview-segmented live-preview-options canvas-lane-tabs"
+      aria-label={props.ariaLabel}
+    >
+      {props.options.map((option) => (
+        <button
+          aria-current={option.active ? "true" : undefined}
+          className={option.active ? "active" : ""}
+          key={option.id}
+          onClick={option.onSelect}
+          title={option.title || option.label}
+          type="button"
+        >
+          {option.label}
+          <span aria-hidden="true" className="canvas-lane-dot" />
+        </button>
+      ))}
     </div>
   );
 }

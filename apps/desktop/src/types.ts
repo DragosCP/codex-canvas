@@ -80,6 +80,7 @@ export type DesktopState = {
   sentComposerContextsByTurnId: Record<string, ComposerContextReference[]>;
   codeProposalSets: Record<string, CodeProposalSet>;
   codeProposalActiveSetIdsByThreadId: Record<string, string>;
+  codeProposalCompareSetIdsByThreadId: Record<string, string>;
   mockupActiveProposalSetIdsByThreadId: Record<string, string>;
   mockupHistoryProposalSetIds: Record<string, boolean>;
   layout: LayoutState;
@@ -218,6 +219,8 @@ export type ComposerAppPreviewContext = {
   markNumber?: number;
   areaMark: PlanPreviewAreaMark;
   thumbnailDataUrl?: string;
+  source?: "userMark" | "proposalHighlight";
+  highlightId?: string;
 };
 
 export type ComposerMockupPreviewContext = {

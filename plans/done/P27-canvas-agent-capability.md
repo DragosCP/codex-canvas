@@ -2,9 +2,9 @@
 
 ## Status
 
-- Draft plan.
-- No implementation has started.
-- This plan resets Canvas v2 around one simple product architecture instead of adding more one-off prompt-routing cases.
+- Done.
+- Implemented one Canvas operating prompt, derived Canvas state primitives, canonical action resolver, Canvas question placeholder routing, focused resolver fixture tests, and the P27b cleanup handoff.
+- The implementation preserves the locked Canvas v2 preview header and keeps existing Live overlay, saved mockup, and code-backed proposal lanes underneath the resolver.
 
 ## Relevant Docs
 
@@ -90,7 +90,8 @@ Make Canvas self-sustaining:
 2. The agent knows it can create one or more Proposal Canvases.
 3. The agent knows it can ask visible product questions through the Agent Question Placeholder.
 4. The user can say `Canvas`, `@Canvas`, `preview`, `show me`, `where should`, `wireframe`, `mockup`, `layout`, `workflow`, or similar, and the agent knows to use Canvas when useful.
-5. Follow-up rules and detailed behavior live in one Canvas operating prompt instead of scattered prompt wrappers.
+5. Canvas-related turns route through a small finite set of Canvas actions instead of scattered one-off prompt wrappers.
+6. Follow-up rules and detailed behavior live in one Canvas operating prompt instead of scattered prompt wrappers.
 
 ## Prompt-Owned Judgment, Code-Owned Safety
 
@@ -115,6 +116,49 @@ Code should still enforce:
 - project/thread scoping for marks, chips, and proposal context;
 - storage paths do not become required user instructions;
 - placeholder output is visible product UI, not chain-of-thought.
+
+## System Shape: Resolve To Canvas Actions
+
+P27 must not be implemented as a growing list of special cases like `if the user says settings button, do X`.
+
+Every Canvas-related user turn should be resolved from:
+
+- visible user message;
+- current Canvas state;
+- selected surface (`Live`, `Preview`, `A`, `B`, or `C`);
+- user marks and attachments;
+- active proposal set versus historical/source proposal set;
+- whether Live exists and is running.
+
+The resolver should choose one canonical action:
+
+```ts
+type CanvasAction =
+  | "ASK_USER"
+  | "CREATE_PROPOSAL"
+  | "REVISE_PROPOSAL"
+  | "ADD_OPTION"
+  | "BUILD_SELECTED"
+  | "BUILD_LIVE_DIRECTLY"
+  | "ARCHIVE_PROPOSALS";
+```
+
+The Canvas operating prompt and backend state should describe how to execute those actions. Discovered regressions should become fixture tests that assert the resolver chooses the right action, not new isolated branches.
+
+Examples:
+
+- Clear marked proposal tweak: user says `Show me the categories rather than search` while A is selected with a mark.
+  - Expected action: `REVISE_PROPOSAL`, target `A`.
+- Small visual request after a proposal was built into Live: user says `Please propose me a Settings button`.
+  - Expected action: `CREATE_PROPOSAL`, base `Live`, not blocked by old A/B/C.
+- User commits to an option: user says `Build on Option A`.
+  - Expected action: `BUILD_SELECTED`, target `A`, sent as an agent turn.
+- Active A/B/C is full and user asks for another preview.
+  - Expected action: `ASK_USER` with replace/archive choices, not a stuck composer.
+- User asks for local A/B/C in an empty project.
+  - Expected action: `CREATE_PROPOSAL` or `ADD_OPTION` through Canvas state, not arbitrary project-root `A`, `B`, `C` folders.
+
+If a future regression appears, add a resolver fixture and adjust the model/action selection. Do not add another ad hoc prompt wrapper unless the action model itself is missing a capability.
 
 ## User Workflow Contract
 
@@ -223,6 +267,26 @@ The app should expose a small stable set of Canvas primitives that the prompt ca
 
 The agent should not reason directly about `AppData\Roaming\Codex Local\proposal-workspaces` or project-root A/B/C folders. Those are implementation details.
 
+### Canvas Action Resolver
+
+The app should include one Canvas action resolver that maps a user turn plus Canvas state into a `CanvasAction`.
+
+Resolver responsibilities:
+
+- determine whether the request is about Live, an active proposal, a new proposal, or a historical/source proposal;
+- determine whether existing proposals should stay active, become history, or be archived after build;
+- decide when a visible Agent Question Placeholder is necessary;
+- prevent old full A/B/C sets from blocking the next Live-based proposal after the user has built one option;
+- keep selected user marks and attached chips bound to the message and selected surface;
+- produce a compact action payload for the agent prompt/tool call.
+
+Resolver non-goals:
+
+- it should not hardcode every possible wording;
+- it should not choose visual design details;
+- it should not change the Canvas header;
+- it should not expose storage paths or temp folders to the user.
+
 ### Proposal Canvas Lanes
 
 Canvas should choose the cheapest honest lane:
@@ -273,43 +337,56 @@ The UI can render this in the existing product decision area, but it must not re
 - Keep it compact enough for future owner edits.
 - Add tests that ensure key rules are present.
 
-### Phase 2 - Define Canvas State Primitives
+### Phase 2 - Define Canvas State Primitives And Action Model
 
 - Define Live Canvas state.
 - Define Proposal Canvas state.
 - Define marks and agent marks as Canvas state.
 - Define Agent Question Placeholder state.
+- Define the finite `CanvasAction` set.
+- Define the resolver input/output payloads.
 - Do not change preview header UI.
 
-### Phase 3 - Agent Question Placeholder
+### Phase 3 - Build Canvas Action Resolver
+
+- Route each Canvas-relevant user turn into one canonical action.
+- Use Canvas state and selected surface, not only prompt text.
+- Treat regression workflows as resolver fixtures.
+- Ensure old active proposals can become history/source after build so they do not block the next Live-based preview.
+- Ensure user mark chips attach to the sent message and selected surface.
+- Do not implement each fixture as its own one-off branch.
+
+### Phase 4 - Agent Question Placeholder
 
 - Let the agent return structured visible Canvas questions.
 - Render them as product UI, not chat thinking.
 - Use this for no-Live/no-docs or ambiguous visual paths.
 - Ensure obvious Live-app small changes can skip the placeholder and create a preview directly.
 
-### Phase 4 - Proposal Canvas Creation
+### Phase 5 - Proposal Canvas Creation
 
 - Route one-change requests to one `Preview`.
 - Route explicit option requests to A/B/C.
 - Ensure proposal creation registers with Canvas instead of writing folders in project root.
 - Ensure written responses summarize actual Canvas output.
+- Ensure proposal titles/labels such as `Option A` stay in Canvas chrome/state and never leak into the user's app UI.
 
-### Phase 5 - Existing Proposal Revision
+### Phase 6 - Existing Proposal Revision
 
 - Modify only the relevant area for changes inside an existing proposal.
 - Support `put it in C` as add/update C beside existing A/B.
 - Support `move it up/top/there` as proposal revision.
 - Prevent accidental full proposal recreation.
+- Preserve and display agent `Changes` marks on Proposal Canvas results so the user can review and reposition the proposed area.
 
-### Phase 6 - Build/Revise Handoff
+### Phase 7 - Build/Revise Handoff
 
 - `Build selected` stages editable composer text.
 - Pressing Enter sends an agent turn with Canvas context.
 - The agent decides build versus revise based on visible text and Canvas state.
 - No direct silent Live promotion.
 
-### Phase 7 - Create P27b Cleanup Handoff
+### Phase 8 - Create P27b Cleanup Handoff
 
 - While implementing P27, create a separate `P27b` cleanup plan as the first surfacing of deletion/removal work.
 - P27b should list the legacy pieces from P24/P25/P25b/P26 that P27 makes obsolete, grouped as:
@@ -322,17 +399,25 @@ The UI can render this in the existing product decision area, but it must not re
 - The agent implementing P27b is expected to investigate the code again and surface additional cleanup opportunities before deleting anything.
 - P27 must not delete legacy paths just because they look obsolete; removal belongs to P27b after P27 behavior passes real Canvas workflow testing.
 
-### Phase 8 - Verification And Regression Gates
+### Phase 9 - Verification And Regression Gates
 
 - Tests should protect:
   - no Canvas header changes;
   - one operating prompt includes the reviewed rules;
   - `Canvas` and `@Canvas` are treated as Canvas intent anywhere in the prompt;
+  - Canvas-related turns resolve to one canonical `CanvasAction`;
   - no-Live ambiguous UI prompts generate the Agent Question Placeholder;
   - Live small changes create one reused Preview, not copied full A/B/C apps;
   - explicit options create A/B/C only when requested;
   - existing proposal revisions do not recreate the whole proposal;
   - `put it in C` updates/adds C beside A/B;
+  - clear marked proposal revisions choose `REVISE_PROPOSAL`, not a build/options question;
+  - after building a proposal into Live, old A/B/C become history/source and do not block a new Live-based preview;
+  - full A/B/C plus another requested preview chooses `ASK_USER` with replace/archive choices, not a dead composer;
+  - user mark chips appear with the sent chat message;
+  - proposal `Changes` marks appear only on Proposal Canvas, not as Live-only user marks;
+  - proposal labels do not appear inside the user's app UI;
+  - internal folder/temp/workspace details do not leak into visible user-facing chat;
   - hidden Canvas payloads do not leak into chat.
 
 ## Out Of Scope
@@ -344,6 +429,7 @@ The UI can render this in the existing product decision area, but it must not re
 - Deleting legacy P24/P25/P25b/P26 routing or proposal code directly inside P27.
 - Running multiple heavy live renderers by default.
 - Building a hardcoded visual-patch-to-code compiler.
+- Implementing every discovered regression as a separate prompt branch.
 
 ## Open Questions
 
@@ -356,9 +442,11 @@ The UI can render this in the existing product decision area, but it must not re
 
 - The owner can review one Canvas operating prompt and understand/adjust agent behavior.
 - The user can ask for Canvas anywhere in text and the agent uses Canvas.
+- Canvas-related turns resolve through a small canonical action model instead of one-off prompt branches.
 - No-Live ambiguous UI requests ask a visible product question instead of silently implementing.
 - Live-app small visual changes create one lightweight preview by reusing Live Canvas.
 - Existing proposal revisions change only the relevant area.
 - A/B/C appears only for explicit or genuinely different options.
+- Regression workflows are covered as resolver fixtures, including marked proposal revision, post-build Live preview creation, full A/B/C replacement choices, mark chip persistence, and proposal `Changes` marks.
 - P27 creates a P27b cleanup plan that identifies the first removable/replaced legacy paths without deleting them during P27.
 - The Canvas header remains unchanged.

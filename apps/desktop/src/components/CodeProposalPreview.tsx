@@ -5,6 +5,7 @@ import type {
   CodeProposalSet,
   ComposerAppPreviewContext,
   PlanPreviewAreaMark,
+  PlanProposal,
   Project,
 } from "../types";
 import type { PreviewToolbarSelectOption } from "./PreviewToolbarSelect";
@@ -25,12 +26,20 @@ export function CodeProposalPreview(props: {
     areaMark: PlanPreviewAreaMark | null,
     meta: LiveAppPreviewMarkMeta,
   ) => void;
+  onLaneTransfer?: (
+    previewSet: CodeProposalSet,
+    from: "live" | "A" | "B" | "C",
+    to: "live" | "A" | "B" | "C",
+  ) => void;
   onSelect: (proposalSetId: string, optionId: "A" | "B" | "C") => void;
 }) {
   const previewSet = props.previewSet;
   const project = props.project;
   const canShowLive = props.canShowLive && Boolean(project);
-  const [activeTab, setActiveTab] = useState<"live" | "A" | "B" | "C">("A");
+  const showLiveLane = Boolean(project);
+  const [activeTab, setActiveTab] = useState<"live" | "A" | "B" | "C">(() =>
+    initialCodeProposalTab(previewSet, canShowLive),
+  );
   const selected =
     previewSet?.options.find(
       (option) => option.id === previewSet.selectedOptionId,
@@ -38,16 +47,31 @@ export function CodeProposalPreview(props: {
     previewSet?.options[0] ??
     null;
   useEffect(() => {
-    if (previewSet?.selectedOptionId) {
+    if (!previewSet) return;
+    if (codeProposalDefaultsToLive(previewSet, canShowLive)) {
+      setActiveTab("live");
+      return;
+    }
+    if (previewSet.selectedOptionId) {
       setActiveTab(previewSet.selectedOptionId);
     }
-  }, [previewSet?.proposalSetId, previewSet?.selectedOptionId]);
+  }, [canShowLive, previewSet?.proposalSetId, previewSet?.status]);
   useEffect(() => {
-    if (!canShowLive && activeTab === "live" && selected) {
+    if (!previewSet?.selectedOptionId) return;
+    if (codeProposalDefaultsToLive(previewSet, canShowLive)) return;
+    setActiveTab(previewSet.selectedOptionId);
+  }, [
+    canShowLive,
+    previewSet?.proposalSetId,
+    previewSet?.selectedOptionId,
+    previewSet?.status,
+  ]);
+  useEffect(() => {
+    if (!showLiveLane && activeTab === "live" && selected) {
       setActiveTab(selected.id);
     }
-  }, [activeTab, canShowLive, selected]);
-  const liveSelected = canShowLive && activeTab === "live";
+  }, [activeTab, selected, showLiveLane]);
+  const liveSelected = showLiveLane && activeTab === "live";
   const activeOption =
     liveSelected
       ? null
@@ -74,12 +98,14 @@ export function CodeProposalPreview(props: {
   }
 
   const tabOptions: PreviewToolbarSelectOption[] = [
-    ...(canShowLive
+    ...(showLiveLane
       ? [
           {
             id: "live",
             label: "Live",
-            title: "Current live app",
+            title: canShowLive
+              ? "Current live app"
+              : "Build or run Live from a selected proposal",
             active: liveSelected,
             onSelect: () => setActiveTab("live"),
           },
@@ -96,21 +122,32 @@ export function CodeProposalPreview(props: {
       },
     })),
   ];
-  const changedCount = activeOption?.changedFiles.length ?? 0;
   const canApply =
     Boolean(activeOption) &&
     previewSet.status !== "applied" &&
     activeOption?.status === "ready";
+  const previewKey = liveSelected
+    ? `live:${project.id}`
+    : codeProposalPreviewKey(previewSet, activeOption);
+  const proposal = activeOption
+    ? codeProposalPreviewProposal(project, previewSet, activeOption)
+    : null;
 
   return (
     <LiveAppPreview
       appPreviewContexts={props.appPreviewContexts}
       compareTabOptions={tabOptions}
+      key={previewKey}
       onAreaMarkChange={(areaMark, meta) =>
         project && props.onMarkArea(project, areaMark, meta)
       }
       onBuildBaselineRequest={props.onBuildBaselineRequest}
+      onLaneTransfer={(from, to) => {
+        if (!isCodeProposalLane(from) || !isCodeProposalLane(to)) return;
+        props.onLaneTransfer?.(previewSet, from, to);
+      }}
       project={selectedProject}
+      proposal={proposal}
       proposalControls={
         activeOption
           ? {
@@ -119,15 +156,134 @@ export function CodeProposalPreview(props: {
               buildLabel:
                 activeOption.status === "applying"
                   ? "Building"
-                  : activeOption.status === "applied"
-                    ? "Built"
-                    : "Build selected",
+                  : "Build selected",
               onBuild: () => props.onBuild(previewSet, activeOption),
             }
           : undefined
       }
       statusLabel=""
-      titleLabel={canShowLive ? "Compare" : "Wireframes preview"}
     />
   );
+}
+
+function isCodeProposalLane(value: string): value is "live" | "A" | "B" | "C" {
+  return value === "live" || value === "A" || value === "B" || value === "C";
+}
+
+export function codeProposalPreviewKey(
+  previewSet: CodeProposalSet,
+  option: CodeProposalOption | null,
+) {
+  if (!option) return `${previewSet.proposalSetId}:none:${previewSet.updatedAt}`;
+  const changeSignature = option.changedFiles
+    .map((change) => `${change.kind}:${change.path}:${change.hash}:${change.size}`)
+    .join("|");
+  return [
+    previewSet.proposalSetId,
+    option.id,
+    option.status,
+    previewSet.updatedAt,
+    changeSignature,
+  ].join(":");
+}
+
+export function initialCodeProposalTab(
+  previewSet: CodeProposalSet | null,
+  canShowLive: boolean,
+): "live" | "A" | "B" | "C" {
+  if (!previewSet) return "A";
+  if (codeProposalDefaultsToLive(previewSet, canShowLive)) return "live";
+  return previewSet.selectedOptionId ?? previewSet.options[0]?.id ?? "A";
+}
+
+export function codeProposalDefaultsToLive(
+  previewSet: CodeProposalSet,
+  canShowLive: boolean,
+) {
+  return canShowLive && previewSet.status === "applied";
+}
+
+export function codeProposalPreviewProposal(
+  project: Project,
+  previewSet: CodeProposalSet,
+  option: CodeProposalOption,
+): PlanProposal | null {
+  if (option.changedFiles.length === 0) return null;
+  const now = previewSet.updatedAt || Date.now();
+  const note =
+    option.changedFiles.length === 1
+      ? "One proposal change is ready for visual review."
+      : `${option.changedFiles.length} proposal changes are ready for visual review.`;
+  const highlightLabel = codeProposalHighlightLabel(previewSet.originalPrompt, option);
+  return {
+    id: `code-proposal:${previewSet.proposalSetId}:${option.id}`,
+    projectId: project.id,
+    threadId: previewSet.threadId ?? "",
+    turnId: previewSet.turnId ?? previewSet.proposalSetId,
+    prompt: previewSet.originalPrompt,
+    contexts: [],
+    previewSpec: {
+      version: 1,
+      summary: note,
+      createdAt: previewSet.createdAt || now,
+      updatedAt: now,
+      variants: [
+        {
+          id: option.id,
+          title: option.title,
+          tradeoff: "Review the changed proposal surface before building it.",
+          placement: "topbar",
+          summary: option.summary || note,
+          targetRegion: "Changed proposal surface",
+          highlights: [
+            {
+              id: `code-change-${option.id}`,
+              label: highlightLabel,
+              note,
+              areaMark: {
+                x: 28,
+                y: 28,
+                width: 430,
+                height: 260,
+                viewportWidth: 1440,
+                viewportHeight: 900,
+                note,
+                createdAt: now,
+              },
+            },
+          ],
+          components: [],
+        },
+      ],
+    },
+    previewSelectedVariantId: option.id,
+    previewAreaMark: null,
+    previewSession: null,
+    proposalKind: "live_proposal",
+    status: "pending",
+    createdAt: previewSet.createdAt || now,
+    updatedAt: now,
+  };
+}
+
+function codeProposalHighlightLabel(
+  prompt: string,
+  option: CodeProposalOption,
+) {
+  const text = `${prompt} ${option.title} ${option.summary}`.toLowerCase();
+  const buttonMatch = text.match(/\b([a-z][a-z0-9'-]{2,})\s+button\b/i);
+  if (buttonMatch?.[1]) return titleCase(`${buttonMatch[1]} button`);
+  const subjectMatch = text.match(
+    /\b(settings|profile|account|preferences|notifications?|reminders?|filters?|search|categories|category|theme|billing|help)\b/i,
+  );
+  if (subjectMatch?.[1]) return titleCase(subjectMatch[1]);
+  return "Proposed change";
+}
+
+function titleCase(value: string) {
+  return value
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((part) => `${part.slice(0, 1).toUpperCase()}${part.slice(1)}`)
+    .join(" ");
 }

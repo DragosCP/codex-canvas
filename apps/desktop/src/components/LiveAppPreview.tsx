@@ -13,7 +13,7 @@ import {
   Square,
 } from "lucide-react";
 import {
-  type ReactNode,
+  type DragEvent,
   type PointerEvent,
   useCallback,
   useEffect,
@@ -32,6 +32,7 @@ import type {
   PlanPreviewVariant,
   PlanProposal,
   Project,
+  ProposalHighlight,
 } from "../types";
 import {
   PreviewToolbarSelect,
@@ -43,6 +44,15 @@ type DraftMark = {
   startY: number;
   currentX: number;
   currentY: number;
+};
+
+type HighlightDrag = {
+  highlightId: string;
+  label: string;
+  mode: "move" | "resize";
+  startX: number;
+  startY: number;
+  startMark: PlanPreviewAreaMark;
 };
 
 type ElectronWebviewElement = HTMLElement & {
@@ -103,6 +113,9 @@ export type LiveAppPreviewMarkMeta = {
   route: string;
   viewport: "desktop" | "mobile";
   thumbnailDataUrl?: string;
+  label?: string;
+  source?: "userMark" | "proposalHighlight";
+  highlightId?: string;
 };
 
 export function LiveAppPreview(props: {
@@ -110,10 +123,8 @@ export function LiveAppPreview(props: {
   proposal?: PlanProposal | null;
   areaMark?: PlanPreviewAreaMark | null;
   appPreviewContexts?: ComposerAppPreviewContext[];
-  compareTabs?: ReactNode;
   compareTabOptions?: PreviewToolbarSelectOption[];
   statusLabel?: string;
-  titleLabel?: string;
   viewport?: "desktop" | "mobile";
   onAreaMarkChange: (
     areaMark: PlanPreviewAreaMark | null,
@@ -123,6 +134,7 @@ export function LiveAppPreview(props: {
   onSessionChange?: (session: PlanPreviewSessionState | null) => void;
   onVariantChange?: (variantId: string) => void;
   onBuildBaselineRequest?: (project: Project) => void;
+  onLaneTransfer?: (from: string, to: string) => void;
   proposalControls?: {
     autoStart?: boolean;
     buildDisabled?: boolean;
@@ -151,6 +163,15 @@ export function LiveAppPreview(props: {
   const [moreMenuOpen, setMoreMenuOpen] = useState(false);
   const [marking, setMarking] = useState(false);
   const [draftMark, setDraftMark] = useState<DraftMark | null>(null);
+  const [highlightDrag, setHighlightDrag] = useState<HighlightDrag | null>(null);
+  const [pendingLaneTransfer, setPendingLaneTransfer] = useState<{
+    from: string;
+    to: string;
+  } | null>(null);
+  const [highlightAdjustments, setHighlightAdjustments] = useState<
+    Record<string, PlanPreviewAreaMark>
+  >({});
+  const highlightAdjustmentsRef = useRef<Record<string, PlanPreviewAreaMark>>({});
   const [proposalVisible, setProposalVisible] = useState(true);
   const [showProposalHighlights, setShowProposalHighlights] = useState(false);
   const [proposalSelectionStatus, setProposalSelectionStatus] =
@@ -182,13 +203,23 @@ export function LiveAppPreview(props: {
   const variants = spec?.variants.slice(0, 3) ?? [];
   const selectedHighlights = selectedVariant?.highlights ?? [];
   const singleMark = props.areaMark ?? props.proposal?.previewAreaMark ?? null;
+  const viewport = props.viewport ?? uncontrolledViewport;
+  const adjustedHighlightContexts =
+    props.appPreviewContexts?.filter(
+      (context) =>
+        context.source === "proposalHighlight" &&
+        context.projectId === props.project.id &&
+        context.viewport === viewport,
+    ) ?? [];
   const renderedMarks =
     props.appPreviewContexts && props.appPreviewContexts.length > 0
-      ? props.appPreviewContexts.map((context) => ({
-          id: context.id,
-          label: context.markLabel || "Mark 1",
-          areaMark: context.areaMark,
-        }))
+      ? props.appPreviewContexts
+          .filter((context) => context.source !== "proposalHighlight")
+          .map((context) => ({
+            id: context.id,
+            label: context.markLabel || "Mark 1",
+            areaMark: context.areaMark,
+          }))
       : singleMark
         ? [
             {
@@ -200,7 +231,6 @@ export function LiveAppPreview(props: {
         : [];
   const activeRenderedMark = renderedMarks[renderedMarks.length - 1] ?? null;
   const mark = activeRenderedMark?.areaMark ?? null;
-  const viewport = props.viewport ?? uncontrolledViewport;
   const safeDraftUrl = useMemo(() => normalizePreviewUrl(draftUrl), [draftUrl]);
   const routeForContext = currentRoute || previewUrl || safeDraftUrl;
   const captureWebview = useCallback((node: HTMLElement | null) => {
@@ -321,11 +351,66 @@ export function LiveAppPreview(props: {
   useEffect(() => {
     setProposalVisible(true);
     setShowProposalHighlights(false);
+    setHighlightDrag(null);
+    highlightAdjustmentsRef.current = {};
+    setHighlightAdjustments({});
   }, [props.proposal?.turnId, spec?.updatedAt]);
 
   useEffect(() => {
     if (selectedHighlights.length === 0) setShowProposalHighlights(false);
   }, [selectedHighlights.length]);
+
+  useEffect(() => {
+    if (
+      !webview ||
+      frameStatus !== "loaded" ||
+      !showProposalHighlights ||
+      selectedHighlights.length === 0
+    ) {
+      return;
+    }
+    let cancelled = false;
+    const variantId = selectedVariant?.id ?? "preview";
+    void Promise.all(
+      selectedHighlights.map(async (highlight) => {
+        const key = highlightKey(variantId, highlight.id, viewport);
+        if (highlightAdjustmentsRef.current[key]) return null;
+        if (
+          adjustedHighlightContexts.some(
+            (context) => context.highlightId === highlight.id,
+          )
+        ) {
+          return null;
+        }
+        const area = await detectHighlightAreaInWebview(webview, highlight.label);
+        if (!area) return null;
+        return { key, area: { ...area, note: highlight.note, createdAt: Date.now() } };
+      }),
+    ).then((matches) => {
+      if (cancelled) return;
+      const nextEntries = matches.filter(
+        (match): match is { key: string; area: PlanPreviewAreaMark } =>
+          Boolean(match),
+      );
+      if (nextEntries.length === 0) return;
+      highlightAdjustmentsRef.current = {
+        ...highlightAdjustmentsRef.current,
+        ...Object.fromEntries(nextEntries.map((match) => [match.key, match.area])),
+      };
+      setHighlightAdjustments(highlightAdjustmentsRef.current);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [
+    adjustedHighlightContexts,
+    frameStatus,
+    selectedHighlights,
+    selectedVariant?.id,
+    showProposalHighlights,
+    viewport,
+    webview,
+  ]);
 
   useEffect(() => {
     setMarkNote(mark?.note ?? "");
@@ -716,6 +801,184 @@ export function LiveAppPreview(props: {
     setMarking(false);
   }
 
+  function beginHighlightAdjust(
+    event: PointerEvent<HTMLDivElement | HTMLButtonElement>,
+    highlight: ProposalHighlight,
+    mode: HighlightDrag["mode"],
+  ) {
+    if (!stageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    event.currentTarget.setPointerCapture(event.pointerId);
+    const point = pointerPoint(event);
+    if (!point) return;
+    const stage = stageRef.current;
+    setHighlightDrag({
+      highlightId: highlight.id,
+      label: highlight.label,
+      mode,
+      startX: point.x,
+      startY: point.y,
+      startMark: highlightAreaForStage(
+        adjustedHighlightArea(highlight),
+        stage.clientWidth,
+        stage.clientHeight,
+      ),
+    });
+  }
+
+  function updateHighlightAdjust(
+    event: PointerEvent<HTMLDivElement | HTMLButtonElement>,
+  ) {
+    if (!highlightDrag || !stageRef.current) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const point = pointerPoint(event);
+    if (!point) return;
+    const stage = stageRef.current;
+    const deltaX = point.x - highlightDrag.startX;
+    const deltaY = point.y - highlightDrag.startY;
+    const next =
+      highlightDrag.mode === "resize"
+        ? {
+            ...highlightDrag.startMark,
+            width: clamp(
+              highlightDrag.startMark.width + deltaX,
+              24,
+              Math.max(24, stage.clientWidth - highlightDrag.startMark.x),
+            ),
+            height: clamp(
+              highlightDrag.startMark.height + deltaY,
+              24,
+              Math.max(24, stage.clientHeight - highlightDrag.startMark.y),
+            ),
+            createdAt: Date.now(),
+          }
+        : {
+            ...highlightDrag.startMark,
+            x: clamp(
+              highlightDrag.startMark.x + deltaX,
+              0,
+              Math.max(0, stage.clientWidth - highlightDrag.startMark.width),
+            ),
+            y: clamp(
+              highlightDrag.startMark.y + deltaY,
+              0,
+              Math.max(0, stage.clientHeight - highlightDrag.startMark.height),
+            ),
+            createdAt: Date.now(),
+          };
+    const key = highlightKey(
+      selectedVariant?.id ?? "preview",
+      highlightDrag.highlightId,
+      viewport,
+    );
+    highlightAdjustmentsRef.current = {
+      ...highlightAdjustmentsRef.current,
+      [key]: next,
+    };
+    setHighlightAdjustments(highlightAdjustmentsRef.current);
+  }
+
+  async function finishHighlightAdjust(
+    event: PointerEvent<HTMLDivElement | HTMLButtonElement>,
+  ) {
+    if (!highlightDrag) return;
+    event.preventDefault();
+    event.stopPropagation();
+    const adjusted =
+      highlightAdjustmentsRef.current[
+        highlightKey(selectedVariant?.id ?? "preview", highlightDrag.highlightId, viewport)
+      ] ?? highlightDrag.startMark;
+    const moved = !sameAreaMark(adjusted, highlightDrag.startMark);
+    const label = highlightDrag.label;
+    const highlightId = highlightDrag.highlightId;
+    setHighlightDrag(null);
+    if (!moved) return;
+    const areaMark = {
+      ...adjusted,
+      route: adjusted.route ?? routeForContext,
+      note: adjusted.note || label,
+    };
+    props.onAreaMarkChange(areaMark, {
+      previewUrl,
+      route: routeForContext,
+      viewport,
+      label,
+      source: "proposalHighlight",
+      highlightId,
+    });
+    const thumbnailDataUrl = await captureMarkThumbnail(areaMark);
+    if (thumbnailDataUrl) {
+      props.onAreaMarkChange(areaMark, {
+        previewUrl,
+        route: routeForContext,
+        viewport,
+        label,
+        source: "proposalHighlight",
+        highlightId,
+        thumbnailDataUrl,
+      });
+    }
+  }
+
+  function pointerPoint(event: PointerEvent<HTMLElement>) {
+    const stage = stageRef.current;
+    if (!stage) return null;
+    const rect = stage.getBoundingClientRect();
+    return {
+      x: clamp(event.clientX - rect.left, 0, rect.width),
+      y: clamp(event.clientY - rect.top, 0, rect.height),
+    };
+  }
+
+  function beginLaneDrag(
+    event: DragEvent<HTMLButtonElement>,
+    laneId: string,
+  ) {
+    if (!props.onLaneTransfer) return;
+    event.dataTransfer.effectAllowed = "move";
+    event.dataTransfer.setData("application/x-codex-canvas-lane", laneId);
+    event.dataTransfer.setData("text/plain", laneId);
+  }
+
+  function allowLaneDrop(event: DragEvent<HTMLButtonElement>) {
+    if (!props.onLaneTransfer) return;
+    event.preventDefault();
+    event.dataTransfer.dropEffect = "move";
+  }
+
+  function finishLaneDrop(
+    event: DragEvent<HTMLButtonElement>,
+    laneId: string,
+  ) {
+    if (!props.onLaneTransfer) return;
+    const source =
+      event.dataTransfer.getData("application/x-codex-canvas-lane") ||
+      event.dataTransfer.getData("text/plain");
+    if (!source || source === laneId) return;
+    event.preventDefault();
+    setPendingLaneTransfer({ from: source, to: laneId });
+  }
+
+  function confirmLaneTransfer() {
+    if (!pendingLaneTransfer) return;
+    props.onLaneTransfer?.(pendingLaneTransfer.from, pendingLaneTransfer.to);
+    setPendingLaneTransfer(null);
+  }
+
+  function adjustedHighlightArea(highlight: ProposalHighlight) {
+    const adjustedContext = adjustedHighlightContexts.find(
+      (context) => context.highlightId === highlight.id,
+    );
+    if (adjustedContext) return adjustedContext.areaMark;
+    return (
+      highlightAdjustments[
+        highlightKey(selectedVariant?.id ?? "preview", highlight.id, viewport)
+      ] ?? highlight.areaMark
+    );
+  }
+
   function setDraftMarkState(value: DraftMark | null) {
     draftMarkRef.current = value;
     setDraftMark(value);
@@ -845,14 +1108,10 @@ export function LiveAppPreview(props: {
     : safeDraftUrl
       ? previewOriginLabel(safeDraftUrl)
       : "";
-  const liveTitle = props.titleLabel ?? "Live preview";
+  const liveTitle = "Live";
   const liveStatus =
     props.statusLabel ??
-    (selectedVariant && proposalVisible
-      ? "Proposal"
-      : chromeState === "running"
-        ? "Live app"
-        : "Preview controls");
+    (chromeState === "running" ? "Live app" : "Preview controls");
 
   useEffect(() => {
     if (chromeState !== "running") {
@@ -869,21 +1128,21 @@ export function LiveAppPreview(props: {
     compactMax: 1080,
     balancedMax: 1360,
   });
-  const showViewportSelect = proposalToolbar
-    ? toolbarWidth < 720
-    : toolbarWidth < 720;
-  const showViewportIconOnly = proposalToolbar
-    ? toolbarWidth < 610
-    : toolbarWidth < 790;
-  const overflowOpenAction = proposalToolbar
+  const proposalLaneActive = Boolean(proposalControls) && proposalVisible;
+  const liveLaneActive = !proposalLaneActive;
+  const overflowOpenAction = proposalLaneActive
     ? toolbarWidth < 850
-    : toolbarWidth < 1000;
-  const overflowStopAction = toolbarWidth < 680;
-  const overflowReloadAction = toolbarWidth < 620;
-  const showTabSelect = toolbarWidth < (proposalToolbar ? 430 : 440);
-  const overflowMarkAction = proposalToolbar
+    : toolbarWidth < 460;
+  const overflowStopAction = liveLaneActive
+    ? toolbarWidth < 420
+    : toolbarWidth < 680;
+  const overflowReloadAction = liveLaneActive
+    ? toolbarWidth < 380
+    : toolbarWidth < 620;
+  const showTabSelect = toolbarWidth < (proposalLaneActive ? 430 : 440);
+  const overflowMarkAction = proposalLaneActive
     ? toolbarWidth < 700
-    : toolbarWidth < 500;
+    : toolbarWidth < 340;
   const compressedLabels =
     toolbarDensity === "compact" || toolbarDensity === "collapsed";
   const canMarkArea = chromeState === "running";
@@ -903,43 +1162,52 @@ export function LiveAppPreview(props: {
   const detectPreviewLabel = compressedLabels ? "Detect" : "Detect existing";
   const useUrlLabel = compressedLabels ? "URL" : "Use URL";
   const reloadLabel = "Reload";
-  const markActionLabel =
-    proposalToolbar || toolbarWidth >= 760 ? "Mark area" : "Mark";
-  const showChangesIconOnly = proposalToolbar && toolbarWidth < 820;
-  const showMarkIconOnly = proposalToolbar && toolbarWidth < 760;
-  const showBuildIconOnly = proposalToolbar && toolbarWidth < 620;
-  const overflowBuildAction = proposalToolbar && toolbarWidth < 450;
-  const overflowChangesAction = proposalToolbar
+  const markActionLabel = "Mark area";
+  const showLiveActionIconOnly = liveLaneActive && toolbarWidth < 640;
+  const showChangesIconOnly = proposalLaneActive && toolbarWidth < 820;
+  const showMarkIconOnly =
+    (proposalLaneActive && toolbarWidth < 760) || showLiveActionIconOnly;
+  const showReloadIconOnly = showLiveActionIconOnly;
+  const showStopIconOnly = showLiveActionIconOnly;
+  const showOpenIconOnly = showLiveActionIconOnly;
+  const showBuildIconOnly = proposalLaneActive && toolbarWidth < 620;
+  const overflowBuildAction = proposalLaneActive && toolbarWidth < 450;
+  const overflowChangesAction = proposalLaneActive
     ? toolbarWidth < 760
     : toolbarWidth < 680;
   const showChangesInline =
-    runningPreview && selectedHighlights.length > 0 && !overflowChangesAction;
+    proposalLaneActive &&
+    runningPreview &&
+    selectedHighlights.length > 0 &&
+    !overflowChangesAction;
   const showChangesInMenu =
-    runningPreview && selectedHighlights.length > 0 && overflowChangesAction;
+    proposalLaneActive &&
+    runningPreview &&
+    selectedHighlights.length > 0 &&
+    overflowChangesAction;
   const showReloadInline =
-    runningPreview && !proposalToolbar && !overflowReloadAction;
+    runningPreview && liveLaneActive && !overflowReloadAction;
   const showReloadInMenu =
-    runningPreview && !proposalToolbar && overflowReloadAction;
+    runningPreview && liveLaneActive && overflowReloadAction;
   const showStopInline =
-    runningPreview && !proposalToolbar && !overflowStopAction;
+    runningPreview && liveLaneActive && !overflowStopAction;
   const showStopInMenu =
-    runningPreview && !proposalToolbar && overflowStopAction;
+    runningPreview && liveLaneActive && overflowStopAction;
   const showOpenInline =
-    runningPreview && !proposalToolbar && !overflowOpenAction;
+    runningPreview && liveLaneActive && !overflowOpenAction;
   const showOpenInMenu =
-    runningPreview && !proposalToolbar && !showOpenInline;
-  const showDetectInline = stoppedPreview && !proposalToolbar;
-  const showUseUrlInline = stoppedPreview && !proposalToolbar;
-  const showRunInline = stoppedPreview && !proposalToolbar;
+    runningPreview && liveLaneActive && !showOpenInline;
+  const showDetectInline = stoppedPreview && liveLaneActive;
+  const showUseUrlInline = stoppedPreview && liveLaneActive;
+  const showRunInline = stoppedPreview && liveLaneActive;
   const showStartingInline = chromeState === "starting";
-  const showViewportInline = runningPreview;
   const showMarkInline = runningPreview && !overflowMarkAction;
   const showMarkInMenu = runningPreview && overflowMarkAction;
-  const showBuildInline = Boolean(proposalControls) && !overflowBuildAction;
-  const showBuildInMenu = Boolean(proposalControls) && overflowBuildAction;
+  const showBuildInline = proposalLaneActive && !overflowBuildAction;
+  const showBuildInMenu = proposalLaneActive && overflowBuildAction;
   const showChangeUrlInMenu =
     runningPreview &&
-    !proposalToolbar &&
+    liveLaneActive &&
     (showMarkInMenu ||
       showReloadInMenu ||
       showStopInMenu ||
@@ -954,15 +1222,15 @@ export function LiveAppPreview(props: {
     showChangeUrlInMenu;
   const showOriginChip =
     runningPreview &&
-    !proposalToolbar &&
+    liveLaneActive &&
     Boolean(originLabel) &&
     (toolbarDensity === "full" || toolbarDensity === "balanced");
   const showRouteChip =
     runningPreview &&
-    !proposalToolbar &&
+    liveLaneActive &&
     Boolean(showRouteLabel) &&
     toolbarDensity === "full";
-  const showStateChip = runningPreview && !proposalToolbar;
+  const showStateChip = runningPreview && liveLaneActive;
   const compareTabOptions =
     props.compareTabOptions ??
     (variants.length > 0
@@ -997,418 +1265,504 @@ export function LiveAppPreview(props: {
       setMoreMenuOpen(false);
     }
   }, [showMoreMenu]);
-  const optionPreviewTabs =
-    compareTabOptions.length > 0 ? (
-      <div
-        className="preview-segmented live-preview-options preview-compare-options"
-        aria-label="Preview options"
+  const liveLaneOption =
+    compareTabOptions.find((option) => option.id === "live") ??
+    (compareTabOptions.length === 0
+      ? {
+          id: "live",
+          label: "Live",
+          title: "Current live app",
+          active: true,
+          onSelect: () => undefined,
+        }
+      : null);
+  const proposalLaneOptions = compareTabOptions.filter(
+    (option) => option.id !== "live",
+  );
+  const hasProposalLanes = proposalLaneOptions.length > 0;
+  const laneIsUpdating = frameStatus === "loading" || chromeState === "starting";
+  const liveLaneTabs = liveLaneOption
+    ? renderLaneTabs([liveLaneOption], "Live lane")
+    : null;
+  const proposalLaneTabs =
+    hasProposalLanes
+      ? showTabSelect ? (
+          <PreviewToolbarSelect
+            ariaLabel="Proposal lanes"
+            className="preview-toolbar-tab-select canvas-lane-select"
+            options={proposalLaneOptions}
+          />
+        ) : (
+          renderLaneTabs(proposalLaneOptions, "Proposal lanes")
+        )
+      : null;
+  const viewportControl = runningPreview ? (
+    <div
+      className="preview-segmented preview-viewport canvas-floating-viewport"
+      aria-label="Viewport"
+    >
+      <button
+        aria-label="Desktop viewport"
+        className={viewport === "desktop" ? "active" : ""}
+        onClick={() => setViewport("desktop")}
+        title="Desktop viewport"
+        type="button"
       >
-        {compareTabOptions.map((option) => (
+        <Monitor size={14} />
+      </button>
+      <button
+        aria-label="Mobile viewport"
+        className={viewport === "mobile" ? "active" : ""}
+        onClick={() => setViewport("mobile")}
+        title="Mobile viewport"
+        type="button"
+      >
+        <Smartphone size={14} />
+      </button>
+    </div>
+  ) : null;
+
+  function renderLaneTabs(
+    options: PreviewToolbarSelectOption[],
+    ariaLabel: string,
+  ) {
+    return (
+      <div
+        className="preview-segmented live-preview-options canvas-lane-tabs"
+        aria-label={ariaLabel}
+      >
+        {options.map((option) => (
           <button
+            aria-current={option.active ? "true" : undefined}
             className={option.active ? "active" : ""}
+            draggable={Boolean(props.onLaneTransfer)}
             key={option.id}
             onClick={option.onSelect}
+            onDragOver={allowLaneDrop}
+            onDragStart={(event) => beginLaneDrag(event, option.id)}
+            onDrop={(event) => finishLaneDrop(event, option.id)}
             title={option.title || option.label}
             type="button"
           >
             {option.label}
+            <span
+              aria-hidden="true"
+              className={`canvas-lane-dot ${
+                option.active && laneIsUpdating ? "updating" : ""
+              }`}
+            />
           </button>
         ))}
       </div>
-    ) : null;
-  const defaultPreviewTabs =
-    !optionPreviewTabs && variants.length > 0 ? (
-      <div
-        className="preview-segmented live-preview-options preview-compare-options"
-        aria-label="Preview options"
-      >
-        <button
-          className={!proposalVisible ? "active" : ""}
-          onClick={() => {
-            setInteractionState("Viewing the current live app.");
-            setProposalVisible(false);
-          }}
-          title="Current live app"
-          type="button"
-        >
-          Live
-        </button>
-        {variants.map((variant) => (
-          <button
-            className={
-              proposalVisible && variant.id === selectedVariant?.id
-                ? "active"
-                : ""
-            }
-            key={variant.id}
-            onClick={() => {
-              setInteractionState("Switching temporary preview option.");
-              setProposalVisible(true);
-              props.onVariantChange?.(variant.id);
+    );
+  }
+
+  function renderToolbarActions() {
+    if (showUrlEntry) {
+      return (
+        <>
+          <input
+            aria-label="Preview URL"
+            autoFocus
+            onChange={(event) => setDraftUrl(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") void openPreview();
+              if (event.key === "Escape") setShowUrlEntry(false);
             }}
-            title={`${variant.title}: ${variant.tradeoff}`}
+            placeholder="Local preview URL"
+            value={draftUrl}
+          />
+          <button
+            className="ghost-button primary"
+            onClick={() => void openPreview()}
             type="button"
           >
-            {variantTabLabel(variant.id, variants.length)}
+            <ExternalLink size={15} /> Open
           </button>
-        ))}
-      </div>
-    ) : null;
-  const previewTabs =
-    compareTabOptions.length === 0 && !props.compareTabs ? null : showTabSelect ? (
-      <PreviewToolbarSelect
-        ariaLabel="Preview options"
-        className="preview-toolbar-tab-select"
-        options={compareTabOptions}
-      />
-    ) : (
-      optionPreviewTabs ?? props.compareTabs ?? defaultPreviewTabs
+          <button
+            className="ghost-button"
+            onClick={() => setShowUrlEntry(false)}
+            type="button"
+          >
+            Cancel
+          </button>
+        </>
+      );
+    }
+
+    return (
+      <>
+        {showChangesInline && (
+          <button
+            className={[
+              "ghost-button",
+              showProposalHighlights ? "active" : "",
+              showChangesIconOnly ? "icon-only" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            onClick={() => setShowProposalHighlights((current) => !current)}
+            title={
+              showProposalHighlights
+                ? "Hide proposed changes"
+                : "Show proposed changes"
+            }
+            type="button"
+          >
+            {showProposalHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
+            {!showChangesIconOnly &&
+              (proposalLaneActive
+                ? "Changes"
+                : showProposalHighlights
+                  ? "Hide changes"
+                  : "Show changes")}
+          </button>
+        )}
+        {showMarkInline && (
+          <button
+            aria-label={markActionLabel}
+            className={[
+              "ghost-button",
+              marking ? "active" : "",
+              showMarkIconOnly ? "icon-only" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            onClick={() => {
+              if (!canMarkArea) return;
+              setMarking((current) => {
+                const next = !current;
+                if (next) setMarkNote("");
+                return next;
+              });
+              setDraftMarkState(null);
+            }}
+            title="Mark an area in this preview"
+            type="button"
+          >
+            <MousePointer2 size={15} />
+            {!showMarkIconOnly && markActionLabel}
+          </button>
+        )}
+        {proposalControls && showBuildInline && (
+          <button
+            aria-label={proposalControls.buildLabel}
+            className={`ghost-button primary ${
+              showBuildIconOnly ? "icon-only" : ""
+            }`.trim()}
+            disabled={proposalControls.buildDisabled}
+            onClick={proposalControls.onBuild}
+            title="Build the selected proposal into Live"
+            type="button"
+          >
+            <Hammer size={15} />
+            {!showBuildIconOnly && proposalControls.buildLabel}
+          </button>
+        )}
+        {runningPreview && showReloadInline && (
+          <button
+            aria-label={reloadLabel}
+            className={`ghost-button ${showReloadIconOnly ? "icon-only" : ""}`.trim()}
+            onClick={reloadPreview}
+            title="Reload preview"
+            type="button"
+          >
+            <RefreshCw size={15} />
+            {!showReloadIconOnly && reloadLabel}
+          </button>
+        )}
+        {runningPreview && showStopInline && (
+          <button
+            aria-label="Stop"
+            className={`ghost-button danger ${
+              showStopIconOnly ? "icon-only" : ""
+            }`.trim()}
+            onClick={() => void stopPreview()}
+            title="Stop preview"
+            type="button"
+          >
+            <Square size={14} />
+            {!showStopIconOnly && "Stop"}
+          </button>
+        )}
+        {runningPreview && showOpenInline && (
+          <button
+            aria-label="Open"
+            className={`ghost-button ${showOpenIconOnly ? "icon-only" : ""}`.trim()}
+            onClick={() => void openExternalPreview()}
+            title="Open preview"
+            type="button"
+          >
+            <ExternalLink size={15} />
+            {!showOpenIconOnly && "Open"}
+          </button>
+        )}
+        {showStartingInline && (
+          <>
+            <button className="ghost-button primary" disabled type="button">
+              <RefreshCw className="spin" size={15} /> Starting
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => void stopPreview()}
+              type="button"
+            >
+              Cancel
+            </button>
+          </>
+        )}
+        {stoppedPreview && showRunInline && (
+          <>
+            <button
+              className="ghost-button primary"
+              onClick={() => void runPreview()}
+              type="button"
+            >
+              <Play size={15} /> {startPreviewLabel}
+            </button>
+            {showDetectInline && (
+              <button
+                className="ghost-button"
+                onClick={() => void discoverPreviewUrl()}
+                type="button"
+              >
+                <Search size={15} /> {detectPreviewLabel}
+              </button>
+            )}
+            {showUseUrlInline && (
+              <button
+                className="ghost-button"
+                onClick={() => setShowUrlEntry(true)}
+                type="button"
+              >
+                {useUrlLabel}
+              </button>
+            )}
+          </>
+        )}
+        {showMoreMenu && (
+          <div className="live-preview-more" ref={moreMenuRef}>
+            <button
+              aria-expanded={moreMenuOpen}
+              aria-label="Preview options"
+              className="more-actions-button"
+              onClick={() => setMoreMenuOpen((current) => !current)}
+              title="Preview options"
+              type="button"
+            >
+              <MoreHorizontal size={16} />
+            </button>
+            {moreMenuOpen && (
+              <div className="more-actions-menu">
+                {showMarkInMenu && (
+                  <button
+                    onClick={() => {
+                      if (!canMarkArea) return;
+                      setMarking((current) => {
+                        const next = !current;
+                        if (next) setMarkNote("");
+                        return next;
+                      });
+                      setDraftMarkState(null);
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <MousePointer2 size={15} />
+                    {marking ? "Stop marking" : "Mark area"}
+                  </button>
+                )}
+                {showChangesInMenu && (
+                  <button
+                    onClick={() => {
+                      setShowProposalHighlights((current) => !current);
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    {showProposalHighlights ? (
+                      <EyeOff size={15} />
+                    ) : (
+                      <Eye size={15} />
+                    )}
+                    {showProposalHighlights ? "Hide changes" : "Show changes"}
+                  </button>
+                )}
+                {proposalControls && showBuildInMenu && (
+                  <button
+                    disabled={proposalControls.buildDisabled}
+                    onClick={() => {
+                      if (proposalControls.buildDisabled) return;
+                      setMoreMenuOpen(false);
+                      proposalControls.onBuild();
+                    }}
+                    type="button"
+                  >
+                    <Hammer size={15} />
+                    {proposalControls.buildLabel}
+                  </button>
+                )}
+                {showReloadInMenu && (
+                  <button
+                    onClick={() => {
+                      reloadPreview();
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <RefreshCw size={15} /> Reload
+                  </button>
+                )}
+                {showStopInMenu && (
+                  <button
+                    onClick={() => {
+                      void stopPreview();
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <Square size={14} /> Stop
+                  </button>
+                )}
+                {showOpenInMenu && (
+                  <button
+                    onClick={() => {
+                      void openExternalPreview();
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <ExternalLink size={15} /> Open
+                  </button>
+                )}
+                {showChangeUrlInMenu && (
+                  <button
+                    onClick={() => {
+                      setShowUrlEntry(true);
+                      setMoreMenuOpen(false);
+                    }}
+                    type="button"
+                  >
+                    <ExternalLink size={15} /> Change URL
+                  </button>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+      </>
     );
-  const viewportOptions: PreviewToolbarSelectOption[] = [
-    {
-      id: "desktop",
-      label: "Desktop",
-      title: "Desktop viewport",
-      icon: <Monitor size={14} />,
-      active: viewport === "desktop",
-      onSelect: () => setViewport("desktop"),
-    },
-    {
-      id: "mobile",
-      label: "Mobile",
-      title: "Mobile viewport",
-      icon: <Smartphone size={14} />,
-      active: viewport === "mobile",
-      onSelect: () => setViewport("mobile"),
-    },
-  ];
-  const viewportControl = showViewportSelect ? (
-    <PreviewToolbarSelect
-      ariaLabel="Viewport"
-      className="preview-toolbar-viewport-select"
-      hideCurrentLabel={showViewportIconOnly}
-      options={viewportOptions}
-    />
-  ) : (
-    <div className="preview-segmented preview-viewport" aria-label="Viewport">
-      <button
-        className={viewport === "desktop" ? "active" : ""}
-        onClick={() => setViewport("desktop")}
-        type="button"
-      >
-        <Monitor size={14} /> Desktop
-      </button>
-      <button
-        className={viewport === "mobile" ? "active" : ""}
-        onClick={() => setViewport("mobile")}
-        type="button"
-      >
-        <Smartphone size={14} /> Mobile
-      </button>
-    </div>
-  );
+  }
 
   return (
     <div className="live-preview-panel">
       <header
-        className={`preview-toolbar live-preview-toolbar ${chromeState}`}
+        className={`preview-toolbar live-preview-toolbar canvas-lane-toolbar ${chromeState}`}
         data-density={toolbarDensity}
         data-proposal-toolbar={proposalToolbar ? "true" : undefined}
         ref={toolbarRef}
       >
-        <div className="preview-toolbar-left">
-          <div className="preview-title-row">
-            <strong>{liveTitle}</strong>
-            <span>{liveStatus}</span>
-          </div>
-          <div className={`preview-chip-row ${chromeState}`}>
-            {runningPreview ? (
-              <>
-                {showOriginChip && (
-                  <span className="live-preview-route" title={previewUrl}>
-                    {originLabel}
-                  </span>
-                )}
-                {showRouteChip && (
-                  <span className="live-preview-route" title={routeForContext}>
-                    {routeLabel}
-                  </span>
-                )}
-                {showStateChip && (
-                  <span
-                    className={`live-preview-state ${cleanupStatusForSession(
-                      proposalSelectionStatus,
-                      availability,
-                    )}`}
-                  >
-                    {statusLabel(
-                      availability,
-                      frameStatus,
-                      proposalSelectionStatus,
+        {liveLaneTabs && (
+          <div
+            className={`canvas-lane-row live ${liveLaneActive ? "active" : ""}`}
+          >
+            <div className="preview-toolbar-left">
+              <div className="preview-title-row">
+                <strong>{liveTitle}</strong>
+                <span>{liveStatus}</span>
+              </div>
+              <div className={`preview-chip-row ${chromeState}`}>
+                {runningPreview ? (
+                  <>
+                    {showOriginChip && (
+                      <span className="live-preview-route" title={previewUrl}>
+                        {originLabel}
+                      </span>
                     )}
-                  </span>
-                )}
-              </>
-            ) : (
-              <span className="live-preview-state-message">
-                {chromeState === "starting"
-                  ? `Starting ${managedCommand || "preview"}`
-                  : chromeState === "blank"
-                    ? "No app to preview yet"
-                    : chromeState === "failed"
-                      ? `Preview did not start: ${availabilityMessage}`
-                      : "No preview running"}
-              </span>
-            )}
-          </div>
-        </div>
-        <div className="preview-toolbar-tabs">{previewTabs}</div>
-        <div className={`preview-actions live-preview-controls ${chromeState}`}>
-        {showUrlEntry ? (
-          <>
-            <input
-              aria-label="Preview URL"
-              autoFocus
-              onChange={(event) => setDraftUrl(event.target.value)}
-              onKeyDown={(event) => {
-                if (event.key === "Enter") void openPreview();
-                if (event.key === "Escape") setShowUrlEntry(false);
-              }}
-              placeholder="Local preview URL"
-              value={draftUrl}
-            />
-            <button className="ghost-button primary" onClick={() => void openPreview()} type="button">
-              <ExternalLink size={15} /> Open
-            </button>
-            <button className="ghost-button" onClick={() => setShowUrlEntry(false)} type="button">
-              Cancel
-            </button>
-          </>
-        ) : (
-          <>
-            {showViewportInline && (
-              viewportControl
-            )}
-            {showChangesInline && (
-              <button
-                className={
-                  [
-                    "ghost-button",
-                    showProposalHighlights ? "active" : "",
-                    showChangesIconOnly ? "icon-only" : "",
-                  ]
-                    .filter(Boolean)
-                    .join(" ")
-                }
-                onClick={() => setShowProposalHighlights((current) => !current)}
-                title={
-                  showProposalHighlights
-                    ? "Hide proposed changes"
-                    : "Show proposed changes"
-                }
-                type="button"
-              >
-                {showProposalHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
-                {!showChangesIconOnly &&
-                  (proposalToolbar
-                    ? "Changes"
-                    : showProposalHighlights
-                      ? "Hide changes"
-                      : "Show changes")}
-              </button>
-            )}
-            {showMarkInline && (
-              <button
-                className={[
-                  "ghost-button",
-                  marking ? "active" : "",
-                  showMarkIconOnly ? "icon-only" : "",
-                ]
-                  .filter(Boolean)
-                  .join(" ")}
-                onClick={() => {
-                  if (!canMarkArea) return;
-                  setMarking((current) => {
-                    const next = !current;
-                    if (next) setMarkNote("");
-                    return next;
-                  });
-                  setDraftMarkState(null);
-                }}
-                title="Mark an area in this preview"
-                type="button"
-              >
-                <MousePointer2 size={15} />
-                {!showMarkIconOnly && markActionLabel}
-              </button>
-            )}
-            {proposalControls && showBuildInline && (
-              <button
-                className={`ghost-button primary ${
-                  showBuildIconOnly ? "icon-only" : ""
-                }`.trim()}
-                aria-label={proposalControls.buildLabel}
-                disabled={proposalControls.buildDisabled}
-                onClick={proposalControls.onBuild}
-                title="Build the selected proposal into Live"
-                type="button"
-              >
-                <Hammer size={15} />
-                {!showBuildIconOnly && proposalControls.buildLabel}
-              </button>
-            )}
-            {runningPreview && showReloadInline && (
-              <button className="ghost-button" onClick={reloadPreview} title="Reload preview" type="button">
-                <RefreshCw size={15} /> {reloadLabel}
-              </button>
-            )}
-            {runningPreview && showStopInline && (
-              <button className="ghost-button danger" onClick={() => void stopPreview()} type="button">
-                <Square size={14} /> Stop
-              </button>
-            )}
-            {runningPreview && showOpenInline && (
-              <button className="ghost-button" onClick={() => void openExternalPreview()} type="button">
-                <ExternalLink size={15} /> Open
-              </button>
-            )}
-            {showStartingInline && (
-              <>
-                <button className="ghost-button primary" disabled type="button">
-                  <RefreshCw className="spin" size={15} /> Starting
-                </button>
-                <button className="ghost-button" onClick={() => void stopPreview()} type="button">
-                  Cancel
-                </button>
-              </>
-            )}
-            {stoppedPreview && showRunInline && (
-              <>
-                <button className="ghost-button primary" onClick={() => void runPreview()} type="button">
-                  <Play size={15} /> {startPreviewLabel}
-                </button>
-                {showDetectInline && (
-                  <button className="ghost-button" onClick={() => void discoverPreviewUrl()} type="button">
-                    <Search size={15} /> {detectPreviewLabel}
-                  </button>
-                )}
-                {showUseUrlInline && (
-                  <button className="ghost-button" onClick={() => setShowUrlEntry(true)} type="button">
-                    {useUrlLabel}
-                  </button>
-                )}
-              </>
-            )}
-            {showMoreMenu && (
-              <div className="live-preview-more" ref={moreMenuRef}>
-                <button
-                  aria-expanded={moreMenuOpen}
-                  aria-label="Preview options"
-                  className="more-actions-button"
-                  onClick={() => setMoreMenuOpen((current) => !current)}
-                  title="Preview options"
-                  type="button"
-                >
-                  <MoreHorizontal size={16} />
-                </button>
-                {moreMenuOpen && (
-                <div className="more-actions-menu">
-                  {showMarkInMenu && (
-                    <button
-                      onClick={() => {
-                        if (!canMarkArea) return;
-                        setMarking((current) => {
-                          const next = !current;
-                          if (next) setMarkNote("");
-                          return next;
-                        });
-                        setDraftMarkState(null);
-                        setMoreMenuOpen(false);
-                      }}
-                      type="button"
-                    >
-                      <MousePointer2 size={15} />
-                      {marking ? "Stop marking" : "Mark area"}
-                    </button>
-                  )}
-                  {showChangesInMenu && (
-                    <button
-                      onClick={() => {
-                        setShowProposalHighlights((current) => !current);
-                        setMoreMenuOpen(false);
-                      }}
-                      type="button"
-                    >
-                      {showProposalHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
-                      {showProposalHighlights ? "Hide changes" : "Show changes"}
-                    </button>
-                  )}
-                  {proposalControls && showBuildInMenu && (
-                    <button
-                      disabled={proposalControls.buildDisabled}
-                      onClick={() => {
-                        if (proposalControls.buildDisabled) return;
-                        setMoreMenuOpen(false);
-                        proposalControls.onBuild();
-                      }}
-                      type="button"
-                    >
-                      <Hammer size={15} /> {proposalControls.buildLabel}
-                    </button>
-                  )}
-                  {showOpenInMenu && (
-                    <button
-                      onClick={() => {
-                        setMoreMenuOpen(false);
-                        void openExternalPreview();
-                      }}
-                      type="button"
-                    >
-                      <ExternalLink size={15} /> Open
-                    </button>
-                  )}
-                  {showReloadInMenu && (
-                    <button
-                      onClick={() => {
-                        setMoreMenuOpen(false);
-                        reloadPreview();
-                      }}
-                      type="button"
-                    >
-                      <RefreshCw size={15} /> Reload
-                    </button>
-                  )}
-                  {showStopInMenu && (
-                    <button
-                      onClick={() => {
-                        setMoreMenuOpen(false);
-                        void stopPreview();
-                      }}
-                      type="button"
-                    >
-                      <Square size={14} /> Stop
-                    </button>
-                  )}
-                  {showChangeUrlInMenu && (
-                    <>
-                      <button
-                        onClick={() => {
-                          setMoreMenuOpen(false);
-                          setShowUrlEntry(true);
-                        }}
-                        type="button"
+                    {showRouteChip && (
+                      <span className="live-preview-route" title={routeForContext}>
+                        {routeLabel}
+                      </span>
+                    )}
+                    {showStateChip && (
+                      <span
+                        className={`live-preview-state ${cleanupStatusForSession(
+                          proposalSelectionStatus,
+                          availability,
+                        )}`}
                       >
-                        Use another URL
-                      </button>
-                    </>
-                  )}
-                </div>
+                        {statusLabel(
+                          availability,
+                          frameStatus,
+                          proposalSelectionStatus,
+                        )}
+                      </span>
+                    )}
+                  </>
+                ) : (
+                  <span className="live-preview-state-message">
+                    {chromeState === "starting"
+                      ? `Starting ${managedCommand || "preview"}`
+                      : chromeState === "blank"
+                        ? "No app to preview yet"
+                        : chromeState === "failed"
+                          ? `Preview did not start: ${availabilityMessage}`
+                          : "No preview running"}
+                  </span>
                 )}
               </div>
+            </div>
+            <div className="preview-toolbar-tabs">{liveLaneTabs}</div>
+            {liveLaneActive && (
+              <div className={`preview-actions live-preview-controls ${chromeState}`}>
+                {renderToolbarActions()}
+              </div>
             )}
-          </>
+          </div>
         )}
-        </div>
+        {proposalLaneTabs && (
+          <div
+            className={`canvas-lane-row proposals ${
+              proposalLaneActive ? "active" : ""
+            }`}
+          >
+            <div className="preview-toolbar-left">
+              <div className="preview-title-row">
+                <strong>Proposals</strong>
+                <span>{proposalLaneActive ? "Selected" : "Available"}</span>
+              </div>
+              <div className="preview-chip-row">
+                {selectedVariant?.title && <span>{selectedVariant.title}</span>}
+              </div>
+            </div>
+            <div className="preview-toolbar-tabs">{proposalLaneTabs}</div>
+            {proposalLaneActive && (
+              <div className={`preview-actions live-preview-controls ${chromeState}`}>
+                {renderToolbarActions()}
+              </div>
+            )}
+          </div>
+        )}
+        {pendingLaneTransfer && (
+          <div className="canvas-lane-transfer-popover" role="dialog">
+            <span>
+              {laneTransferPrompt(
+                pendingLaneTransfer.from,
+                pendingLaneTransfer.to,
+              )}
+            </span>
+            <button className="ghost-button primary" onClick={confirmLaneTransfer} type="button">
+              Confirm
+            </button>
+            <button
+              className="ghost-button"
+              onClick={() => setPendingLaneTransfer(null)}
+              type="button"
+            >
+              Cancel
+            </button>
+          </div>
+        )}
       </header>
 
       {previewChoices.length > 0 && !canShowWebview && (
@@ -1440,6 +1794,7 @@ export function LiveAppPreview(props: {
           .join(" ")}
         ref={stageRef}
       >
+        {viewportControl}
         {canShowWebview ? (
           <webview
             data-testid="electron-app-preview-webview"
@@ -1493,10 +1848,29 @@ export function LiveAppPreview(props: {
             <div
               className="live-preview-mark proposal-highlight"
               key={`${selectedVariant?.id ?? "preview"}:${highlight.id}`}
-              style={markStyle(highlight.areaMark)}
+              onPointerDown={(event) =>
+                beginHighlightAdjust(event, highlight, "move")
+              }
+              onPointerMove={updateHighlightAdjust}
+              onPointerUp={(event) => {
+                void finishHighlightAdjust(event);
+              }}
+              style={markStyle(adjustedHighlightArea(highlight))}
               title={highlight.note || highlight.label}
             >
               <span>{highlight.label}</span>
+              <button
+                aria-label={`Resize ${highlight.label}`}
+                className="live-preview-highlight-handle"
+                onPointerDown={(event) =>
+                  beginHighlightAdjust(event, highlight, "resize")
+                }
+                onPointerMove={updateHighlightAdjust}
+                onPointerUp={(event) => {
+                  void finishHighlightAdjust(event);
+                }}
+                type="button"
+              />
             </div>
           ))}
         {renderedMarks.map((renderedMark) => (
@@ -1640,6 +2014,128 @@ function markStyle(mark: PlanPreviewAreaMark) {
   };
 }
 
+function highlightAreaForStage(
+  mark: PlanPreviewAreaMark,
+  viewportWidth: number,
+  viewportHeight: number,
+): PlanPreviewAreaMark {
+  return {
+    ...mark,
+    x: (mark.x / mark.viewportWidth) * viewportWidth,
+    y: (mark.y / mark.viewportHeight) * viewportHeight,
+    width: (mark.width / mark.viewportWidth) * viewportWidth,
+    height: (mark.height / mark.viewportHeight) * viewportHeight,
+    viewportWidth,
+    viewportHeight,
+    createdAt: Date.now(),
+  };
+}
+
+function highlightKey(
+  variantId: string,
+  highlightId: string,
+  viewport: "desktop" | "mobile",
+) {
+  return `${variantId}:${viewport}:${highlightId}`;
+}
+
+function sameAreaMark(left: PlanPreviewAreaMark, right: PlanPreviewAreaMark) {
+  return (
+    Math.round(left.x) === Math.round(right.x) &&
+    Math.round(left.y) === Math.round(right.y) &&
+    Math.round(left.width) === Math.round(right.width) &&
+    Math.round(left.height) === Math.round(right.height)
+  );
+}
+
+async function detectHighlightAreaInWebview(
+  webview: ElectronWebviewElement,
+  label: string,
+): Promise<PlanPreviewAreaMark | null> {
+  const needle = highlightSearchNeedle(label);
+  if (!needle) return null;
+  try {
+    const result = await webview.executeJavaScript<{
+      x: number;
+      y: number;
+      width: number;
+      height: number;
+      viewportWidth: number;
+      viewportHeight: number;
+    } | null>(
+      `
+        (() => {
+          const needle = ${JSON.stringify(needle)}.toLowerCase();
+          const candidates = Array.from(document.querySelectorAll(
+            'button, a, [role="button"], input, select, textarea, [aria-label]'
+          ));
+          const visible = candidates
+            .map((element) => {
+              const rect = element.getBoundingClientRect();
+              const style = window.getComputedStyle(element);
+              const text = [
+                element.textContent || '',
+                element.getAttribute('aria-label') || '',
+                element.getAttribute('title') || '',
+                element.getAttribute('placeholder') || '',
+                element.getAttribute('value') || '',
+              ].join(' ').trim().toLowerCase();
+              return { element, rect, style, text };
+            })
+            .filter(({ rect, style, text }) =>
+              text.includes(needle) &&
+              rect.width >= 8 &&
+              rect.height >= 8 &&
+              style.visibility !== 'hidden' &&
+              style.display !== 'none'
+            );
+          const match = visible[0];
+          if (!match) return null;
+          const pad = 8;
+          const x = Math.max(0, match.rect.left - pad);
+          const y = Math.max(0, match.rect.top - pad);
+          const right = Math.min(window.innerWidth, match.rect.right + pad);
+          const bottom = Math.min(window.innerHeight, match.rect.bottom + pad);
+          return {
+            x,
+            y,
+            width: Math.max(24, right - x),
+            height: Math.max(24, bottom - y),
+            viewportWidth: window.innerWidth,
+            viewportHeight: window.innerHeight,
+          };
+        })()
+      `,
+      false,
+    );
+    if (!result) return null;
+    return {
+      ...result,
+      note: label,
+      createdAt: Date.now(),
+    };
+  } catch {
+    return null;
+  }
+}
+
+function highlightSearchNeedle(label: string) {
+  const normalized = label.trim().toLowerCase();
+  if (
+    !normalized ||
+    normalized === "proposed change" ||
+    normalized === "changed area" ||
+    normalized === "change"
+  ) {
+    return "";
+  }
+  return normalized.replace(/\s+button$/, "");
+}
+
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function draftMarkStyle(mark: DraftMark) {
   const left = Math.min(mark.startX, mark.currentX);
   const top = Math.min(mark.startY, mark.currentY);
@@ -1778,7 +2274,13 @@ type GuestPreviewState = {
 };
 
 function variantTabLabel(id: string, total: number) {
-  return total === 1 ? "Preview" : id;
+  return total === 1 ? "A" : id;
+}
+
+function laneTransferPrompt(from: string, to: string) {
+  if (to === "live") return `Update Live with ${from.toUpperCase()}?`;
+  if (from === "live") return `Update ${to.toUpperCase()} with Live?`;
+  return `Update ${to.toUpperCase()} with ${from.toUpperCase()}?`;
 }
 
 function describeGuestInteractionState(state: GuestPreviewState | null) {

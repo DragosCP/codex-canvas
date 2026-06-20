@@ -49,8 +49,9 @@ export function previewArtifactTabLabel(
   fallbackLabel: string,
   total: number,
 ) {
-  if (total !== 1) return fallbackLabel;
-  return kind === "wireframe" ? "Wireframe" : "Preview";
+  void kind;
+  void total;
+  return fallbackLabel;
 }
 
 export function previewArtifactFilePrefix(kind: PreviewArtifactKind) {

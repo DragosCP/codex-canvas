@@ -2,6 +2,10 @@ import { Check, FileText, Layers3, Loader2, Undo2, X } from "lucide-react";
 import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
 import { previewArtifactDisplayName } from "../mockupArtifacts";
+import {
+  projectRelativeDisplayPath,
+  proposalWorkspaceDisplayPath,
+} from "../proposalWorkspaceDisplay";
 import type {
   CodeProposalOption,
   CodeProposalSet,
@@ -76,9 +80,15 @@ export function Inspector(props: {
     },
   ) => void;
   onBuildBaselineApp: (project: Project) => void;
+  onBuildPlanProposal: (proposal: PlanProposal) => void;
   onBuildCodeProposal: (
     previewSet: CodeProposalSet,
     option: CodeProposalOption,
+  ) => void;
+  onTransferCodeProposalLane: (
+    previewSet: CodeProposalSet,
+    from: "live" | "A" | "B" | "C",
+    to: "live" | "A" | "B" | "C",
   ) => void;
   onSelectCodeProposal: (
     proposalSetId: string,
@@ -157,6 +167,13 @@ export function Inspector(props: {
                 variantId,
               )
             }
+            proposalControls={{
+              autoStart: true,
+              buildLabel: "Build selected",
+              onBuild: () =>
+                props.planPreviewProposal &&
+                props.onBuildPlanProposal(props.planPreviewProposal),
+            }}
           />
         )}
       {props.selection.type === "appPreview" && props.previewProject && (
@@ -176,6 +193,7 @@ export function Inspector(props: {
           canShowLive={props.codeProposalCanShowLive}
           onBuild={props.onBuildCodeProposal}
           onBuildBaselineRequest={props.onBuildBaselineApp}
+          onLaneTransfer={props.onTransferCodeProposalLane}
           onMarkArea={(project, areaMark, meta) =>
             props.onAttachAppPreviewMark(project, areaMark, meta)
           }
@@ -508,7 +526,11 @@ function documentPath(path: string, activeProject: Project | null) {
 }
 
 function friendlyPath(path: string, activeProject: Project | null) {
+  const proposalPath = proposalWorkspaceDisplayPath(path);
+  if (proposalPath) return proposalPath;
   if (!activeProject) return path;
+  const relativePath = projectRelativeDisplayPath(path, activeProject.path);
+  if (relativePath) return relativePath;
   const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
   return path
     .replace(new RegExp(escapeRegExp(projectPath), "g"), ".")

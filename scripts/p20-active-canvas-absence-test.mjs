@@ -9,15 +9,11 @@ const roots = [
 ];
 
 const forbidden = [
-  "Canvas",
-  "canvas",
   "ProjectCanvas",
   "CanvasSuggestion",
   "canvasSuggestions",
   "canvases",
   "canvas-proposal",
-  "@Canvas",
-  "@canvas",
   "Update Canvas",
   "View Canvas",
   "Canvas edits attached",
@@ -25,7 +21,6 @@ const forbidden = [
   "generated current-interface Canvas",
   "interaction frame",
   "interactionPreviews",
-  "CANVAS",
   "CanvasContext",
   "canvasContext",
   "xywh",
@@ -62,12 +57,12 @@ for (const root of roots) {
 }
 
 if (failures.length > 0) {
-  console.error("Active desktop code still contains old Canvas references:");
+  console.error("Active desktop code still contains old coordinate-editor Canvas references:");
   for (const failure of failures) console.error(`- ${failure}`);
   process.exit(1);
 }
 
-console.log("P20 active desktop Canvas absence check passed.");
+console.log("P20 active desktop legacy Canvas absence check passed.");
 
 function* walk(dir) {
   for (const entry of readdirSync(dir)) {
