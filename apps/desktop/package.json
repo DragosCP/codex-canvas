@@ -22,7 +22,8 @@
     "test:p24": "node ../../scripts/p24-saved-proposal-review-prompt-test.mjs",
     "test:p25": "node ../../scripts/p25-live-overlay-proposal-test.mjs",
     "test:p25b": "node ../../scripts/p25b-saved-mockup-history-guard-test.mjs && node ../../scripts/p25b-code-proposal-workspace-test.mjs",
-    "test:p27": "node ../../scripts/p27-canvas-action-resolver-test.mjs"
+    "test:p27": "node ../../scripts/p27-canvas-action-resolver-test.mjs",
+    "test:p30": "node ../../scripts/p30-visual-patch-runtime-test.mjs"
   },
   "dependencies": {
     "lucide-react": "^0.468.0",

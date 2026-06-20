@@ -2292,6 +2292,11 @@ function describeGuestInteractionState(state: GuestPreviewState | null) {
 function cleanupScript() {
   return `
 (() => {
+  try {
+    window.__codexVisualPatchRuntime?.clear?.();
+  } catch {
+    // Preview-only visual patches are best-effort cleanup state.
+  }
   const existing = document.getElementById("codex-live-plan-preview-root");
   if (existing) existing.remove();
   delete window.__codexPlanPreview;
