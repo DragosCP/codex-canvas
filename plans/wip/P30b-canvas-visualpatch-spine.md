@@ -2,7 +2,7 @@
 
 ## Status
 
-- Active plan, Phase 0 complete.
+- Active plan, Phase 9 complete.
 - Goal: expand the proven P30 Milestone 0 patch runtime into the full VisualPatch spine with typed proposal backing, stable targets, lifecycle, staleness, registry, hot-swap, and build strategies.
 - This plan follows P30 Milestone 0, P27, P27-cool, P27-agent-aware planning, P27b cleanup, and P29 planning. It should extend the current resolver/lane model, not revive removed fixed-question wrappers or old one-row preview chrome.
 - P30b should prepare, but not implement, P31 Interactive Canvas Edit Mode. Its `ElementRef`, `TargetResolution`, screenshot, and proposal registry work should be reusable by semantic proxy editing later.
@@ -314,6 +314,13 @@ Phase 0 execution note:
 - Add lifecycle and build strategy types where they can be stored safely.
 - Update tests so lanes and backing types are not conflated.
 
+Phase 1 execution note:
+
+- Added a first-class Canvas proposal model for display lanes, backing types, lifecycle, and build-selected strategies.
+- Rewired resolver/adapters so `A/B/C` remain display lanes while backing is stored as `live_dom_patch`, `mockup_artifact`, `wireframe_artifact`, or `code_backed_workspace`.
+- Stored deterministic backing/build metadata for live proposal records, saved mockup/wireframe sets, and code-backed proposal sets; legacy local state normalizes missing metadata.
+- Added focused P20/P27 regression coverage proving a selected display lane `A` can have different backing/build strategies without changing the visible Canvas header.
+
 ### Phase 2 - Stable Target Identity
 
 - Define `ElementRef` and the initial `data-canvas-id` targeting convention.
@@ -322,6 +329,12 @@ Phase 0 execution note:
 - Capture source metadata when available.
 - Keep all metadata hidden from user-facing UI.
 
+Phase 2 execution note:
+
+- Added `canvasTargeting.ts` with `ElementRef`, target bounds, exact/inferred/visual-only `TargetResolution`, confidence helpers, and a hidden preview metadata collector.
+- The collector reads stable `data-canvas-id` targets plus optional `data-canvas-source-file` and `data-canvas-component` metadata from the rendered preview surface; it does not render UI or expose metadata in Canvas chrome.
+- Extended `test:p30` to verify exact/high target collection, hidden source/component metadata, bounds, and visual-only/inferred confidence helpers in the Electron-rendered proof fixture.
+
 ### Phase 3 - Preview-Only Patch Runtime
 
 - Inject a small Canvas patch runtime into the preview webview.
@@ -329,6 +342,13 @@ Phase 0 execution note:
 - Reapply patches after common DOM mutations or React re-renders.
 - Add patch-bundle selection and clearing.
 - Add screenshots or DOM assertions for before/after.
+
+Phase 3 execution note:
+
+- Expanded the preview-only runtime to `VisualPatch` V1 with `style`, `text`, `hide`, and `show` patch operations while keeping the V0 style/text validator for compatibility.
+- Added named patch bundle apply/clear support so one bundle can be cleared without clearing another active bundle.
+- Made runtime reapply idempotent after DOM replacement to avoid self-triggered text mutation loops while still restoring drifted targets.
+- Extended `test:p30` with an Electron-rendered proof for bundle apply, target replacement reapply, selective clear, show/restore, hidden source safety, and screenshots.
 
 ### Phase 4 - Live/A Hot Swap
 
@@ -340,6 +360,13 @@ Phase 0 execution note:
 - Preserve scroll, modal, and form state where possible.
 - Fall back to reload only when the runtime cannot safely hot-swap.
 
+Phase 4 execution note:
+
+- Added hidden `visualPatchBundle` storage on `PlanPreviewVariant`; parsed and persisted bundles are normalized through the VisualPatch validator and dropped if malformed.
+- Wired `LiveAppPreview` lane selection so selecting a patch-backed proposal applies its bundle in the existing webview after cleanup, while returning to Live or switching variants clears the active bundle through the existing cleanup path.
+- Kept one interactive preview surface and left the P27-cool header unchanged; failed patch-backed selection now reloads only that existing webview as a conservative fallback.
+- Extended `test:p30` with a Live -> A -> Live -> B -> Live hot-swap proof that preserves input state and leaves source files untouched.
+
 ### Phase 5 - Changes Marks And Composer Chips
 
 - Bind `Changes` marks to VisualPatch targets.
@@ -347,6 +374,13 @@ Phase 0 execution note:
 - Store adjusted bounds as a Visual Reference.
 - Composer chip labels stay compact: `Change 1`, `Mark 1`.
 - Hidden context includes project, thread, lane, proposal, option, route, viewport, screenshot, bounds, note, and source.
+
+Phase 5 execution note:
+
+- Added a pure Visual Reference helper that derives compact `Change N` proposal highlights from VisualPatch targets and exact target metadata.
+- `LiveAppPreview` now collects target metadata after a patch-backed lane applies, merges derived marks with authored highlights, and keeps the existing adjustable `Changes` overlay/chip flow.
+- Adjusted app-preview change chips now carry hidden thread, proposal, option/lane, canvas target, source file/component, screenshot, resolution, route, viewport, bounds, note, and source metadata.
+- Visible chip labels remain `Change N`/`Mark N`; no Canvas header UI, proposal UI, drag/drop editing, source conversion, or P31 Edit Mode behavior was added.
 
 ### Phase 6 - Accept And Convert
 
@@ -357,18 +391,31 @@ Phase 0 execution note:
 - Verify no inline-style sludge is introduced unless locally conventional.
 - Keep the accepted proposal visible beside Live for the verification moment, then mark it as history/reference for routing.
 
+Phase 6 execution note:
+
+- `Build selected` on live DOM patch proposals now routes to a `convert_dom_patch_to_code` implementation turn with selected option, VisualPatch bundle, highlight/source metadata, preview context, and convention-preserving source-edit rules.
+- Live proposal accept uses the same conversion prompt from the header button and composer-resolved build path; adjusted `Change N`/`Mark N` visual references are included as hidden prompt context when present.
+- Accepted live proposals are marked `accepted_for_build` and excluded from active routing while remaining openable as a verification/reference preview; the existing `Build selected` control stays present but disabled after acceptance.
+- Code-backed proposals continue to use `promote_code_workspace`; no source is desktop-fast-applied for live DOM patch proposals.
+
 ### Phase 7 - Staleness And Recovery
 
 - Add stale checks for route, viewport, source file, canvas target, preview URL, project switch, and missing backing artifact.
 - Show recovery actions in product language.
 - Prevent silent application of stale patch or workspace proposals.
 
+Phase 7 execution note:
+- Added a pure proposal staleness model for live DOM patches and code-backed workspace backing paths.
+- Live DOM patch selection now preflights VisualPatch backing, preview URL/route/viewport, current target metadata, and source hints before applying a patch to the webview; stale proposals show compact recovery language in the existing proposal row and disable `Build selected`.
+- Chat/card build paths also reject stale live DOM patch proposals before sending the conversion turn.
+- Code-backed workspace proposals keep the existing `promote_code_workspace` path but require a backing workspace path before build.
+
 ### Phase 8 - Plan Mode Enforcement
 
-- Identify write-capable tool paths that can touch implementation files.
-- Enforce planning-only permissions through Rust/app-server for Plan Mode.
-- Allow writes only to app-managed non-source proposal/artifact storage until acceptance.
-- Allow visual proposal artifacts and patch previews while blocking implementation writes until acceptance.
+- Identified the write-capable enforcement path as app-server turn context permissions shared by shell, patch, MCP/tool calls, and server-side approval policy.
+- Added experimental `turn/start.planningOnly`; desktop sends it only for Plan Mode turns.
+- Rust/app-server now prepares `.codex/mockups`, forces approvals to `never`, forces the managed sandbox level for the turn, ignores widening sandbox/profile overrides, and installs a managed profile that reads the project but writes only that app-managed review artifact directory until acceptance.
+- Added focused desktop/Rust guards for the Plan Mode request flag and planning-only profile shape.
 
 ### Phase 9 - Proposal Registry And Workspace Bounds
 
@@ -377,8 +424,16 @@ Phase 0 execution note:
 - Keep Electron display state as cache/presentation, not sole source of proposal truth.
 - Add code-backed workspace limits, cleanup, preview-port ownership, and stale URL guards.
 
+Phase 9 execution note:
+
+- Identified the existing app-owned Electron proposal workspace helper as the current registry boundary for code-backed proposal artifacts; Rust app-server protocol/storage can later consume the same registry shape when a first-class server registry is added.
+- Added a durable `registry.json` under the proposal-workspace cache. Code-backed sets now carry a hidden `registryId`, and each option carries a hidden `previewOwnerId`.
+- Proposal workspace roots are project-hashed, registry records are validated before diff/apply, unregistered or out-of-root workspaces are rejected, and registry cleanup prunes missing/old/excess sets.
+- Code-backed preview project ids now use the option preview owner so remembered preview URLs and managed preview processes stay scoped to that proposal option; stale guards catch workspace-root and preview-owner mismatches.
+
 ## Testing
 
+- Phase 7 verification: `test:p20`, `test:p24`, `test:p25`, `test:p25b`, `test:p27`, `test:p30`, `npm --prefix apps/desktop run build`, and `git diff --check` passed.
 - Unit tests for backing type, lifecycle, staleness, and build strategy resolution.
 - Adapter-level tests for lane-to-backing behavior.
 - Webview/browser tests for patch apply/clear/reapply.
@@ -395,6 +450,8 @@ Phase 0 execution note:
 - Test code-backed workspace preview ports and URLs do not leak into Live or other proposal workspaces.
 - Test Plan Mode blocks implementation writes at tool/server level.
 - Test Plan Mode still allows app-managed non-source proposal/artifact writes.
+- Test code-backed workspace registry rejects unregistered/out-of-root proposal workspaces.
+- Test proposal preview owner ids prevent URL/preview leakage between options.
 - Run focused desktop tests:
   - `test:p24`
   - `test:p25`

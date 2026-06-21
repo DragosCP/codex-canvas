@@ -82,6 +82,13 @@ pub struct TurnStartParams {
     #[experimental("turn/start.permissions")]
     #[ts(optional = nullable)]
     pub permissions: Option<PermissionProfileSelectionParams>,
+    /// Enforce planning-only execution for this turn and subsequent turns.
+    ///
+    /// The app-server clamps write-capable tools so implementation files stay
+    /// read-only while app-managed proposal artifacts may still be written.
+    #[experimental("turn/start.planningOnly")]
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub planning_only: bool,
     /// Override the model for this turn and subsequent turns.
     #[ts(optional = nullable)]
     pub model: Option<String>,

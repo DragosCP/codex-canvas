@@ -24,7 +24,28 @@ import {
 import { desktopInvoke, hasDesktopBridge } from "../desktopBridge";
 import { usePreviewToolbarDensity } from "../hooks/usePreviewToolbarDensity";
 import { selectedPlanPreviewVariant } from "../planPreview";
+import {
+  buildCanvasTargetMetadataScript,
+  type CanvasTargetMetadataResult,
+} from "../canvasTargeting";
+import {
+  mergeProposalHighlightsWithVisualPatchTargets,
+  proposalHighlightsForVisualPatchTargets,
+} from "../canvasVisualReferences";
+import {
+  evaluateLiveDomPatchStaleness,
+  freshCanvasProposalStaleness,
+  liveDomPatchRequiresBacking,
+  staleProposalBuildMessage,
+  type CanvasProposalStalenessStatus,
+} from "../canvasProposalStaleness";
+import {
+  buildVisualPatchApplyScript,
+  buildVisualPatchClearScript,
+  type VisualPatchBundle,
+} from "../visualPatchRuntime";
 import type {
+  CanvasVisualReferenceMeta,
   ComposerAppPreviewContext,
   PlanPreviewAreaMark,
   PlanPreviewCleanupStatus,
@@ -108,7 +129,7 @@ const suggestedPreviewUrls = [
   "http://127.0.0.1:8080",
 ];
 
-export type LiveAppPreviewMarkMeta = {
+export type LiveAppPreviewMarkMeta = CanvasVisualReferenceMeta & {
   previewUrl: string;
   route: string;
   viewport: "desktop" | "mobile";
@@ -139,6 +160,7 @@ export function LiveAppPreview(props: {
     autoStart?: boolean;
     buildDisabled?: boolean;
     buildLabel: string;
+    buildTitle?: string;
     onBuild: () => void;
   };
 }) {
@@ -174,8 +196,13 @@ export function LiveAppPreview(props: {
   const highlightAdjustmentsRef = useRef<Record<string, PlanPreviewAreaMark>>({});
   const [proposalVisible, setProposalVisible] = useState(true);
   const [showProposalHighlights, setShowProposalHighlights] = useState(false);
+  const [visualPatchHighlights, setVisualPatchHighlights] = useState<
+    ProposalHighlight[]
+  >([]);
   const [proposalSelectionStatus, setProposalSelectionStatus] =
     useState<ProposalSelectionStatus>("idle");
+  const [proposalStaleness, setProposalStaleness] =
+    useState<CanvasProposalStalenessStatus>(freshCanvasProposalStaleness);
   const [hasRenderedPreview, setHasRenderedPreview] = useState(false);
   const [heldPreviewSnapshot, setHeldPreviewSnapshot] = useState("");
   const [interactionState, setInteractionState] = useState(
@@ -201,7 +228,15 @@ export function LiveAppPreview(props: {
     props.proposal?.previewSelectedVariantId,
   );
   const variants = spec?.variants.slice(0, 3) ?? [];
-  const selectedHighlights = selectedVariant?.highlights ?? [];
+  const authoredHighlights = selectedVariant?.highlights ?? [];
+  const selectedHighlights = useMemo(
+    () =>
+      mergeProposalHighlightsWithVisualPatchTargets(
+        authoredHighlights,
+        visualPatchHighlights,
+      ),
+    [authoredHighlights, visualPatchHighlights],
+  );
   const singleMark = props.areaMark ?? props.proposal?.previewAreaMark ?? null;
   const viewport = props.viewport ?? uncontrolledViewport;
   const adjustedHighlightContexts =
@@ -286,6 +321,7 @@ export function LiveAppPreview(props: {
     setCurrentRoute("");
     setInteractionState("No temporary interaction recorded.");
     setProposalSelectionStatus("idle");
+    setProposalStaleness(freshCanvasProposalStaleness);
     setManagedState("stopped");
     setManagedCommand("");
     setNeedsBaseline(false);
@@ -354,7 +390,14 @@ export function LiveAppPreview(props: {
     setHighlightDrag(null);
     highlightAdjustmentsRef.current = {};
     setHighlightAdjustments({});
+    setVisualPatchHighlights([]);
+    setProposalStaleness(freshCanvasProposalStaleness);
   }, [props.proposal?.turnId, spec?.updatedAt]);
+
+  useEffect(() => {
+    setVisualPatchHighlights([]);
+    setProposalStaleness(freshCanvasProposalStaleness);
+  }, [selectedVariant?.id]);
 
   useEffect(() => {
     if (selectedHighlights.length === 0) setShowProposalHighlights(false);
@@ -460,6 +503,8 @@ export function LiveAppPreview(props: {
     selectedVariant?.id,
     proposalVisible,
     previewUrl,
+    currentRoute,
+    viewport,
     frameKey,
   ]);
 
@@ -893,6 +938,9 @@ export function LiveAppPreview(props: {
     const moved = !sameAreaMark(adjusted, highlightDrag.startMark);
     const label = highlightDrag.label;
     const highlightId = highlightDrag.highlightId;
+    const highlight = selectedHighlights.find(
+      (candidate) => candidate.id === highlightId,
+    );
     setHighlightDrag(null);
     if (!moved) return;
     const areaMark = {
@@ -907,6 +955,16 @@ export function LiveAppPreview(props: {
       label,
       source: "proposalHighlight",
       highlightId,
+      threadId: highlight?.threadId ?? props.proposal?.threadId ?? null,
+      proposalTurnId: highlight?.proposalTurnId ?? props.proposal?.turnId,
+      proposalOptionId: highlight?.proposalOptionId ?? selectedVariant?.id,
+      canvasLane: highlight?.canvasLane ?? selectedVariant?.id,
+      canvasId: highlight?.canvasId,
+      sourceFile: highlight?.sourceFile,
+      componentName: highlight?.componentName,
+      screenshotRef: highlight?.screenshotRef,
+      targetResolutionKind: highlight?.targetResolutionKind,
+      targetResolutionConfidence: highlight?.targetResolutionConfidence,
     });
     const thumbnailDataUrl = await captureMarkThumbnail(areaMark);
     if (thumbnailDataUrl) {
@@ -918,6 +976,16 @@ export function LiveAppPreview(props: {
         source: "proposalHighlight",
         highlightId,
         thumbnailDataUrl,
+        threadId: highlight?.threadId ?? props.proposal?.threadId ?? null,
+        proposalTurnId: highlight?.proposalTurnId ?? props.proposal?.turnId,
+        proposalOptionId: highlight?.proposalOptionId ?? selectedVariant?.id,
+        canvasLane: highlight?.canvasLane ?? selectedVariant?.id,
+        canvasId: highlight?.canvasId,
+        sourceFile: highlight?.sourceFile,
+        componentName: highlight?.componentName,
+        screenshotRef: highlight?.screenshotRef,
+        targetResolutionKind: highlight?.targetResolutionKind,
+        targetResolutionConfidence: highlight?.targetResolutionConfidence,
       });
     }
   }
@@ -1034,6 +1102,8 @@ export function LiveAppPreview(props: {
     const generation = proposalSelectionGenerationRef.current + 1;
     proposalSelectionGenerationRef.current = generation;
     setProposalSelectionStatus("cleaning");
+    setVisualPatchHighlights([]);
+    setProposalStaleness(freshCanvasProposalStaleness);
     try {
       await target.executeJavaScript(cleanupScript(), false);
       if (generation !== proposalSelectionGenerationRef.current) return;
@@ -1061,12 +1131,91 @@ export function LiveAppPreview(props: {
     if (generation !== proposalSelectionGenerationRef.current) return;
     setProposalSelectionStatus("selecting");
     setInteractionState("Selecting proposal.");
+    const visualPatchBundle = visualPatchBundleForVariant(variant);
     try {
       const result = await target.executeJavaScript<{
         ok: boolean;
         route: string;
       }>(proposalMetadataScript(variant), false);
       if (generation !== proposalSelectionGenerationRef.current) return;
+      const livePatchNeedsBacking = liveDomPatchRequiresBacking(
+        props.proposal?.proposalBacking,
+        props.proposal?.buildStrategy,
+      );
+      let targetMetadata: CanvasTargetMetadataResult | null = null;
+      if (visualPatchBundle) {
+        targetMetadata = await collectCanvasTargetMetadata(target, variant);
+        if (generation !== proposalSelectionGenerationRef.current) return;
+      }
+      const staleness = evaluateLiveDomPatchStaleness({
+        proposalProjectId: props.proposal?.projectId,
+        currentProjectId: props.project.id,
+        proposalBacking: props.proposal?.proposalBacking,
+        buildStrategy: props.proposal?.buildStrategy,
+        variant,
+        bundle: visualPatchBundle,
+        baselineSession: props.proposal?.previewBaselineSession ?? null,
+        currentSession: props.proposal?.previewSession ?? null,
+        currentPreviewUrl: previewUrl || safeDraftUrl,
+        currentRoute: result.route || currentRoute || previewUrl || safeDraftUrl,
+        currentViewport: viewport,
+        targetMetadata,
+      });
+      if (staleness.stale) {
+        setProposalStaleness(staleness);
+        setVisualPatchHighlights([]);
+        setProposalSelectionStatus("failed");
+        setInteractionState(staleness.message);
+        return;
+      }
+      if (livePatchNeedsBacking) {
+        setProposalStaleness(freshCanvasProposalStaleness);
+      }
+      if (visualPatchBundle) {
+        try {
+          const patchResult = await target.executeJavaScript<{
+            ok: boolean;
+            status: string;
+            results?: Array<{ status: string; canvasId?: string }>;
+            activeCount: number;
+          }>(buildVisualPatchApplyScript(visualPatchBundle), false);
+          if (generation !== proposalSelectionGenerationRef.current) return;
+          if (!patchResult.ok) {
+            try {
+              await target.executeJavaScript(
+                buildVisualPatchClearScript(visualPatchBundle.id),
+                false,
+              );
+            } catch {
+              // Best-effort cleanup before reporting the selection failure.
+          }
+          if (generation !== proposalSelectionGenerationRef.current) return;
+          reloadPreviewAfterFailedHotSwap(target);
+          setFrameStatus("loading");
+          setProposalSelectionStatus("failed");
+            setInteractionState("Proposal targets were unavailable.");
+            return;
+          }
+          const patchHighlights = await collectVisualPatchHighlights(
+            target,
+            variant,
+            visualPatchBundle,
+            result.route || currentRoute || previewUrl,
+            targetMetadata,
+          );
+          if (generation !== proposalSelectionGenerationRef.current) return;
+          setVisualPatchHighlights(patchHighlights);
+        } catch {
+          if (generation !== proposalSelectionGenerationRef.current) return;
+          reloadPreviewAfterFailedHotSwap(target);
+          setFrameStatus("loading");
+          setProposalSelectionStatus("failed");
+        setInteractionState("Proposal runtime was unavailable.");
+          return;
+        }
+      } else {
+        setVisualPatchHighlights([]);
+      }
       setCurrentRoute(result.route || currentRoute || previewUrl);
       setProposalSelectionStatus(result.ok ? "selected" : "failed");
       setInteractionState("Proposal selected. Use Show changes to inspect agent marks.");
@@ -1075,6 +1224,48 @@ export function LiveAppPreview(props: {
       setProposalSelectionStatus("failed");
       setInteractionState("Proposal preview metadata was unavailable.");
     }
+  }
+
+  async function collectVisualPatchHighlights(
+    target: ElectronWebviewElement,
+    variant: PlanPreviewVariant,
+    bundle: VisualPatchBundle,
+    route: string,
+    targetMetadata?: CanvasTargetMetadataResult | null,
+  ) {
+    const metadata =
+      targetMetadata ?? (await collectCanvasTargetMetadata(target, variant));
+    if (!metadata.ok) return [];
+    return proposalHighlightsForVisualPatchTargets({
+      bundle,
+      targetMetadata: metadata,
+      variantId: variant.id,
+      route,
+      createdAt: Date.now(),
+      referenceMeta: {
+        threadId: props.proposal?.threadId ?? null,
+        proposalTurnId: props.proposal?.turnId,
+        proposalOptionId: variant.id,
+        canvasLane: variant.id,
+      },
+    });
+  }
+
+  async function collectCanvasTargetMetadata(
+    target: ElectronWebviewElement,
+    variant: PlanPreviewVariant,
+  ) {
+    const screenshotRef = [
+      "app-preview",
+      props.project.id,
+      props.proposal?.turnId ?? "proposal",
+      variant.id,
+      "targets",
+    ].join(":");
+    return target.executeJavaScript<CanvasTargetMetadataResult>(
+      buildCanvasTargetMetadataScript({ screenshotRef, maxTargets: 200 }),
+      false,
+    );
   }
 
   const canShowWebview =
@@ -1141,12 +1332,12 @@ export function LiveAppPreview(props: {
     : toolbarWidth < 620;
   const showTabSelect = toolbarWidth < (proposalLaneActive ? 430 : 440);
   const overflowMarkAction = proposalLaneActive
-    ? toolbarWidth < 700
+    ? false
     : toolbarWidth < 340;
   const compressedLabels =
     toolbarDensity === "compact" || toolbarDensity === "collapsed";
-  const canMarkArea = chromeState === "running";
   const runningPreview = chromeState === "running";
+  const canMarkArea = runningPreview || proposalLaneActive;
   const stoppedPreview =
     chromeState === "stopped" ||
     chromeState === "failed" ||
@@ -1173,16 +1364,14 @@ export function LiveAppPreview(props: {
   const showBuildIconOnly = proposalLaneActive && toolbarWidth < 620;
   const overflowBuildAction = proposalLaneActive && toolbarWidth < 450;
   const overflowChangesAction = proposalLaneActive
-    ? toolbarWidth < 760
+    ? false
     : toolbarWidth < 680;
   const showChangesInline =
     proposalLaneActive &&
-    runningPreview &&
     selectedHighlights.length > 0 &&
     !overflowChangesAction;
   const showChangesInMenu =
     proposalLaneActive &&
-    runningPreview &&
     selectedHighlights.length > 0 &&
     overflowChangesAction;
   const showReloadInline =
@@ -1201,10 +1390,16 @@ export function LiveAppPreview(props: {
   const showUseUrlInline = stoppedPreview && liveLaneActive;
   const showRunInline = stoppedPreview && liveLaneActive;
   const showStartingInline = chromeState === "starting";
-  const showMarkInline = runningPreview && !overflowMarkAction;
-  const showMarkInMenu = runningPreview && overflowMarkAction;
+  const showMarkInline = canMarkArea && !overflowMarkAction;
+  const showMarkInMenu = canMarkArea && overflowMarkAction;
   const showBuildInline = proposalLaneActive && !overflowBuildAction;
   const showBuildInMenu = proposalLaneActive && overflowBuildAction;
+  const proposalBuildDisabled = Boolean(
+    proposalControls?.buildDisabled || proposalStaleness.stale,
+  );
+  const proposalBuildTitle = proposalStaleness.stale
+    ? staleProposalBuildMessage(proposalStaleness)
+    : proposalControls?.buildTitle || "Build the selected proposal into Live";
   const showChangeUrlInMenu =
     runningPreview &&
     liveLaneActive &&
@@ -1450,9 +1645,9 @@ export function LiveAppPreview(props: {
             className={`ghost-button primary ${
               showBuildIconOnly ? "icon-only" : ""
             }`.trim()}
-            disabled={proposalControls.buildDisabled}
+            disabled={proposalBuildDisabled}
             onClick={proposalControls.onBuild}
-            title="Build the selected proposal into Live"
+            title={proposalBuildTitle}
             type="button"
           >
             <Hammer size={15} />
@@ -1590,12 +1785,13 @@ export function LiveAppPreview(props: {
                 )}
                 {proposalControls && showBuildInMenu && (
                   <button
-                    disabled={proposalControls.buildDisabled}
+                    disabled={proposalBuildDisabled}
                     onClick={() => {
-                      if (proposalControls.buildDisabled) return;
+                      if (proposalBuildDisabled) return;
                       setMoreMenuOpen(false);
                       proposalControls.onBuild();
                     }}
+                    title={proposalBuildTitle}
                     type="button"
                   >
                     <Hammer size={15} />
@@ -1732,7 +1928,17 @@ export function LiveAppPreview(props: {
                 <span>{proposalLaneActive ? "Selected" : "Available"}</span>
               </div>
               <div className="preview-chip-row">
-                {selectedVariant?.title && <span>{selectedVariant.title}</span>}
+                {selectedVariant?.title && (
+                  <span title={selectedVariant.title}>{selectedVariant.title}</span>
+                )}
+                {proposalStaleness.stale && (
+                  <span
+                    className="live-preview-state failed"
+                    title={proposalStaleness.message}
+                  >
+                    {proposalStaleness.label}
+                  </span>
+                )}
               </div>
             </div>
             <div className="preview-toolbar-tabs">{proposalLaneTabs}</div>
@@ -2283,6 +2489,27 @@ function laneTransferPrompt(from: string, to: string) {
   return `Update ${to.toUpperCase()} with ${from.toUpperCase()}?`;
 }
 
+function visualPatchBundleForVariant(
+  variant: PlanPreviewVariant,
+): VisualPatchBundle | null {
+  const bundle = variant.visualPatchBundle;
+  if (!bundle?.patches.length) return null;
+  const id = bundle.id?.trim() || `plan-preview-${variant.id}`;
+  return { id, patches: bundle.patches };
+}
+
+function reloadPreviewAfterFailedHotSwap(target: ElectronWebviewElement) {
+  try {
+    if (target.reloadIgnoringCache) {
+      target.reloadIgnoringCache();
+      return;
+    }
+    target.reload();
+  } catch {
+    // The existing failed selection state is the user-visible recovery surface.
+  }
+}
+
 function describeGuestInteractionState(state: GuestPreviewState | null) {
   if (!state) return "No temporary interaction recorded.";
   const clicked = state.clicks.length > 0 ? `; clicked ${state.clicks.join(", ")}` : "";
@@ -2293,7 +2520,7 @@ function cleanupScript() {
   return `
 (() => {
   try {
-    window.__codexVisualPatchRuntime?.clear?.();
+    ${buildVisualPatchClearScript()}
   } catch {
     // Preview-only visual patches are best-effort cleanup state.
   }

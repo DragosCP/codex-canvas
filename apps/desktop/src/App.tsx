@@ -40,6 +40,15 @@ import {
   type CanvasQuestion,
   type CanvasSurface,
 } from "./canvasActions";
+import {
+  buildStrategyForProposalBacking,
+  proposalBackingForPreviewArtifactKind,
+  type ProposalBacking,
+} from "./canvasProposalModel";
+import {
+  evaluateLiveDomPatchStaleness,
+  staleProposalBuildMessage,
+} from "./canvasProposalStaleness";
 import { useAppServerConnection } from "./hooks/useAppServerConnection";
 import { useAppServerEvents } from "./hooks/useAppServerEvents";
 import { useDocumentPreview } from "./hooks/useDocumentPreview";
@@ -66,6 +75,8 @@ import { desktopInvoke } from "./desktopBridge";
 import {
   parsePlanPreviewSpec,
   planPreviewDecisionSummary,
+  selectedPlanPreviewVariant,
+  selectedPlanPreviewVariantHasVisualPatchBundle,
   shouldOfferPlanPreview,
 } from "./planPreview";
 import {
@@ -94,6 +105,7 @@ import {
 import type {
   AppServerSnapshot,
   BackendMode,
+  CanvasVisualReferenceMeta,
   CodeProposalFileChange,
   CodeProposalOption,
   CodeProposalSet,
@@ -136,6 +148,7 @@ type SubmissionDraft = {
   cwdOverride?: string | null;
   openMockupsOnComplete?: boolean;
   liveOverlayProposalOnComplete?: boolean;
+  liveProposalAcceptedForBuildTurnId?: string | null;
   codeProposalOnComplete?: boolean;
   codeProposalHistoryOnComplete?: boolean;
   mockupHistoryOnComplete?: boolean;
@@ -161,14 +174,22 @@ type ProjectEmptyStatus = {
   ignoredEntries: string[];
 };
 
-type MockupsListResult = Omit<MockupPreviewSet, "projectId"> & {
+type MockupsListResult = Omit<
+  MockupPreviewSet,
+  "projectId" | "proposalBacking" | "buildStrategy"
+> & {
   projectPath: string;
 };
 
 type PreparedProposalWorkspaces = {
   proposalSetId: string;
+  registryId: string;
   rootPath: string;
-  options: Array<{ id: "A" | "B" | "C"; workspacePath: string }>;
+  options: Array<{
+    id: "A" | "B" | "C";
+    workspacePath: string;
+    previewOwnerId: string;
+  }>;
 };
 
 type CodeProposalAddOptionRequest = {
@@ -178,8 +199,10 @@ type CodeProposalAddOptionRequest = {
 
 type ProposalWorkspaceDiffResult = {
   proposalSetId: string;
+  registryId: string;
   optionId: "A" | "B" | "C";
   workspacePath: string;
+  previewOwnerId: string;
   changedFiles: CodeProposalFileChange[];
 };
 
@@ -971,6 +994,13 @@ export function App() {
     if (inspector.type !== "planPreview") return;
     const proposal = desktop.planProposals[inspector.proposalTurnId];
     if (proposal?.status === "pending" && proposal.previewSpec) return;
+    if (
+      proposal?.proposalKind === "live_proposal" &&
+      proposal.status === "accepted" &&
+      proposal.previewSpec
+    ) {
+      return;
+    }
     const projectId =
       proposal?.projectId && desktop.projects.some((project) => project.id === proposal.projectId)
         ? proposal.projectId
@@ -1215,6 +1245,14 @@ export function App() {
       setDesktop((current) => {
         const proposal = current.planProposals[turn.id];
         if (!proposal) return current;
+        const liveProposalBacking = draft.liveOverlayProposalOnComplete
+          ? liveProposalBackingForPreviewSpec(
+              previewSpec,
+              previewSpec?.variants[0]?.id ??
+                proposal.previewSelectedVariantId ??
+                null,
+            )
+          : proposal.proposalBacking;
         return {
           ...current,
           planProposals: {
@@ -1233,6 +1271,13 @@ export function App() {
                     visiblePrompt,
                     finalText,
                   ),
+              proposalBacking: draft.liveOverlayProposalOnComplete
+                ? liveProposalBacking
+                : proposal.proposalBacking,
+              buildStrategy:
+                draft.liveOverlayProposalOnComplete && liveProposalBacking
+                  ? buildStrategyForProposalBacking(liveProposalBacking)
+                  : proposal.buildStrategy,
               updatedAt: Date.now(),
             },
           },
@@ -1453,9 +1498,12 @@ export function App() {
     const now = Date.now();
     const previewSet: CodeProposalSet = {
       proposalSetId: prepared.proposalSetId,
+      registryId: prepared.registryId,
       projectId: project.id,
       threadId: activeThread?.id ?? null,
       turnId: null,
+      proposalBacking: "code_backed_workspace",
+      buildStrategy: "promote_code_workspace",
       rootPath: prepared.rootPath,
       originalPrompt,
       selectedOptionId: prepared.options[0]?.id ?? null,
@@ -1464,6 +1512,7 @@ export function App() {
         title: `Option ${option.id}`,
         summary: "Generating runnable proposal.",
         workspacePath: option.workspacePath,
+        previewOwnerId: option.previewOwnerId,
         status: "generating",
         changedFiles: [],
       })),
@@ -1513,6 +1562,7 @@ export function App() {
         title: `Option ${preparedOption.id}`,
         summary: "Generating runnable proposal.",
         workspacePath: preparedOption.workspacePath,
+        previewOwnerId: preparedOption.previewOwnerId,
         status: "generating",
         changedFiles: [],
       };
@@ -1522,6 +1572,7 @@ export function App() {
           ...current.codeProposalSets,
           [stored.proposalSetId]: {
             ...stored,
+            registryId: prepared.registryId || stored.registryId,
             rootPath: prepared.rootPath || stored.rootPath,
             selectedOptionId: preparedOption.id,
             options: sortCodeProposalOptions([
@@ -1671,6 +1722,7 @@ export function App() {
           const diff = diffs.find((candidate) => candidate.optionId === option.id);
           return {
             ...option,
+            previewOwnerId: diff?.previewOwnerId || option.previewOwnerId,
             status: "ready" as const,
             changedFiles: diff?.changedFiles ?? [],
             summary: codeProposalChangeSummary(diff?.changedFiles ?? []),
@@ -1769,11 +1821,19 @@ export function App() {
         }
         return;
       }
+      const proposalBacking = proposalBackingForPreviewArtifactKind(
+        result.artifactKind,
+      );
       const previewSet: MockupPreviewSet = {
         proposalSetId: result.proposalSetId || proposalSetId,
         projectId,
         threadId: result.threadId,
         artifactKind: result.artifactKind,
+        proposalBacking,
+        buildStrategy:
+          proposalBacking === "wireframe_artifact"
+            ? "implement_from_wireframe"
+            : "implement_from_mockup",
         baseDir: result.baseDir,
         originalPrompt: result.originalPrompt,
         depth: result.depth,
@@ -2058,6 +2118,10 @@ export function App() {
       ) {
         return current;
       }
+      const liveProposalBacking =
+        proposal.proposalKind === "live_proposal"
+          ? liveProposalBackingForPreviewSpec(proposal.previewSpec, variantId)
+          : proposal.proposalBacking;
       return {
         ...current,
         planProposals: {
@@ -2065,6 +2129,14 @@ export function App() {
           [proposalTurnId]: {
             ...proposal,
             previewSelectedVariantId: variantId,
+            proposalBacking:
+              proposal.proposalKind === "live_proposal"
+                ? liveProposalBacking
+                : proposal.proposalBacking,
+            buildStrategy:
+              proposal.proposalKind === "live_proposal" && liveProposalBacking
+                ? buildStrategyForProposalBacking(liveProposalBacking)
+                : proposal.buildStrategy,
             previewUserEditedAt: Date.now(),
             updatedAt: Date.now(),
           },
@@ -2112,6 +2184,9 @@ export function App() {
           [proposalTurnId]: {
             ...proposal,
             previewSession: session,
+            previewBaselineSession:
+              proposal.previewBaselineSession ??
+              (session?.cleanupStatus === "selected" ? session : null),
             updatedAt: Date.now(),
           },
         },
@@ -2129,7 +2204,7 @@ export function App() {
       label?: string;
       source?: ComposerAppPreviewContext["source"];
       highlightId?: string;
-    },
+    } & CanvasVisualReferenceMeta,
   ) {
     setComposerContexts((current) => {
       if (!areaMark) {
@@ -2173,6 +2248,21 @@ export function App() {
           meta.thumbnailDataUrl ?? existingContext?.thumbnailDataUrl,
         source,
         highlightId: meta.highlightId,
+        threadId: meta.threadId ?? existingContext?.threadId,
+        proposalTurnId:
+          meta.proposalTurnId ?? existingContext?.proposalTurnId,
+        proposalOptionId:
+          meta.proposalOptionId ?? existingContext?.proposalOptionId,
+        canvasLane: meta.canvasLane ?? existingContext?.canvasLane,
+        canvasId: meta.canvasId ?? existingContext?.canvasId,
+        sourceFile: meta.sourceFile ?? existingContext?.sourceFile,
+        componentName: meta.componentName ?? existingContext?.componentName,
+        screenshotRef: meta.screenshotRef ?? existingContext?.screenshotRef,
+        targetResolutionKind:
+          meta.targetResolutionKind ?? existingContext?.targetResolutionKind,
+        targetResolutionConfidence:
+          meta.targetResolutionConfidence ??
+          existingContext?.targetResolutionConfidence,
       };
       const withoutCurrentMark = current.filter(
         (context) =>
@@ -2623,7 +2713,7 @@ export function App() {
       desktop.activeThreadId != null
         ? latestActiveLiveProposalForThread(desktop, desktop.activeThreadId)
         : null;
-    const canvasResolution =
+    const rawCanvasResolution =
       !planModeWasOn && visiblePrompt
         ? resolveCanvasAction(
             canvasResolverInput({
@@ -2642,6 +2732,25 @@ export function App() {
             }, visiblePrompt),
           )
         : null;
+    const forceCodeBackedProposal =
+      !visualDecisionComposerAction &&
+      !selectedCodeProposalRoutingSet &&
+      visiblePrompt &&
+      isExplicitCodeBackedProposalRequest(visiblePrompt);
+    const canvasResolution =
+      forceCodeBackedProposal && rawCanvasResolution
+        ? {
+            ...rawCanvasResolution,
+            action: "CREATE_PROPOSAL" as const,
+            wantsOptions:
+              rawCanvasResolution.wantsOptions ||
+              isExplicitMultiOptionProposalRequest(visiblePrompt),
+            backingPreference: "code_backed_workspace" as const,
+            buildStrategy: "promote_code_workspace" as const,
+            reason:
+              "The user explicitly requested runnable proposal workspaces, so Canvas must use isolated code-backed proposals.",
+          }
+        : rawCanvasResolution;
     const decisionCanvasAction =
       visualDecisionComposerAction?.option.canvasAction ?? null;
     const addCodeProposalOptionRequest =
@@ -2671,6 +2780,7 @@ export function App() {
     let contexts = [...activeComposerContexts];
     let openMockupsOnComplete = false;
     let liveOverlayProposalOnComplete = false;
+    let liveProposalAcceptedForBuildTurnId: string | null = null;
     let codeProposalOnComplete = false;
     let codeProposalHistoryOnComplete = false;
     let mockupHistoryOnComplete = false;
@@ -2772,7 +2882,17 @@ export function App() {
       activeLiveProposal &&
       canvasResolution?.action === "BUILD_SELECTED"
     ) {
+      const proposalStaleness = liveProposalBuildStaleness(
+        activeLiveProposal,
+        activeProject,
+      );
+      if (proposalStaleness.stale) {
+        setSendError(staleProposalBuildMessage(proposalStaleness));
+        return;
+      }
+      liveProposalAcceptedForBuildTurnId = activeLiveProposal.turnId;
       prompt = liveOverlayProposalAcceptPrompt(
+        activeLiveProposal,
         planPreviewDecisionSummary(activeLiveProposal),
       );
       settings = { ...settings, planMode: false };
@@ -2870,8 +2990,8 @@ export function App() {
       mockupHistoryOnComplete = commitsToLive;
     } else if (canvasResolution?.action === "CREATE_PROPOSAL") {
       const wantsOptions = canvasResolution.wantsOptions;
-      const lane = canvasResolution.lanePreference ?? "live_overlay";
-      if (lane === "code_workspace") {
+      const backing = canvasResolution.backingPreference ?? "live_dom_patch";
+      if (backing === "code_backed_workspace") {
         proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
         const codeProposal = await prepareCodeProposalSet(
           activeProject,
@@ -2896,12 +3016,18 @@ export function App() {
           canvasResolution,
         );
         codeProposalOnComplete = true;
-      } else if (lane === "saved_mockup") {
+      } else if (
+        backing === "mockup_artifact" ||
+        backing === "wireframe_artifact"
+      ) {
         proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
-        artifactKind = explicitPreviewArtifactKind(
-          visiblePrompt,
-          wantsOptions ? "mockup" : "preview",
-        );
+        artifactKind =
+          backing === "wireframe_artifact"
+            ? "wireframe"
+            : explicitPreviewArtifactKind(
+                visiblePrompt,
+                wantsOptions ? "mockup" : "preview",
+              );
         prompt = savedPreviewArtifactPrompt(
           visiblePrompt,
           activeProject,
@@ -2953,6 +3079,7 @@ export function App() {
       cwdOverride,
       openMockupsOnComplete,
       liveOverlayProposalOnComplete,
+      liveProposalAcceptedForBuildTurnId,
       codeProposalOnComplete,
       codeProposalHistoryOnComplete,
       mockupHistoryOnComplete,
@@ -3098,7 +3225,17 @@ export function App() {
             previewSelectedVariantId: null,
             previewAreaMark: null,
             previewSession: null,
+            previewBaselineSession: null,
             previewUserEditedAt: undefined,
+            proposalBacking: draft.liveOverlayProposalOnComplete
+              ? "mockup_artifact"
+              : undefined,
+            proposalLifecycle: draft.liveOverlayProposalOnComplete
+              ? "shown"
+              : undefined,
+            buildStrategy: draft.liveOverlayProposalOnComplete
+              ? "implement_from_mockup"
+              : undefined,
             proposalKind: draft.liveOverlayProposalOnComplete
               ? "live_proposal"
               : "plan",
@@ -3211,10 +3348,19 @@ export function App() {
                 ),
                 [response.turn.id]: planProposal,
               }
-            : supersedePendingPlanProposals(
-                current.planProposals,
-                targetThread.id,
-              ),
+            : draft.liveProposalAcceptedForBuildTurnId
+              ? markLiveProposalAcceptedForBuild(
+                  supersedePendingPlanProposals(
+                    current.planProposals,
+                    targetThread.id,
+                    draft.liveProposalAcceptedForBuildTurnId,
+                  ),
+                  draft.liveProposalAcceptedForBuildTurnId,
+                )
+              : supersedePendingPlanProposals(
+                  current.planProposals,
+                  targetThread.id,
+                ),
           projects: current.projects.map((stored) =>
             stored.id === project.id
               ? { ...stored, lastActiveThreadId: targetThread.id }
@@ -3253,21 +3399,48 @@ export function App() {
       setSendError("That plan belongs to a project that is no longer available.");
       return;
     }
+    const isLiveProposal = latestProposal.proposalKind === "live_proposal";
+    if (isLiveProposal) {
+      const proposalStaleness = liveProposalBuildStaleness(
+        latestProposal,
+        project,
+      );
+      if (proposalStaleness.stale) {
+        setSendError(staleProposalBuildMessage(proposalStaleness));
+        return;
+      }
+    }
     const acceptedPreviewContext = planPreviewDecisionSummary(latestProposal);
+    const contexts = isLiveProposal
+      ? dedupeComposerContexts([
+          ...latestProposal.contexts,
+          ...composerContextsForProject(composerContexts, project.id),
+        ])
+      : latestProposal.contexts;
     const accepted = await sendDraft(
       {
-        prompt: planProposalAcceptPrompt(acceptedPreviewContext),
-        visiblePrompt: "I accept this plan. Implement it now.",
+        prompt: isLiveProposal
+          ? liveOverlayProposalAcceptPrompt(
+              latestProposal,
+              acceptedPreviewContext,
+            )
+          : planProposalAcceptPrompt(acceptedPreviewContext),
+        visiblePrompt: isLiveProposal
+          ? "Build selected."
+          : "I accept this plan. Implement it now.",
         projectId: project.id,
         settings: {
           ...project.settings,
           planMode: false,
         },
         attachments: [],
-        contexts: latestProposal.contexts,
+        contexts,
         createdAt: Date.now(),
         localDraftProjectId: null,
         targetThreadId: latestProposal.threadId,
+        liveProposalAcceptedForBuildTurnId: isLiveProposal
+          ? latestProposal.turnId
+          : null,
       },
       { clearComposer: false, desktopOverride: desktop },
     );
@@ -3279,11 +3452,16 @@ export function App() {
     });
     setDesktop((current) => ({
       ...current,
-      planProposals: updatePlanProposalStatus(
-        current.planProposals,
-        latestProposal.turnId,
-        "accepted",
-      ),
+      planProposals: isLiveProposal
+        ? markLiveProposalAcceptedForBuild(
+            current.planProposals,
+            latestProposal.turnId,
+          )
+        : updatePlanProposalStatus(
+            current.planProposals,
+            latestProposal.turnId,
+            "accepted",
+          ),
       projects: current.projects.map((candidate) =>
         candidate.id === project.id
           ? {
@@ -3455,6 +3633,7 @@ export function App() {
         input,
         approvalPolicy: settings.approvalPolicy,
         sandboxPolicy: sandboxPolicyFor(settings.sandbox, cwd),
+        ...(settings.planMode ? { planningOnly: true } : {}),
         model: settings.model,
         effort: settings.effort,
         serviceTier: settings.serviceTier,
@@ -4986,6 +5165,27 @@ function isLiveOverlayProposalPrompt(prompt: string) {
   return prompt.trimStart().startsWith(LIVE_OVERLAY_PROPOSAL_SENTINEL);
 }
 
+function isExplicitCodeBackedProposalRequest(prompt: string) {
+  const text = prompt.toLowerCase().replace(/\s+/g, " ").trim();
+  return (
+    /\bproposal workspaces?\b/.test(text) ||
+    /\brunnable\s+(?:option|options|proposal|proposals|candidate|candidates|app|apps)\b/.test(
+      text,
+    ) ||
+    /\bcode[-\s]?backed\s+(?:option|options|proposal|proposals)\b/.test(text)
+  );
+}
+
+function isExplicitMultiOptionProposalRequest(prompt: string) {
+  const text = prompt.toLowerCase().replace(/\s+/g, " ").trim();
+  return (
+    /\b(?:two|three|2|3)\s+(?:(?:different|runnable|reviewable|visual|separate)\s+){0,4}(?:options|directions|variants|proposals|candidates|layouts|previews|mockups|wireframes)\b/.test(
+      text,
+    ) ||
+    /\b(?:a\/b|a\/b\/c|abc|a,\s*b,?\s*(?:and\s+)?c)\b/.test(text)
+  );
+}
+
 function isMockupReviewPrompt(prompt: string) {
   return prompt.trimStart().startsWith(SAVED_MOCKUP_REVIEW_SENTINEL);
 }
@@ -5319,6 +5519,16 @@ function liveAppReviewContext(
     lines.push("- Attached marks:");
     for (const mark of appMarks) {
       const area = mark.areaMark;
+      const target = [
+        mark.proposalTurnId ? `proposal=${quotePromptValue(mark.proposalTurnId, 80)}` : "",
+        mark.proposalOptionId ? `option=${mark.proposalOptionId}` : "",
+        mark.canvasLane ? `lane=${mark.canvasLane}` : "",
+        mark.canvasId ? `canvasId=${quotePromptValue(mark.canvasId, 80)}` : "",
+        mark.sourceFile ? `sourceFile=${quotePromptValue(mark.sourceFile, 120)}` : "",
+        mark.componentName ? `component=${quotePromptValue(mark.componentName, 80)}` : "",
+      ]
+        .filter(Boolean)
+        .join(" ");
       lines.push(
         `  - ${mark.markLabel || "Mark"} route=${quotePromptValue(
           area.route ?? mark.previewUrl,
@@ -5331,7 +5541,7 @@ function liveAppReviewContext(
           area.height,
         )} size=${Math.round(area.viewportWidth)}x${Math.round(
           area.viewportHeight,
-        )}`,
+        )}${target ? ` ${target}` : ""}`,
       );
     }
   }
@@ -5413,8 +5623,10 @@ function canvasActiveProposalSet(state: {
   ) {
     return {
       id: state.selectedCodeProposalSet.proposalSetId,
-      lane: "code_workspace",
+      backing: state.selectedCodeProposalSet.proposalBacking,
+      buildStrategy: state.selectedCodeProposalSet.buildStrategy,
       lifecycle: "active",
+      proposalLifecycle: "shown",
       selectedOptionId: state.selectedCodeProposalSet.selectedOptionId,
       options: state.selectedCodeProposalSet.options.map((option) => ({
         id: option.id,
@@ -5431,8 +5643,10 @@ function canvasActiveProposalSet(state: {
     const total = state.selectedMockupPreviewSet.mockups.length;
     return {
       id: state.selectedMockupPreviewSet.proposalSetId,
-      lane: "saved_mockup",
+      backing: state.selectedMockupPreviewSet.proposalBacking,
+      buildStrategy: state.selectedMockupPreviewSet.buildStrategy,
       lifecycle: "active",
+      proposalLifecycle: "shown",
       selectedOptionId: mockupCanvasOptionId(
         state.selectedMockupPreviewSet,
         state.selectedMockupPreviewSet.selectedMockupId,
@@ -5452,8 +5666,11 @@ function canvasActiveProposalSet(state: {
     const variants = state.activeLiveProposal.previewSpec?.variants ?? [];
     return {
       id: state.activeLiveProposal.turnId,
-      lane: "live_overlay",
+      backing: state.activeLiveProposal.proposalBacking ?? "live_dom_patch",
+      buildStrategy:
+        state.activeLiveProposal.buildStrategy ?? "convert_dom_patch_to_code",
       lifecycle: "active",
+      proposalLifecycle: state.activeLiveProposal.proposalLifecycle ?? "shown",
       selectedOptionId:
         variants.length <= 1
           ? "A"
@@ -5486,8 +5703,11 @@ function canvasHistoricalProposalSets(state: {
     )
     .map((proposal): CanvasProposalState => ({
       id: proposal.proposalSetId,
-      lane: "code_workspace",
+      backing: proposal.proposalBacking,
+      buildStrategy: proposal.buildStrategy,
       lifecycle: proposal.status === "applied" ? "accepted" : "history",
+      proposalLifecycle:
+        proposal.status === "applied" ? "promoted_to_live" : "archived",
       selectedOptionId: proposal.selectedOptionId,
       options: proposal.options.map((option) => ({
         id: option.id,
@@ -5503,8 +5723,10 @@ function canvasHistoricalProposalSets(state: {
       ? [
           {
             id: state.selectedMockupPreviewSet.proposalSetId,
-            lane: "saved_mockup" as const,
+            backing: state.selectedMockupPreviewSet.proposalBacking,
+            buildStrategy: state.selectedMockupPreviewSet.buildStrategy,
             lifecycle: "history" as const,
+            proposalLifecycle: "archived" as const,
             selectedOptionId: mockupCanvasOptionId(
               state.selectedMockupPreviewSet,
               state.selectedMockupPreviewSet.selectedMockupId,
@@ -5523,7 +5745,38 @@ function canvasHistoricalProposalSets(state: {
           },
         ]
       : [];
-  return [...codeHistory, ...mockupHistory];
+  const liveProposalHistory = Object.values(state.desktop.planProposals)
+    .filter(
+      (proposal) =>
+        proposal.projectId === state.activeProjectId &&
+        proposal.proposalKind === "live_proposal" &&
+        proposal.status === "accepted" &&
+        Boolean(proposal.previewSpec),
+    )
+    .map((proposal): CanvasProposalState => {
+      const variants = proposal.previewSpec?.variants ?? [];
+      return {
+        id: proposal.turnId,
+        backing: proposal.proposalBacking ?? "live_dom_patch",
+        buildStrategy: proposal.buildStrategy ?? "convert_dom_patch_to_code",
+        lifecycle: "accepted",
+        proposalLifecycle:
+          proposal.proposalLifecycle ?? "accepted_for_build",
+        selectedOptionId:
+          variants.length <= 1
+            ? "A"
+            : planVariantCanvasSurface(proposal.previewSelectedVariantId),
+        options:
+          variants.length > 0
+            ? variants.map((variant) => ({
+                id: (variants.length <= 1 ? "A" : variant.id) as CanvasSurface,
+                title: variant.title,
+                hasAgentMarks: Boolean(variant.highlights?.length),
+              }))
+            : [{ id: "A" }],
+      };
+    });
+  return [...codeHistory, ...mockupHistory, ...liveProposalHistory];
 }
 
 function selectedCanvasSurface(state: {
@@ -5744,7 +5997,7 @@ function codeProposalSetIsActiveForRouting(
   );
 }
 
-function shouldRecoverAppliedCodeProposalFromThread(
+export function shouldRecoverAppliedCodeProposalFromThread(
   previewSet: CodeProposalSet,
   thread: Thread,
 ) {
@@ -5754,10 +6007,9 @@ function shouldRecoverAppliedCodeProposalFromThread(
   );
   if (proposalTurnIndex < 0) return false;
   const selectedOptionId = previewSet.selectedOptionId ?? previewSet.options[0]?.id ?? null;
-  const candidateTurns = [
-    thread.turns[proposalTurnIndex],
-    ...thread.turns.slice(proposalTurnIndex + 1),
-  ].filter((turn): turn is Turn => Boolean(turn));
+  const candidateTurns = thread.turns
+    .slice(proposalTurnIndex + 1)
+    .filter((turn): turn is Turn => Boolean(turn));
   return candidateTurns.some((turn) => {
     if (turn.status !== "completed") return false;
     const userText = turn.items
@@ -6373,6 +6625,73 @@ function updatePlanProposalStatus(
   };
 }
 
+function markLiveProposalAcceptedForBuild(
+  proposals: Record<string, PlanProposal>,
+  turnId: string,
+) {
+  const proposal = proposals[turnId];
+  if (!proposal) return proposals;
+  return {
+    ...proposals,
+    [turnId]: {
+      ...proposal,
+      status: "accepted" as const,
+      proposalLifecycle: "accepted_for_build" as const,
+      proposalBacking:
+        proposal.proposalBacking ?? liveProposalBackingForPreview(proposal),
+      buildStrategy:
+        proposal.buildStrategy ??
+        buildStrategyForProposalBacking(liveProposalBackingForPreview(proposal)),
+      updatedAt: Date.now(),
+    },
+  };
+}
+
+function liveProposalBuildStaleness(
+  proposal: PlanProposal,
+  project: Project,
+) {
+  const selectedVariant = selectedPlanPreviewVariant(
+    proposal.previewSpec,
+    proposal.previewSelectedVariantId,
+  );
+  return evaluateLiveDomPatchStaleness({
+    proposalProjectId: proposal.projectId,
+    currentProjectId: project.id,
+    proposalBacking: proposal.proposalBacking,
+    buildStrategy: proposal.buildStrategy,
+    variant: selectedVariant,
+    bundle: selectedVariant?.visualPatchBundle ?? null,
+    baselineSession: proposal.previewBaselineSession ?? null,
+    currentSession: proposal.previewSession ?? null,
+    currentPreviewUrl:
+      rememberedPreviewUrlForProject(project.id) ||
+      proposal.previewSession?.previewUrl ||
+      null,
+    currentRoute: proposal.previewSession?.route ?? null,
+    currentViewport: proposal.previewSession?.viewport ?? null,
+  });
+}
+
+function liveProposalBackingForPreview(proposal: PlanProposal): ProposalBacking {
+  return liveProposalBackingForPreviewSpec(
+    proposal.previewSpec,
+    proposal.previewSelectedVariantId ?? null,
+  );
+}
+
+function liveProposalBackingForPreviewSpec(
+  previewSpec: PlanProposal["previewSpec"],
+  selectedVariantId: string | null,
+): Extract<ProposalBacking, "live_dom_patch" | "mockup_artifact"> {
+  return selectedPlanPreviewVariantHasVisualPatchBundle(
+    previewSpec,
+    selectedVariantId,
+  )
+    ? "live_dom_patch"
+    : "mockup_artifact";
+}
+
 function supersedePendingPlanProposals(
   proposals: Record<string, PlanProposal>,
   threadId: string,
@@ -6520,18 +6839,69 @@ function planProposalAcceptPrompt(attachedPreview = "") {
   ].join("\n");
 }
 
-function liveOverlayProposalAcceptPrompt(attachedPreview = "") {
+function liveOverlayProposalAcceptPrompt(
+  proposal: PlanProposal,
+  attachedPreview = "",
+) {
   const previewText = attachedPreview.trim();
-  if (!previewText) {
-    return "I accept this proposal. Implement it now.";
-  }
+  const selectedVariant = selectedPlanPreviewVariant(
+    proposal.previewSpec,
+    proposal.previewSelectedVariantId,
+  );
+  const patchBundle = selectedVariant?.visualPatchBundle ?? null;
+  const patchText = patchBundle
+    ? JSON.stringify(patchBundle, null, 2)
+    : "";
+  const backing = proposal.proposalBacking ?? liveProposalBackingForPreview(proposal);
+  const buildStrategy =
+    proposal.buildStrategy ?? buildStrategyForProposalBacking(backing);
+  const buildGuidance =
+    buildStrategy === "convert_dom_patch_to_code"
+      ? [
+          "The accepted proposal is a preview-only visual patch. Convert it into real source edits in the current project using existing component, styling, and state-management conventions.",
+          "Treat style/text/hide/show patch operations as the desired visual outcome, not as instructions to paste inline styles or mutate the DOM directly.",
+          "Do not introduce inline-style sludge unless the existing local code already uses that convention for the touched component.",
+          "Use canvasId, sourceFile, componentName, screenshot, bounds, route, and viewport metadata as hints. Inspect the project before making source-level claims or edits.",
+        ]
+      : [
+          "The accepted proposal is visual guidance, not a recorded DOM patch. Implement the selected outcome in real source edits using the proposal summary, highlights, route, viewport, and attached preview context as guidance.",
+          "Inspect the current project before making source-level claims or edits.",
+        ];
+  const highlights =
+    selectedVariant?.highlights
+      ?.map((highlight) => {
+        const source = [
+          highlight.canvasId ? `canvasId=${highlight.canvasId}` : "",
+          highlight.sourceFile ? `sourceFile=${highlight.sourceFile}` : "",
+          highlight.componentName ? `component=${highlight.componentName}` : "",
+          highlight.screenshotRef ? `screenshotRef=${highlight.screenshotRef}` : "",
+        ]
+          .filter(Boolean)
+          .join(" ");
+        return `- ${highlight.label}: ${highlight.note}${source ? ` (${source})` : ""}`;
+      })
+      .join("\n") ?? "";
   return [
-    "I accept this proposal. Implement it now.",
+    "Build selected.",
     "",
     "Project context explicitly attached by the user:",
     "Selected live app proposal guidance. This supports the accepted change; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
     "",
-    previewText,
+    `Build selected strategy: ${buildStrategy}.`,
+    ...buildGuidance,
+    "Do not add Codex proposal chrome, banners, fake controls, or temporary preview metadata to the accepted app UI.",
+    "Do not start or stop local preview servers from this implementation turn; the App Preview toolbar owns that.",
+    "After editing, summarize the source changes and mention any mismatch or uncertainty versus the accepted preview.",
+    "",
+    `Original proposal request: ${proposal.prompt}`,
+    selectedVariant
+      ? `Selected option: ${selectedVariant.id} - ${selectedVariant.title}`
+      : "Selected option: A",
+    patchText
+      ? `Accepted VisualPatch bundle:\n${patchText}`
+      : "Accepted VisualPatch bundle: none recorded; use the selected proposal summary and attached visual references.",
+    highlights ? `Proposal change highlights:\n${highlights}` : "",
+    previewText ? `Selected preview context:\n${previewText}` : "",
   ].join("\n");
 }
 
@@ -6597,7 +6967,7 @@ function promptWithComposerContexts(
     "The user-visible request remains authoritative. Use the attached context only as supporting visual guidance.",
     "Use only the attached context unless the user asks you to inspect more.",
     hasAppPreview
-      ? "For @AppMark context, treat the rectangle as a user-marked area in the live app preview. Use it as visual intent for placement, hierarchy, or UX feedback; do not claim exact DOM nodes unless you inspect the project."
+      ? "For @AppMark context, treat the rectangle as visual intent in the live app preview. When target metadata such as canvasId, sourceFile, or component is present, use it as supporting evidence for the visual reference; still inspect the project before making source-level claims."
       : null,
     hasMockupPreview
       ? "For @MockupMark context, treat each named rectangle as user feedback on a saved mockup option. Proposal highlights are adjustable suggested areas, while user marks are explicit user-drawn areas. Use mark names, option labels, selected files, and rectangles to revise, combine, or build the desired direction; do not claim exact DOM nodes unless you inspect the saved mockup file."
@@ -6628,6 +6998,39 @@ function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
   ];
   if (context.highlightId) {
     lines.push(`highlightId=${quotePromptValue(context.highlightId, 80)}`);
+  }
+  if (context.threadId) {
+    lines.push(`threadId=${quotePromptValue(context.threadId, 120)}`);
+  }
+  if (context.proposalTurnId) {
+    lines.push(
+      `proposalTurnId=${quotePromptValue(context.proposalTurnId, 120)}`,
+    );
+  }
+  if (context.proposalOptionId) {
+    lines.push(`option=${quotePromptValue(context.proposalOptionId, 20)}`);
+  }
+  if (context.canvasLane) {
+    lines.push(`lane=${quotePromptValue(context.canvasLane, 20)}`);
+  }
+  if (context.canvasId) {
+    lines.push(`canvasId=${quotePromptValue(context.canvasId, 120)}`);
+  }
+  if (context.sourceFile) {
+    lines.push(`sourceFile=${quotePromptValue(context.sourceFile, 180)}`);
+  }
+  if (context.componentName) {
+    lines.push(`component=${quotePromptValue(context.componentName, 120)}`);
+  }
+  if (context.screenshotRef) {
+    lines.push(`screenshotRef=${quotePromptValue(context.screenshotRef, 160)}`);
+  }
+  if (context.targetResolutionKind || context.targetResolutionConfidence) {
+    lines.push(
+      `targetResolution=${context.targetResolutionKind ?? "unknown"}/${
+        context.targetResolutionConfidence ?? "unknown"
+      }`,
+    );
   }
   if (mark.note.trim()) {
     lines.push(`note="${quotePromptValue(mark.note.trim(), 180)}"`);

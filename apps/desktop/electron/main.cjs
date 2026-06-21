@@ -8,6 +8,7 @@ const path = require("node:path");
 const {
   addProposalWorkspaceOption,
   applyProposalWorkspace,
+  cleanupProposalRegistry,
   diffProposalWorkspace,
   prepareProposalWorkspaces,
 } = require("./proposal-workspaces.cjs");
@@ -163,6 +164,12 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
       return applyProposalWorkspace({
         projectPath: nativeFilePath(String(args.projectPath ?? "")),
         workspacePath: nativeFilePath(String(args.workspacePath ?? "")),
+      });
+    case "proposal_workspace_cleanup":
+      return cleanupProposalRegistry(proposalWorkspacesRoot(), {
+        keepSetIds: Array.isArray(args.keepSetIds)
+          ? args.keepSetIds.map(String)
+          : [],
       });
     case "workspace_progress_snapshot":
       return workspaceProgressSnapshot(args);

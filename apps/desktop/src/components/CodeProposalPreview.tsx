@@ -1,5 +1,6 @@
 import { GitBranch } from "lucide-react";
 import { useEffect, useMemo, useState } from "react";
+import { evaluateCodeWorkspaceStaleness } from "../canvasProposalStaleness";
 import type {
   CodeProposalOption,
   CodeProposalSet,
@@ -81,7 +82,9 @@ export function CodeProposalPreview(props: {
     if (!project || !previewSet || !activeOption) return project;
     return {
       ...project,
-      id: `${project.id}:code-proposal:${previewSet.proposalSetId}:${activeOption.id}`,
+      id:
+        activeOption.previewOwnerId ||
+        `${project.id}:code-proposal:${previewSet.proposalSetId}:${activeOption.id}`,
       path: activeOption.workspacePath,
       name: `${project.name} proposal ${activeOption.id}`,
     };
@@ -132,6 +135,20 @@ export function CodeProposalPreview(props: {
   const proposal = activeOption
     ? codeProposalPreviewProposal(project, previewSet, activeOption)
     : null;
+  const workspaceStaleness = activeOption
+    ? evaluateCodeWorkspaceStaleness({
+        proposalProjectId: previewSet.projectId,
+        currentProjectId: project.id,
+        rootPath: previewSet.rootPath,
+        workspacePath: activeOption.workspacePath,
+        previewOwnerId: activeOption.previewOwnerId,
+        currentPreviewOwnerId: selectedProject.id,
+      })
+    : null;
+  const buildTitle =
+    workspaceStaleness?.stale
+      ? workspaceStaleness.message
+      : "Build the selected proposal into Live";
 
   return (
     <LiveAppPreview
@@ -152,11 +169,12 @@ export function CodeProposalPreview(props: {
         activeOption
           ? {
               autoStart: true,
-              buildDisabled: !canApply,
+              buildDisabled: !canApply || Boolean(workspaceStaleness?.stale),
               buildLabel:
                 activeOption.status === "applying"
                   ? "Building"
                   : "Build selected",
+              buildTitle,
               onBuild: () => props.onBuild(previewSet, activeOption),
             }
           : undefined
@@ -259,6 +277,11 @@ export function codeProposalPreviewProposal(
     previewSelectedVariantId: option.id,
     previewAreaMark: null,
     previewSession: null,
+    previewBaselineSession: null,
+    proposalBacking: "code_backed_workspace",
+    proposalLifecycle:
+      previewSet.status === "applied" ? "promoted_to_live" : "shown",
+    buildStrategy: "promote_code_workspace",
     proposalKind: "live_proposal",
     status: "pending",
     createdAt: previewSet.createdAt || now,

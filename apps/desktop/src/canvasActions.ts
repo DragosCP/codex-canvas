@@ -1,3 +1,10 @@
+import {
+  buildStrategyForProposalBacking,
+  type BuildSelectedStrategy,
+  type ProposalBacking,
+  type ProposalLifecycle,
+} from "./canvasProposalModel";
+
 export type CanvasAction =
   | "ASK_USER"
   | "CREATE_PROPOSAL"
@@ -10,11 +17,6 @@ export type CanvasAction =
 export type CanvasSurface = "Live" | "A" | "B" | "C";
 
 export type CanvasOptionId = "A" | "B" | "C";
-
-export type CanvasProposalLane =
-  | "live_overlay"
-  | "saved_mockup"
-  | "code_workspace";
 
 export type CanvasProposalLifecycle =
   | "active"
@@ -37,8 +39,10 @@ export type CanvasProposalOptionState = {
 
 export type CanvasProposalState = {
   id: string;
-  lane: CanvasProposalLane;
+  backing: ProposalBacking;
+  buildStrategy: BuildSelectedStrategy;
   lifecycle: CanvasProposalLifecycle;
+  proposalLifecycle?: ProposalLifecycle;
   selectedOptionId: CanvasSurface | null;
   options: CanvasProposalOptionState[];
 };
@@ -76,7 +80,8 @@ export type CanvasActionResolution = {
   targetOptionId?: CanvasOptionId;
   sourceOptionId?: CanvasOptionId;
   wantsOptions: boolean;
-  lanePreference?: CanvasProposalLane;
+  backingPreference?: ProposalBacking;
+  buildStrategy?: BuildSelectedStrategy;
   question?: CanvasQuestion;
 };
 
@@ -191,6 +196,8 @@ export function resolveCanvasAction(
         targetSurface: target ?? activeProposal.selectedOptionId ?? input.selectedSurface,
         targetOptionId: target ?? undefined,
         wantsOptions: false,
+        backingPreference: activeProposal.backing,
+        buildStrategy: activeProposal.buildStrategy,
       };
     }
 
@@ -217,7 +224,8 @@ export function resolveCanvasAction(
         targetOptionId: target,
         sourceOptionId: sourceOptionId ?? selectedOptionId ?? undefined,
         wantsOptions: true,
-        lanePreference: activeProposal.lane,
+        backingPreference: activeProposal.backing,
+        buildStrategy: activeProposal.buildStrategy,
       };
     }
 
@@ -235,7 +243,8 @@ export function resolveCanvasAction(
         targetSurface: target ?? activeProposal.selectedOptionId ?? input.selectedSurface,
         targetOptionId: target ?? undefined,
         wantsOptions: false,
-        lanePreference: activeProposal.lane,
+        backingPreference: activeProposal.backing,
+        buildStrategy: activeProposal.buildStrategy,
       };
     }
   }
@@ -252,7 +261,7 @@ export function resolveCanvasAction(
 
   const wantsOptions = isExplicitOptionsRequest(normalized);
   const wantsPreview = isExplicitPreviewRequest(normalized);
-  const lanePreference = chooseLanePreference(input, normalized, wantsOptions);
+  const backingPreference = chooseBackingPreference(input, normalized, wantsOptions);
 
   if (!input.live.exists) {
     if (wantsOptions || wantsPreview || hasCanvasMention(message)) {
@@ -264,7 +273,8 @@ export function resolveCanvasAction(
           : "The user explicitly asked for a Canvas preview before a Live app exists.",
         baseSurface: "Live",
         wantsOptions,
-        lanePreference,
+        backingPreference,
+        buildStrategy: buildStrategyForProposalBacking(backingPreference),
       };
     }
     return askUserResolution(
@@ -291,7 +301,8 @@ export function resolveCanvasAction(
         : "The user asked for a visual proposal based on Live.",
       baseSurface: "Live",
       wantsOptions,
-      lanePreference,
+      backingPreference,
+      buildStrategy: buildStrategyForProposalBacking(backingPreference),
     };
   }
 
@@ -309,7 +320,8 @@ export function resolveCanvasAction(
     reason: "The request is visual and Live exists, so create one Canvas proposal by default.",
     baseSurface: "Live",
     wantsOptions: false,
-    lanePreference,
+    backingPreference,
+    buildStrategy: buildStrategyForProposalBacking(backingPreference),
   };
 }
 
@@ -327,8 +339,11 @@ export function canvasActionSummary(resolution: CanvasActionResolution) {
       ? `- Source option: ${resolution.sourceOptionId}`
       : null,
     `- Wants options: ${resolution.wantsOptions ? "yes" : "no"}`,
-    resolution.lanePreference
-      ? `- Preferred proposal lane: ${resolution.lanePreference}`
+    resolution.backingPreference
+      ? `- Preferred proposal backing: ${resolution.backingPreference}`
+      : null,
+    resolution.buildStrategy
+      ? `- Build selected strategy: ${resolution.buildStrategy}`
       : null,
     `- Resolver reason: ${resolution.reason}`,
   ]
@@ -347,21 +362,21 @@ function askUserResolution(
     reason,
     baseSurface: input.live.exists ? "Live" : input.selectedSurface,
     wantsOptions: false,
-    lanePreference: questionLanePreference(input),
+    backingPreference: questionBackingPreference(input),
     question,
   };
 }
 
-function questionLanePreference(
+function questionBackingPreference(
   input: CanvasActionResolverInput,
-): CanvasProposalLane {
+): ProposalBacking {
   const activeProposal =
     input.activeProposalSet?.lifecycle === "active"
       ? input.activeProposalSet
       : null;
-  if (activeProposal) return activeProposal.lane;
+  if (activeProposal) return activeProposal.backing;
   const normalized = normalize(input.message);
-  return chooseLanePreference(input, normalized, isExplicitOptionsRequest(normalized));
+  return chooseBackingPreference(input, normalized, isExplicitOptionsRequest(normalized));
 }
 
 function noLiveQuestion(message: string): CanvasQuestion {
@@ -397,26 +412,28 @@ function replacementQuestion(
   };
 }
 
-function chooseLanePreference(
+function chooseBackingPreference(
   input: CanvasActionResolverInput,
   normalized: string,
   wantsOptions: boolean,
-): CanvasProposalLane {
-  if (!input.live.exists) return "code_workspace";
+): ProposalBacking {
+  if (!input.live.exists) return "code_backed_workspace";
   if (/\b(mockup|mockups|wireframe|wireframes|static html|standalone html)\b/.test(normalized)) {
-    return "saved_mockup";
+    return /\bwireframe|wireframes\b/.test(normalized)
+      ? "wireframe_artifact"
+      : "mockup_artifact";
   }
   if (
-    /\b(runnable proposal|proposal workspace|candidate app|new page|new route|new view|multi[-\s]?page|whole app|entire app|full redesign|navigation structure|multi[-\s]?step workflow|real routing|route and state)\b/.test(
+    /\b(runnable\s+(?:option|options|proposal|proposals|candidate|candidates|app|apps)|proposal workspace|candidate app|new page|new route|new view|multi[-\s]?page|whole app|entire app|full redesign|navigation structure|multi[-\s]?step workflow|real routing|route and state)\b/.test(
       normalized,
     )
   ) {
-    return "code_workspace";
+    return "code_backed_workspace";
   }
   if (wantsOptions && isStructuralVisualRequest(normalized)) {
-    return "code_workspace";
+    return "code_backed_workspace";
   }
-  return "live_overlay";
+  return "live_dom_patch";
 }
 
 function normalize(value: string) {
@@ -431,7 +448,7 @@ function isVisualCanvasRequest(message: string) {
   const text = normalize(message);
   if (isNonVisualOperationalRequest(text)) return false;
   return (
-    /\b(ui|ux|visual|app|site|product|dashboard|screen|page|view|layout|style|styling|navigation|nav|workflow|interaction|onboarding|empty state|placement|screenshot|mark|preview|proposal|mockup|wireframe|option|variant|direction|compare|show me|where should|put it|move it|make it smaller|make it larger|button|menu|panel|modal|drawer|popover|dialog|settings|toolbar|header|footer|card|table|list|filter|tab|sidebar|form)\b/.test(
+    /\b(ui|ux|visual|app|site|product|dashboard|screen|page|view|layout|style|styling|navigation|nav|workflow|interaction|onboarding|empty state|placement|screenshot|mark|preview|previews|proposal|proposals|mockup|mockups|wireframe|wireframes|option|options|variant|variants|direction|directions|candidate|candidates|compare|show me|where should|put it|move it|make it smaller|make it larger|button|menu|panel|modal|drawer|popover|dialog|settings|toolbar|header|footer|card|table|list|filter|tab|sidebar|form)\b/.test(
       text,
     ) || /\b[abc]\/[abc](?:\/[abc])?\b/.test(text)
   );
@@ -445,11 +462,11 @@ function isNonVisualOperationalRequest(text: string) {
 
 function isExplicitOptionsRequest(text: string) {
   return (
-    /\b(?:show|create|give|make|generate|try|compare)\s+(?:me\s+)?(?:\d+(?:\s*-\s*\d+)?|two|three|2|3)?\s*(?:options|directions|variants|mockups|wireframes|layouts|previews|concepts)\b/.test(
+    /\b(?:show|create|give|make|generate|try|compare)\s+(?:me\s+)?(?:\d+(?:\s*-\s*\d+)?|two|three|2|3)?(?:\s+[a-z0-9-]+){0,4}\s+(?:options|directions|variants|proposals|candidates|mockups|wireframes|layouts|previews|concepts)\b/.test(
       text,
     ) ||
-    /\b(?:a\/b|a\/b\/c|abc)\b/.test(text) ||
-    /\b(?:two|three|2|3)\s+(?:different\s+)?(?:options|directions|variants|layouts|previews|mockups|wireframes)\b/.test(
+    /\b(?:a\/b|a\/b\/c|abc|a,\s*b,?\s*(?:and\s+)?c)\b/.test(text) ||
+    /\b(?:two|three|2|3)\s+(?:(?:different|runnable|reviewable|visual|separate)\s+){0,4}(?:options|directions|variants|proposals|candidates|layouts|previews|mockups|wireframes)\b/.test(
       text,
     )
   );

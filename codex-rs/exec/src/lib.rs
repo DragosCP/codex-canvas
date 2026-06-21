@@ -779,6 +779,7 @@ async fn run_exec_session(args: ExecRunArgs) -> anyhow::Result<()> {
                         approvals_reviewer: None,
                         sandbox_policy: None,
                         permissions: None,
+                        planning_only: false,
                         model: None,
                         service_tier: None,
                         effort: default_effort,

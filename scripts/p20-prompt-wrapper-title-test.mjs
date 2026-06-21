@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
@@ -45,6 +45,20 @@ try {
         "Improve the dashboard navigation",
       ].join("\n"),
       expected: "Improve the dashboard navigation",
+    },
+    {
+      name: "Live overlay proposal",
+      input: [
+        "[Codex Live Overlay Proposal Context]",
+        "",
+        "Resolved Canvas action:",
+        "- Canvas action: CREATE_PROPOSAL",
+        "",
+        "Original user request:",
+        "Give me three runnable options to build as proposals A, B, and C.",
+      ].join("\n"),
+      expected:
+        "Give me three runnable options to build as proposals A, B, and C.",
     },
     {
       name: "Saved preview artifact creation",
@@ -136,6 +150,21 @@ try {
     });
     assert.equal(actual, testCase.expected, testCase.name);
   }
+
+  const appSource = readFileSync(
+    path.join(repoRoot, "apps/desktop/src/App.tsx"),
+    "utf8",
+  );
+  assert.match(
+    appSource,
+    /draft\.settings\.planMode\s*\?\s*promptWithPlanModeContext\(userPrompt\)/,
+    "Plan Mode must keep using the planning prompt wrapper.",
+  );
+  assert.match(
+    appSource,
+    /\.\.\.\(settings\.planMode\s*\?\s*\{\s*planningOnly:\s*true\s*\}\s*:\s*\{\}\)/,
+    "Plan Mode turns must ask app-server for planning-only enforcement.",
+  );
 
   console.log("P20 prompt wrapper visible-title check passed.");
 } finally {

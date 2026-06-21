@@ -125,6 +125,8 @@
 - If the user needs to inspect what changed, use `Show changes` highlights. Do not use visible placeholder copy such as `Temporary option`, `Proposed Add`, `Proposed`, raw implementation-placement labels, or a Codex-generated CTA inside the app.
 - Selecting a Live overlay proposal lane should auto-start or reconnect the Live preview when feasible so proposal actions are usable. A selected proposal lane should not sit in a stopped half-state with only `Build selected` visible when change highlights and marking depend on the running preview.
 - On proposal tabs, agent `Changes` highlights are adjustable suggested areas. The user can move or resize a shown highlight, and the adjusted area becomes a supporting visual chip for the next prompt; it is not accepted app UI and it must not alter the preview header contract.
+- Patch-backed proposal lanes can derive `Changes` highlights from exact VisualPatch targets. The visible chip text stays compact, such as `Change 1`; target/source metadata remains hidden behind the Visual Reference and out of Canvas chrome.
+- Stale patch-backed proposals should use the existing proposal row, not new approval cards or in-app chrome. If route, viewport, preview URL, target, source hint, project, or backing artifact no longer matches, show compact recovery language such as refresh/rebase/archive/open-live and disable `Build selected` until the proposal is refreshed.
 - Do not show both a root URL field and a duplicate root-route chip. Show route/location metadata when it adds information, such as after navigation or a non-root route.
 - `Mark area` lets the user draw a temporary rectangle on the app or snapshot and explain what should move or change there.
 - In normal chat, finishing a mark should add a `Mark 1` composer picture chip automatically. The user can then type naturally, send the prompt, remove the chip, or click it for fullscreen preview. Do not include project names, IPs, or route noise in the visible chip label.
@@ -135,6 +137,18 @@
 - Advanced DOM/source hints should be hidden unless implementation accuracy requires them after approval.
 - Plan Mode handoff should include live route, viewport, selected proposal spec, temporary interaction state, and area mark only when explicitly accepted or submitted for revision.
 - After accepted implementation work, reload or revisit the live app and compare the real result to the accepted preview. If they differ materially, record the mismatch instead of claiming parity.
+
+## Canvas Edit Mode Direction
+
+- The product promise is simple: the user edits the Canvas. Internally, Edit Mode uses a frozen screenshot plus semantic element proxies so Live DOM, runtime app state, and source files stay untouched until the user sends or builds.
+- `Edit` should live as floating Canvas chrome near the preview surface, not inside the locked Live/proposal lane rows. The P27-cool header contract stays unchanged.
+- When Edit is inactive, do not show edit controls. When active, show only the editing controls that matter: `Cancel`, `Reset`, and `Save`. Do not add separate `Undo` in v1; `Reset` returns the current edit session to its original snapshot state.
+- `Save` should create or update a compact composer chip such as `Edit 1`; it should not auto-send in v1. The chip is the user's confirmation and instruction handle. The user can type a prompt, remove the chip, or edit the Canvas again before sending.
+- Removing an `Edit N` chip removes that pending edit intent and restores the edit snapshot/proxy state for that intent. Moving the same edited proxy again should keep the same visible chip while updating the hidden edit metadata.
+- User edits are instructions, not implementation. The agent receives semantic operations, target confidence, screenshot/bounds evidence, route, viewport, lane, proposal/option, and source hints when available.
+- The agent decides whether a sent edit should update Live, revise the selected proposal, create/update A/B/C, or ask an above-composer question. If the user explicitly names a target such as `B`, do not ask an A/B/C questionnaire just to rediscover that choice.
+- Agent `Change N` marks remain suggestions/evidence. User `Edit N` chips are explicit user intent. If the user drags or adjusts an agent change into a new intended position, create or update a user-owned `Edit N` while preserving the agent change as proposal evidence when useful.
+- If no high-confidence editable targets are available, do not pretend the Canvas is editable. Fall back to normal `Mark area` behavior or a quiet unavailable edit state.
 
 ## Plan Mode Review
 
@@ -147,6 +161,7 @@
 - If the plan is a safer alternative, option 1 should say that plainly, such as `Yes, implement safer plan`.
 - App preview proposals, selected variants, and area marks are supporting visual context for the plan. They do not save project memory on plan acceptance.
 - Visual plans should pin the Visual References they depend on. Later implementation should use those pinned references rather than whatever Canvas currently shows.
+- For live DOM patch proposals, `Build selected` starts a normal implementation turn rather than silently promoting the preview patch. The accepted proposal may remain visible as a reference, but it is no longer active routing state and the build action should not invite duplicate acceptance.
 - Option 1 can use the selected preview variant or marked area as implementation guidance.
 - Option 2 can send typed feedback, selected variant context, area marks, or any combination.
 - After implementation, prefer reloading the live app preview and comparing it to the accepted plan preview.
@@ -164,3 +179,4 @@
 - Prefer DOM/state automation for repeated desktop checks when available.
 - Use screenshots/manual review for final visual fit, not as the only regression method.
 - For App Preview and Mockup Preview changes, verify preview open/close, project switching, route reload, option comparison, option switching, proposal selection without visible in-app Codex chrome, change highlights, temporary interactions, area marking, automatic composer chip attachment outside Plan Mode, revision, approval, dismissal, and cleanup.
+- After P31 Phases 1-4, run `plans/wip/P31-test-0.5.md` before continuing. The manual gate must verify floating Edit chrome, frozen screenshot editing, one semantic proxy drag, Reset, Save-to-`Edit N` chip, chip removal, no auto-send, no header drift, and no Live/source mutation.

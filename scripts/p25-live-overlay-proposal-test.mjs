@@ -76,6 +76,27 @@ try {
             route: "http://127.0.0.1:5173/",
             targetRegion: "header actions",
             summary: "Adds a secondary settings action near the existing toolbar.",
+            visualPatchBundle: {
+              id: "proposal-A",
+              patches: [
+                {
+                  op: "style",
+                  target: {
+                    canvasId: "settings-action",
+                    sourceFile: "src/App.tsx",
+                    componentName: "ToolbarActions",
+                  },
+                  css: {
+                    backgroundColor: "rgb(238, 188, 66)",
+                  },
+                },
+                {
+                  op: "text",
+                  target: { canvasId: "settings-action" },
+                  value: "Settings",
+                },
+              ],
+            },
             highlights: [
               {
                 id: "settings-action",
@@ -112,6 +133,13 @@ try {
   assert.equal(parsed?.variants.length, 1);
   assert.equal(parsed?.variants[0].route, "http://127.0.0.1:5173/");
   assert.equal(parsed?.variants[0].targetRegion, "header actions");
+  assert.equal(parsed?.variants[0].visualPatchBundle?.id, "proposal-A");
+  assert.equal(parsed?.variants[0].visualPatchBundle?.patches.length, 2);
+  assert.deepEqual(parsed?.variants[0].visualPatchBundle?.patches[0].target, {
+    canvasId: "settings-action",
+    sourceFile: "src/App.tsx",
+    componentName: "ToolbarActions",
+  });
   assert.equal(parsed?.variants[0].highlights?.[0].label, "Settings action");
   assert.equal(parsed?.variants[0].highlights?.[0].areaMark.width, 58);
 
@@ -167,6 +195,37 @@ try {
     parsedModelLike?.variants[0].highlights?.[0].areaMark.createdAt > 0,
     true,
   );
+  const parsedInvalidPatchBundle = parsePlanPreviewSpec(
+    [
+      "Broken bundle.",
+      "```codex-plan-preview",
+      JSON.stringify({
+        summary: "Invalid patch bundle should be ignored.",
+        variants: [
+          {
+            id: "A",
+            title: "Header settings",
+            tradeoff: "Fast to find.",
+            placement: "topbar",
+            summary: "Adds a secondary settings action.",
+            visualPatchBundle: {
+              id: "proposal-A",
+              patches: [
+                {
+                  op: "move",
+                  target: { canvasId: "settings-action" },
+                  relation: "below",
+                },
+              ],
+            },
+            components: [],
+          },
+        ],
+      }),
+      "```",
+    ].join("\n"),
+  );
+  assert.equal(parsedInvalidPatchBundle?.variants[0].visualPatchBundle, undefined);
 
   const summary = planPreviewDecisionSummary({
     previewSpec: parsed,
@@ -192,10 +251,33 @@ try {
     appTsx,
     /Do not include Markdown code fences or triple backticks inside decision-strip JSON string values/,
   );
+  assert.match(appTsx, /canvasId=/);
+  assert.match(appTsx, /sourceFile=/);
+  assert.match(appTsx, /screenshotRef=/);
+  assert.match(appTsx, /Build selected strategy: \$\{buildStrategy\}/);
+  assert.match(appTsx, /implement_from_mockup/);
+  assert.match(appTsx, /Accepted VisualPatch bundle/);
+  assert.match(appTsx, /Do not introduce inline-style sludge/);
+  assert.match(appTsx, /Do not start or stop local preview servers/);
+  assert.match(appTsx, /style\/text\/hide\/show patch operations/);
+  assert.match(
+    appTsx,
+    /liveProposalAcceptedForBuildTurnId\s*=\s*activeLiveProposal\.turnId/,
+  );
+  assert.match(appTsx, /markLiveProposalAcceptedForBuild/);
+  assert.match(appTsx, /proposalLifecycle:\s*"accepted_for_build"/);
+  assert.match(appTsx, /lifecycle:\s*"accepted"/);
   assert.doesNotMatch(
     appTsx,
     /Create one saved HTML review preview under \.codex\/mockups for this current-app change/,
   );
+
+  const inspectorTsx = readFileSync(
+    path.join(repoRoot, "apps/desktop/src/components/Inspector.tsx"),
+    "utf8",
+  );
+  assert.match(inspectorTsx, /buildDisabled: props\.planPreviewProposal\.status !== "pending"/);
+  assert.match(inspectorTsx, /props\.planPreviewProposal\?\.status === "pending"/);
 
   const nestedFenceDecision = [
     "I can show this first.",
@@ -288,7 +370,24 @@ try {
   );
   assert.match(livePreviewTsx, /Show changes/);
   assert.match(livePreviewTsx, /proposal-highlight/);
+  assert.match(livePreviewTsx, /buildVisualPatchApplyScript/);
+  assert.match(livePreviewTsx, /buildVisualPatchClearScript/);
+  assert.match(livePreviewTsx, /buildCanvasTargetMetadataScript/);
+  assert.match(livePreviewTsx, /evaluateLiveDomPatchStaleness/);
+  assert.match(livePreviewTsx, /proposalStaleness/);
+  assert.match(livePreviewTsx, /proposalBuildDisabled/);
+  assert.match(livePreviewTsx, /proposalHighlightsForVisualPatchTargets/);
+  assert.match(livePreviewTsx, /visualPatchBundleForVariant/);
+  assert.match(livePreviewTsx, /reloadPreviewAfterFailedHotSwap/);
   assert.match(livePreviewTsx, /root\.hidden = true/);
+  const proposalStalenessTs = readFileSync(
+    path.join(repoRoot, "apps/desktop/src/canvasProposalStaleness.ts"),
+    "utf8",
+  );
+  assert.match(proposalStalenessTs, /missing_backing_artifact/);
+  assert.match(proposalStalenessTs, /canvas_target_missing/);
+  assert.match(proposalStalenessTs, /source_file_changed/);
+  assert.match(proposalStalenessTs, /Refresh needed/);
   for (const bannedVisibleProposalChrome of [
     "codex-preview-bar",
     "codex-preview-panel",

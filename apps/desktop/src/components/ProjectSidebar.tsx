@@ -29,7 +29,6 @@ import {
   X,
   Zap,
 } from "lucide-react";
-import { previewArtifactDisplayName, previewArtifactKindFromText } from "../mockupArtifacts";
 import { connectionVerb, type RuntimeInfo } from "../runtime";
 import { threadTitle } from "../itemUtils";
 import type {
@@ -893,34 +892,7 @@ function ProjectActionsMenu(props: {
 }
 
 function sidebarThreadTitle(thread: Thread) {
-  return scrubInternalSidebarTitle(threadTitle(thread));
-}
-
-function scrubInternalSidebarTitle(title: string) {
-  if (title.includes("[Codex Saved Mockup Review Context]")) {
-    return `Review saved ${sidebarArtifactLabel(title, 2)}`;
-  }
-  if (title.includes("[Codex Canvas Question Context]")) {
-    return "Choose Canvas path";
-  }
-  if (title.includes("[Codex Visual Decision Selection]")) {
-    return "Use selected option";
-  }
-  if (title.includes("[Codex Mockup Artifact Task]")) {
-    return `Update saved ${sidebarArtifactLabel(title, 2)}`;
-  }
-  if (title.includes("[Codex Build Selected Mockup]")) {
-    return `Build selected ${sidebarArtifactLabel(title, 1)}`;
-  }
-  return title;
-}
-
-function sidebarArtifactLabel(text: string, count: number) {
-  return previewArtifactDisplayName(
-    previewArtifactKindFromText(text, "mockup"),
-    count,
-    "lower",
-  );
+  return threadTitle(thread);
 }
 
 function describeAccount(snapshot: AppServerSnapshot): {

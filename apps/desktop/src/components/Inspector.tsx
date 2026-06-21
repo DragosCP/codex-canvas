@@ -169,9 +169,10 @@ export function Inspector(props: {
             }
             proposalControls={{
               autoStart: true,
+              buildDisabled: props.planPreviewProposal.status !== "pending",
               buildLabel: "Build selected",
               onBuild: () =>
-                props.planPreviewProposal &&
+                props.planPreviewProposal?.status === "pending" &&
                 props.onBuildPlanProposal(props.planPreviewProposal),
             }}
           />

@@ -41,6 +41,8 @@ export function threadTitle(thread: Thread): string {
   if (canvasQuestionTitle) return canvasQuestionTitle;
   const codeProposalTitle = friendlyCodeProposalWorkspaceTitle(title);
   if (codeProposalTitle) return codeProposalTitle;
+  const liveOverlayProposalTitle = friendlyLiveOverlayProposalTitle(title);
+  if (liveOverlayProposalTitle) return liveOverlayProposalTitle;
   const mockupReviewTitle = friendlySavedMockupReviewTitle(title);
   if (mockupReviewTitle) return mockupReviewTitle;
   const visualDecisionTitle = friendlyVisualDecisionSelectionTitle(title);
@@ -89,6 +91,15 @@ function friendlyCodeProposalWorkspaceTitle(text: string) {
   return request ? compactTitle(request) : "Create runnable proposal";
 }
 
+function friendlyLiveOverlayProposalTitle(text: string) {
+  const request = extractOriginalRequestForSentinel(
+    text,
+    "[Codex Live Overlay Proposal Context]",
+  );
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Review Live proposal";
+}
+
 function scrubInternalThreadTitle(title: string) {
   if (title.includes("[Codex Saved Mockup Review Context]")) {
     return `Review saved ${savedArtifactLabel(title, 2)}`;
@@ -98,6 +109,9 @@ function scrubInternalThreadTitle(title: string) {
   }
   if (title.includes("[Codex Code Proposal Workspace Context]")) {
     return "Create runnable proposal";
+  }
+  if (title.includes("[Codex Live Overlay Proposal Context]")) {
+    return "Review Live proposal";
   }
   if (title.includes("[Codex Visual Decision Selection]")) {
     return "Use selected option";

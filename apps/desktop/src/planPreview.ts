@@ -6,6 +6,7 @@ import type {
   PlanPreviewSessionState,
   ProposalHighlight,
 } from "./types";
+import { normalizeVisualPatchBundle } from "./visualPatchRuntime";
 
 const uiWords = /\b(ui|ux|screen|page|view|layout|button|menu|modal|drawer|panel|sidebar|form|input|card|table|list|filter|sort|tab|toolbar|header|footer|nav|navigation|preview|visual|workflow|interaction|click|hover|dropdown|popover|dialog|settings|dashboard)\b/i;
 const nonUiWords = /\b(api|backend|server|database|schema|migration|cli|rust|go\s+package|unit\s+test|parser|protocol|auth\s+token|rate\s+limit)\b/i;
@@ -22,6 +23,14 @@ export function shouldOfferPlanPreview(prompt: string, planText = "") {
 export function selectedPlanPreviewVariant(spec: PlanPreviewSpec | null | undefined, id: string | null | undefined) {
   if (!spec) return null;
   return spec.variants.find((variant) => variant.id === id) ?? spec.variants[0] ?? null;
+}
+
+export function selectedPlanPreviewVariantHasVisualPatchBundle(
+  spec: PlanPreviewSpec | null | undefined,
+  id: string | null | undefined,
+) {
+  const variant = selectedPlanPreviewVariant(spec, id);
+  return Boolean(variant?.visualPatchBundle?.patches.length);
 }
 
 export function parsePlanPreviewSpec(text: string): PlanPreviewSpec | null {
@@ -139,6 +148,11 @@ function normalizePlanPreviewSpec(
           cleanText(variant.viewState, 120) || topLevelViewState || undefined,
         targetRegion: cleanText(variant.targetRegion, 120) || undefined,
         highlights: normalizeHighlights(variant.highlights, id),
+        visualPatchBundle:
+          normalizeVisualPatchBundle(
+            (variant as Record<string, unknown>).visualPatchBundle,
+            `plan-preview-${id}`,
+          ) || undefined,
         components: Array.isArray(variant.components)
           ? variant.components
               .map((component) => {

@@ -8,6 +8,7 @@ import { build } from "esbuild";
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const tempDir = mkdtempSync(path.join(tmpdir(), "p27-canvas-test-"));
 const canvasOutfile = path.join(tempDir, "canvasActions.mjs");
+const proposalModelOutfile = path.join(tempDir, "canvasProposalModel.mjs");
 const visualDecisionOutfile = path.join(tempDir, "visualDecision.mjs");
 const chatThreadOutfile = path.join(tempDir, "ChatThread.mjs");
 const codeProposalPreviewOutfile = path.join(tempDir, "CodeProposalPreview.mjs");
@@ -20,6 +21,15 @@ const proposalWorkspaceDisplayOutfile = path.join(
 await build({
   entryPoints: [path.join(repoRoot, "apps/desktop/src/canvasActions.ts")],
   outfile: canvasOutfile,
+  bundle: true,
+  format: "esm",
+  platform: "node",
+  logLevel: "silent",
+});
+
+await build({
+  entryPoints: [path.join(repoRoot, "apps/desktop/src/canvasProposalModel.ts")],
+  outfile: proposalModelOutfile,
   bundle: true,
   format: "esm",
   platform: "node",
@@ -79,6 +89,11 @@ try {
     CANVAS_OPERATING_PROMPT,
     resolveCanvasAction,
   } = await import(pathToFileURL(canvasOutfile).href);
+  const {
+    buildStrategyForProposalBacking,
+    isCanvasProposalDisplayLane,
+    proposalBackingForPreviewArtifactKind,
+  } = await import(pathToFileURL(proposalModelOutfile).href);
   const { parseVisualDecisionStrip } = await import(
     pathToFileURL(visualDecisionOutfile).href
   );
@@ -86,6 +101,7 @@ try {
     pathToFileURL(chatThreadOutfile).href
   );
   const {
+    shouldRecoverAppliedCodeProposalFromThread,
     visualDecisionOptionCreatesCodeProposal,
     visualDecisionOptionCreatesLiveOverlay,
     visualDecisionOptionCreatesMockups,
@@ -97,6 +113,87 @@ try {
   } = await import(pathToFileURL(codeProposalPreviewOutfile).href);
   const { projectRelativeDisplayPath, proposalWorkspaceDisplayPath } = await import(
     pathToFileURL(proposalWorkspaceDisplayOutfile).href
+  );
+
+  const proposalPreviewSet = {
+    proposalSetId: "proposal-a",
+    projectId: "project-1",
+    threadId: "thread-1",
+    turnId: "proposal-turn",
+    selectedOptionId: "A",
+    status: "ready",
+    rootPath: "C:/tmp/proposals/proposal-a",
+    options: [
+      {
+        id: "A",
+        status: "ready",
+        title: "Option A",
+        summary: "",
+        workspacePath: "C:/tmp/proposals/proposal-a/A",
+        previewOwnerId: "code-proposal:proposal-a:A",
+        changedFiles: [],
+      },
+    ],
+  };
+  const proposalGenerationTurn = {
+    id: "proposal-turn",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        content: [
+          {
+            type: "text",
+            text: "Proposal A: Create one runnable mobile-first task board proposal for review.",
+          },
+        ],
+      },
+      {
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "I’ll build only Proposal A as a runnable candidate. Option A is ready.",
+      },
+      {
+        type: "fileChange",
+        changes: [{ kind: "created", path: "Option A/index.html" }],
+      },
+    ],
+  };
+  const liveBuildTurn = {
+    id: "build-turn",
+    status: "completed",
+    items: [
+      {
+        type: "userMessage",
+        content: [
+          {
+            type: "text",
+            text: "Build selected Option A into Live.",
+          },
+        ],
+      },
+      {
+        type: "agentMessage",
+        phase: "final_answer",
+        text: "Applied Option A into Live.",
+      },
+      {
+        type: "fileChange",
+        changes: [{ kind: "created", path: "index.html" }],
+      },
+    ],
+  };
+  assert.equal(
+    shouldRecoverAppliedCodeProposalFromThread(proposalPreviewSet, {
+      turns: [proposalGenerationTurn],
+    }),
+    false,
+  );
+  assert.equal(
+    shouldRecoverAppliedCodeProposalFromThread(proposalPreviewSet, {
+      turns: [proposalGenerationTurn, liveBuildTurn],
+    }),
+    true,
   );
 
   assert.match(CANVAS_OPERATING_PROMPT, /If the user says Canvas, treat it as @Canvas/);
@@ -112,8 +209,10 @@ try {
   const emptyLive = { exists: false, running: false };
   const activeAB = {
     id: "proposal-1",
-    lane: "code_workspace",
+    backing: "code_backed_workspace",
+    buildStrategy: "promote_code_workspace",
     lifecycle: "active",
+    proposalLifecycle: "shown",
     selectedOptionId: "A",
     options: [
       { id: "A", title: "Search-first" },
@@ -154,7 +253,7 @@ try {
         action: "CREATE_PROPOSAL",
         baseSurface: "Live",
         wantsOptions: false,
-        lanePreference: "live_overlay",
+        backingPreference: "live_dom_patch",
       },
     },
     {
@@ -169,7 +268,7 @@ try {
         action: "ASK_USER",
         baseSurface: "Live",
         wantsOptions: false,
-        lanePreference: "live_overlay",
+        backingPreference: "live_dom_patch",
       },
       assert(result) {
         assert.match(result.question.reason, /direct implementation|preview/i);
@@ -186,7 +285,7 @@ try {
         action: "CREATE_PROPOSAL",
         baseSurface: "Live",
         wantsOptions: false,
-        lanePreference: "live_overlay",
+        backingPreference: "live_dom_patch",
       },
     },
     {
@@ -223,7 +322,35 @@ try {
       expected: {
         action: "CREATE_PROPOSAL",
         wantsOptions: true,
-        lanePreference: "code_workspace",
+        backingPreference: "code_backed_workspace",
+      },
+    },
+    {
+      name: "live project three runnable options uses code-backed proposal workspaces",
+      input: {
+        message:
+          "Give me three runnable options to build as proposals A, B, and C. Do not change Live yet.",
+        live,
+        selectedSurface: "Live",
+      },
+      expected: {
+        action: "CREATE_PROPOSAL",
+        wantsOptions: true,
+        backingPreference: "code_backed_workspace",
+      },
+    },
+    {
+      name: "live project explicit proposal workspaces stays isolated",
+      input: {
+        message:
+          "Please do the same request as three runnable proposal workspaces now: create options A, B, and C from the current Live task board. Do not change Live yet.",
+        live,
+        selectedSurface: "Live",
+      },
+      expected: {
+        action: "CREATE_PROPOSAL",
+        wantsOptions: true,
+        backingPreference: "code_backed_workspace",
       },
     },
     {
@@ -248,7 +375,7 @@ try {
       expected: {
         action: "CREATE_PROPOSAL",
         wantsOptions: false,
-        lanePreference: "live_overlay",
+        backingPreference: "live_dom_patch",
       },
     },
     {
@@ -294,7 +421,7 @@ try {
     selectedSurface: "Live",
   });
   assert.equal(noLiveQuestionResolution.action, "ASK_USER");
-  assert.equal(noLiveQuestionResolution.lanePreference, "code_workspace");
+  assert.equal(noLiveQuestionResolution.backingPreference, "code_backed_workspace");
   assert.match(noLiveQuestionResolution.question.reason, /no Live app/i);
 
   const liveQuestionResolution = resolveCanvasAction({
@@ -303,8 +430,59 @@ try {
     selectedSurface: "Live",
   });
   assert.equal(liveQuestionResolution.action, "ASK_USER");
-  assert.equal(liveQuestionResolution.lanePreference, "live_overlay");
+  assert.equal(liveQuestionResolution.backingPreference, "live_dom_patch");
   assert.match(liveQuestionResolution.question.reason, /current app visually/i);
+
+  assert.equal(isCanvasProposalDisplayLane("A"), true);
+  assert.equal(isCanvasProposalDisplayLane("live_dom_patch"), false);
+  assert.equal(proposalBackingForPreviewArtifactKind("wireframe"), "wireframe_artifact");
+  assert.equal(proposalBackingForPreviewArtifactKind("mockup"), "mockup_artifact");
+  assert.equal(proposalBackingForPreviewArtifactKind("preview"), "mockup_artifact");
+  assert.equal(
+    buildStrategyForProposalBacking("live_dom_patch"),
+    "convert_dom_patch_to_code",
+  );
+  assert.equal(
+    buildStrategyForProposalBacking("code_backed_workspace"),
+    "promote_code_workspace",
+  );
+
+  const sameDisplayLaneDifferentBackings = [
+    {
+      backing: "live_dom_patch",
+      buildStrategy: "convert_dom_patch_to_code",
+    },
+    {
+      backing: "mockup_artifact",
+      buildStrategy: "implement_from_mockup",
+    },
+    {
+      backing: "code_backed_workspace",
+      buildStrategy: "promote_code_workspace",
+    },
+  ];
+  for (const candidate of sameDisplayLaneDifferentBackings) {
+    const result = resolveCanvasAction({
+      message: "Build selected",
+      live,
+      selectedSurface: "A",
+      activeProposalSet: {
+        id: `${candidate.backing}:proposal`,
+        backing: candidate.backing,
+        buildStrategy: candidate.buildStrategy,
+        lifecycle: "active",
+        proposalLifecycle: "shown",
+        selectedOptionId: "A",
+        options: [{ id: "A", title: "Shared display lane" }],
+      },
+    });
+    assert.equal(result.action, "BUILD_SELECTED");
+    assert.equal(result.targetOptionId, "A");
+    assert.equal(result.targetSurface, "A");
+    assert.equal(result.backingPreference, candidate.backing);
+    assert.equal(result.buildStrategy, candidate.buildStrategy);
+    assert.notEqual(result.backingPreference, result.targetSurface);
+  }
 
   const pendingLiveProposal = {
     id: "live-proposal:turn-1",
@@ -398,6 +576,8 @@ try {
     projectId: "project-1",
     threadId: "thread-1",
     turnId: "turn-1",
+    proposalBacking: "code_backed_workspace",
+    buildStrategy: "promote_code_workspace",
     rootPath: "C:\\proposal",
     originalPrompt: "Show 2-3",
     selectedOptionId: "A",
@@ -607,13 +787,17 @@ try {
   assert.match(livePreviewSource, /showDetectInline = stoppedPreview && liveLaneActive/);
   assert.match(livePreviewSource, /showUseUrlInline = stoppedPreview && liveLaneActive/);
   assert.match(livePreviewSource, /runningPreview && liveLaneActive && !overflowReloadAction/);
+  assert.match(livePreviewSource, /canMarkArea = runningPreview \|\| proposalLaneActive/);
+  assert.match(livePreviewSource, /const overflowMarkAction = proposalLaneActive\s*\?\s*false/s);
+  assert.match(livePreviewSource, /const overflowChangesAction = proposalLaneActive\s*\?\s*false/s);
+  assert.match(livePreviewSource, /showMarkInline = canMarkArea && !overflowMarkAction/);
   assert.match(
     livePreviewSource,
-    /const showChangesInline =\s*proposalLaneActive &&\s*runningPreview &&\s*selectedHighlights\.length > 0/s,
+    /const showChangesInline =\s*proposalLaneActive &&\s*selectedHighlights\.length > 0/s,
   );
   assert.match(
     livePreviewSource,
-    /const showChangesInMenu =\s*proposalLaneActive &&\s*runningPreview &&\s*selectedHighlights\.length > 0/s,
+    /const showChangesInMenu =\s*proposalLaneActive &&\s*selectedHighlights\.length > 0/s,
   );
   assert.match(livePreviewSource, /Show changes/);
   assert.match(livePreviewSource, /canvas-lane-row live/);
@@ -661,6 +845,8 @@ try {
   assert.match(appSource, /nextAppPreviewChangeNumber/);
   assert.match(appSource, /`Change \$\{markNumber\}`/);
   assert.match(appSource, /Do not mention prepared folders/);
+  assert.match(appSource, /isExplicitCodeBackedProposalRequest/);
+  assert.match(appSource, /The user explicitly requested runnable proposal workspaces/);
   assert.match(chatSource, /proposalWorkspaceDisplayPath/);
   assert.match(itemUtilsSource, /\[Codex Canvas Question Context\]/);
   assert.match(composerContextsSource, /nextAppPreviewChangeNumber/);

@@ -9,6 +9,16 @@ import type { Thread } from "../../../codex-rs/app-server-protocol/schema/typesc
 import type { ThreadItem } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem";
 import type { ThreadTokenUsage } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/ThreadTokenUsage";
 import type { Turn } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/Turn";
+import type {
+  BuildSelectedStrategy,
+  ProposalBacking,
+  ProposalLifecycle,
+} from "./canvasProposalModel";
+import type {
+  TargetResolutionConfidence,
+  TargetResolutionKind,
+} from "./canvasTargeting";
+import type { VisualPatchBundle } from "./visualPatchRuntime";
 
 export type {
   AskForApproval,
@@ -140,6 +150,14 @@ export type MockupPreviewSet = {
   projectId: string;
   threadId: string | null;
   artifactKind: PreviewArtifactKind;
+  proposalBacking: Extract<
+    ProposalBacking,
+    "wireframe_artifact" | "mockup_artifact"
+  >;
+  buildStrategy: Extract<
+    BuildSelectedStrategy,
+    "implement_from_wireframe" | "implement_from_mockup"
+  >;
   baseDir: string;
   originalPrompt: string;
   depth: MockupDepth;
@@ -168,6 +186,7 @@ export type CodeProposalOption = {
   title: string;
   summary: string;
   workspacePath: string;
+  previewOwnerId: string;
   status: CodeProposalStatus;
   changedFiles: CodeProposalFileChange[];
   appliedAt?: number;
@@ -175,9 +194,12 @@ export type CodeProposalOption = {
 
 export type CodeProposalSet = {
   proposalSetId: string;
+  registryId: string;
   projectId: string;
   threadId: string | null;
   turnId: string | null;
+  proposalBacking: Extract<ProposalBacking, "code_backed_workspace">;
+  buildStrategy: Extract<BuildSelectedStrategy, "promote_code_workspace">;
   rootPath: string;
   originalPrompt: string;
   selectedOptionId: "A" | "B" | "C" | null;
@@ -188,7 +210,20 @@ export type CodeProposalSet = {
   updatedAt: number;
 };
 
-export type ProposalHighlight = {
+export type CanvasVisualReferenceMeta = {
+  threadId?: string | null;
+  proposalTurnId?: string;
+  proposalOptionId?: "A" | "B" | "C";
+  canvasLane?: "A" | "B" | "C";
+  canvasId?: string;
+  sourceFile?: string;
+  componentName?: string;
+  screenshotRef?: string;
+  targetResolutionKind?: TargetResolutionKind;
+  targetResolutionConfidence?: TargetResolutionConfidence;
+};
+
+export type ProposalHighlight = CanvasVisualReferenceMeta & {
   id: string;
   label: string;
   note: string;
@@ -221,7 +256,7 @@ export type ComposerAppPreviewContext = {
   thumbnailDataUrl?: string;
   source?: "userMark" | "proposalHighlight";
   highlightId?: string;
-};
+} & CanvasVisualReferenceMeta;
 
 export type ComposerMockupPreviewContext = {
   type: "mockupPreview";
@@ -266,7 +301,11 @@ export type PlanProposal = {
   previewSelectedVariantId?: string | null;
   previewAreaMark?: PlanPreviewAreaMark | null;
   previewSession?: PlanPreviewSessionState | null;
+  previewBaselineSession?: PlanPreviewSessionState | null;
   previewUserEditedAt?: number;
+  proposalBacking?: ProposalBacking;
+  proposalLifecycle?: ProposalLifecycle;
+  buildStrategy?: BuildSelectedStrategy;
   proposalKind: PlanProposalKind;
   status: PlanProposalStatus;
   createdAt: number;
@@ -300,6 +339,7 @@ export type PlanPreviewVariant = {
   viewState?: string;
   targetRegion?: string;
   highlights?: ProposalHighlight[];
+  visualPatchBundle?: VisualPatchBundle;
   components: PlanPreviewComponent[];
 };
 

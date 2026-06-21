@@ -19,8 +19,15 @@ import type {
   BackendMode,
   SandboxMode,
 } from "./types";
+import {
+  normalizeBuildSelectedStrategy,
+  normalizeProposalBacking,
+  normalizeProposalLifecycle,
+} from "./canvasProposalModel";
 import { normalizePreviewArtifactKind } from "./mockupArtifacts";
+import { selectedPlanPreviewVariantHasVisualPatchBundle } from "./planPreview";
 import { normalizeProjectPathForRuntime, runtimeInfo } from "./runtime";
+import { normalizeVisualPatchBundle } from "./visualPatchRuntime";
 
 const STORAGE_KEY = "codex.desktop.v1";
 const STORAGE_SOFT_LIMIT_BYTES = 4_000_000;
@@ -170,6 +177,9 @@ function normalizeCodeProposalSets(
               title: stringValue(option.title) || `Option ${id}`,
               summary: stringValue(option.summary),
               workspacePath,
+              previewOwnerId:
+                stringValue(option.previewOwnerId) ||
+                codeProposalPreviewOwnerId(projectId, proposalSetId, id),
               status: codeProposalStatus(option.status),
               changedFiles: normalizeCodeProposalChanges(option.changedFiles),
               appliedAt: positiveNumber(option.appliedAt) || undefined,
@@ -188,9 +198,14 @@ function normalizeCodeProposalSets(
         : options[0]?.id ?? null;
     normalized[proposalSetId] = {
       proposalSetId,
+      registryId:
+        stringValue(raw.registryId) ||
+        codeProposalRegistryId(projectId, proposalSetId),
       projectId,
       threadId: stringValue(raw.threadId) || null,
       turnId: stringValue(raw.turnId) || null,
+      proposalBacking: "code_backed_workspace",
+      buildStrategy: "promote_code_workspace",
       rootPath,
       originalPrompt: stringValue(raw.originalPrompt),
       selectedOptionId,
@@ -202,6 +217,18 @@ function normalizeCodeProposalSets(
     };
   }
   return normalized;
+}
+
+function codeProposalRegistryId(projectId: string, proposalSetId: string) {
+  return `local:${projectId}:${proposalSetId}`;
+}
+
+function codeProposalPreviewOwnerId(
+  projectId: string,
+  proposalSetId: string,
+  optionId: "A" | "B" | "C",
+) {
+  return `code-proposal:${codeProposalRegistryId(projectId, proposalSetId)}:${optionId}`;
 }
 
 function normalizeCodeProposalChanges(
@@ -282,6 +309,21 @@ function normalizePlanProposals(value: unknown): Record<string, PlanProposal> {
     const prompt = stringValue(rawProposal.prompt);
     if (!projectId || !threadId) continue;
     const status = planProposalStatus(rawProposal.status);
+    const proposalKind = planProposalKind(rawProposal.proposalKind);
+    const previewSpec = normalizePlanPreviewSpec(rawProposal.previewSpec);
+    const previewSelectedVariantId =
+      stringValue(rawProposal.previewSelectedVariantId) || null;
+    const proposalBacking = normalizePlanProposalBacking(
+      rawProposal,
+      proposalKind,
+      previewSpec,
+      previewSelectedVariantId,
+    );
+    const proposalLifecycle = normalizePlanProposalLifecycle(
+      rawProposal,
+      proposalKind,
+      status,
+    );
     normalized[turnId] = {
       id: stringValue(rawProposal.id) || `plan:${turnId}`,
       projectId,
@@ -289,14 +331,21 @@ function normalizePlanProposals(value: unknown): Record<string, PlanProposal> {
       turnId: stringValue(rawProposal.turnId) || turnId,
       prompt,
       contexts: normalizeComposerContexts(rawProposal.contexts),
-      previewSpec: normalizePlanPreviewSpec(rawProposal.previewSpec),
-      previewSelectedVariantId:
-        stringValue(rawProposal.previewSelectedVariantId) || null,
+      previewSpec,
+      previewSelectedVariantId,
       previewAreaMark: normalizePlanPreviewAreaMark(rawProposal.previewAreaMark),
       previewSession: normalizePlanPreviewSession(rawProposal.previewSession),
+      previewBaselineSession: normalizePlanPreviewSession(
+        rawProposal.previewBaselineSession,
+      ),
       previewUserEditedAt:
         positiveNumber(rawProposal.previewUserEditedAt) || undefined,
-      proposalKind: planProposalKind(rawProposal.proposalKind),
+      proposalBacking,
+      proposalLifecycle,
+      buildStrategy: proposalBacking
+        ? normalizeBuildSelectedStrategy(rawProposal.buildStrategy, proposalBacking)
+        : undefined,
+      proposalKind,
       status,
       createdAt: numberValue(rawProposal.createdAt),
       updatedAt: numberValue(rawProposal.updatedAt),
@@ -341,6 +390,11 @@ function normalizePlanPreviewSpec(value: unknown): PlanPreviewSpec | null {
           stringValue(variant.viewState) || topLevelViewState || undefined,
         targetRegion: stringValue(variant.targetRegion) || undefined,
         highlights: normalizeProposalHighlights(variant.highlights, id),
+        visualPatchBundle:
+          normalizeVisualPatchBundle(
+            (variant as Record<string, unknown>).visualPatchBundle,
+            `plan-preview-${id}`,
+          ) || undefined,
         components: Array.isArray(variant.components)
           ? variant.components
               .map((component) => {
@@ -500,6 +554,36 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
           normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
         source,
         highlightId: stringValue(rawContext.highlightId) || undefined,
+        threadId: stringValue(rawContext.threadId) || null,
+        proposalTurnId: stringValue(rawContext.proposalTurnId) || undefined,
+        proposalOptionId:
+          rawContext.proposalOptionId === "A" ||
+          rawContext.proposalOptionId === "B" ||
+          rawContext.proposalOptionId === "C"
+            ? rawContext.proposalOptionId
+            : undefined,
+        canvasLane:
+          rawContext.canvasLane === "A" ||
+          rawContext.canvasLane === "B" ||
+          rawContext.canvasLane === "C"
+            ? rawContext.canvasLane
+            : undefined,
+        canvasId: stringValue(rawContext.canvasId) || undefined,
+        sourceFile: stringValue(rawContext.sourceFile) || undefined,
+        componentName: stringValue(rawContext.componentName) || undefined,
+        screenshotRef: stringValue(rawContext.screenshotRef) || undefined,
+        targetResolutionKind:
+          rawContext.targetResolutionKind === "exact" ||
+          rawContext.targetResolutionKind === "inferred" ||
+          rawContext.targetResolutionKind === "visual_only"
+            ? rawContext.targetResolutionKind
+            : undefined,
+        targetResolutionConfidence:
+          rawContext.targetResolutionConfidence === "high" ||
+          rawContext.targetResolutionConfidence === "medium" ||
+          rawContext.targetResolutionConfidence === "low"
+            ? rawContext.targetResolutionConfidence
+            : undefined,
       });
       continue;
     }
@@ -615,6 +699,43 @@ function planProposalKind(value: unknown): PlanProposalKind {
   if (value === "safer_alternative") return "safer_alternative";
   if (value === "live_proposal") return "live_proposal";
   return "plan";
+}
+
+function normalizePlanProposalBacking(
+  rawProposal: Partial<PlanProposal>,
+  proposalKind: PlanProposalKind,
+  previewSpec: PlanPreviewSpec | null,
+  previewSelectedVariantId: string | null,
+) {
+  if (proposalKind !== "live_proposal") return undefined;
+  const hasVisualPatch = selectedPlanPreviewVariantHasVisualPatchBundle(
+    previewSpec,
+    previewSelectedVariantId,
+  );
+  const normalized = normalizeProposalBacking(
+    rawProposal.proposalBacking,
+    hasVisualPatch ? "live_dom_patch" : "mockup_artifact",
+  );
+  return normalized === "live_dom_patch" && !hasVisualPatch
+    ? "mockup_artifact"
+    : normalized;
+}
+
+function normalizePlanProposalLifecycle(
+  rawProposal: Partial<PlanProposal>,
+  proposalKind: PlanProposalKind,
+  status: PlanProposalStatus,
+) {
+  if (proposalKind !== "live_proposal") return undefined;
+  const fallback =
+    status === "pending"
+      ? "shown"
+      : status === "accepted"
+        ? "accepted_for_build"
+        : status === "declined"
+          ? "rejected"
+          : "archived";
+  return normalizeProposalLifecycle(rawProposal.proposalLifecycle, fallback);
 }
 
 export function saveDesktopState(state: DesktopState) {
