@@ -13,14 +13,15 @@ const {
   prepareProposalWorkspaces,
 } = require("./proposal-workspaces.cjs");
 const {
+  applyDraftWorkspace,
   diffDraftWorkspace,
   prepareDraftWorkspace,
   updateDraftBrief,
   updateDraftLifecycle,
 } = require("./draft-workspaces.cjs");
 
-const APP_SERVER_PORT = 48889;
-const BRIDGE_PORT = 48890;
+const APP_SERVER_PORT = envPort("CODEX_DESKTOP_APP_SERVER_PORT", 48889);
+const BRIDGE_PORT = envPort("CODEX_DESKTOP_BRIDGE_PORT", 48890);
 const BACKEND_ENV = "P03_DESKTOP_BACKEND";
 const SIDECAR_DIR_ENV = "CODEX_DESKTOP_SIDECAR_DIR";
 const PREVIEW_PROBE_MAX_BYTES = 64 * 1024;
@@ -92,6 +93,12 @@ const WORKSPACE_PROGRESS_BINARY_EXTENSIONS = new Set([
   ".zip",
 ]);
 
+function envPort(name, fallback) {
+  const raw = Number.parseInt(String(process.env[name] ?? ""), 10);
+  if (Number.isInteger(raw) && raw > 0 && raw <= 65535) return raw;
+  return fallback;
+}
+
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const appDir = path.resolve(__dirname, "..");
 
@@ -104,6 +111,9 @@ const workspaceProgressSessions = new Map();
 const remoteDebuggingPort = process.env.CODEX_DESKTOP_REMOTE_DEBUGGING_PORT;
 if (remoteDebuggingPort) {
   app.commandLine.appendSwitch("remote-debugging-port", remoteDebuggingPort);
+}
+if (process.env.CODEX_DESKTOP_USER_DATA_DIR) {
+  app.setPath("userData", path.resolve(process.env.CODEX_DESKTOP_USER_DATA_DIR));
 }
 
 app.setName("Codex Local");
@@ -209,6 +219,12 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
       });
     case "draft_workspace_diff":
       return diffDraftWorkspace({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        draftId: String(args.draftId ?? ""),
+      });
+    case "draft_workspace_apply":
+      return applyDraftWorkspace({
         cacheRoot: draftWorkspacesRoot(),
         projectPath: nativeFilePath(String(args.projectPath ?? "")),
         draftId: String(args.draftId ?? ""),
@@ -769,7 +785,7 @@ async function startManagedAppPreview(projectPath) {
     child: spawn(commandSpec.command, commandSpec.args, {
       cwd: projectDir,
       detached: false,
-      shell: process.platform === "win32",
+      shell: commandSpec.shell ?? process.platform === "win32",
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
       env: {
@@ -922,6 +938,20 @@ function previewStartDescriptor(projectDir) {
 }
 
 function packagePreviewCommand(projectDir, scriptName, script, port) {
+  const directNodeScript = String(script).trim().match(/^node\s+(.+)$/);
+  if (directNodeScript && !/[;&|<>]/.test(directNodeScript[1] || "")) {
+    return {
+      command: process.env.CODEX_DESKTOP_NODE ?? "node",
+      args: [directNodeScript[1]],
+      env: {
+        HOST: "127.0.0.1",
+        HOSTNAME: "127.0.0.1",
+        PORT: String(port),
+      },
+      label: `node ${directNodeScript[1]}`,
+      shell: false,
+    };
+  }
   const runner = packageRunner(projectDir);
   const args = [...runner.args, "run", scriptName];
   const extraArgs = previewScriptArgs(script, scriptName, port);
@@ -935,6 +965,7 @@ function packagePreviewCommand(projectDir, scriptName, script, port) {
       PORT: String(port),
     },
     label: `${runner.label} run ${scriptName}`,
+    shell: process.platform === "win32",
   };
 }
 

@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const {
+  applyDraftWorkspace,
   diffDraftWorkspace,
   prepareDraftWorkspace,
   updateDraftBrief,
@@ -152,15 +153,51 @@ try {
   assert.match(brief, /\/analytics/);
   assert.doesNotMatch(brief, /registryId=abc|workspacePath=C:\\tmp/);
 
-  const built = await updateDraftLifecycle({
+  const resumed = await updateDraftLifecycle({
     cacheRoot,
     projectPath,
     draftId: prepared.draftId,
-    status: "built",
-    currentSummary: "Approved draft is ready to become source.",
-    buildPlan: ["Implement with real task persistence."],
+    status: "active",
+    currentSummary: "Resume for explicit Build this.",
+    buildPlan: ["Build into Live only after explicit approval."],
   });
-  assert.equal(built.status, "built");
+  assert.equal(resumed.status, "active");
+
+  assert.deepEqual(
+    await sourceSnapshot(projectPath),
+    sourceBefore,
+    "Resuming the draft should not alter Live implementation source",
+  );
+
+  const applied = await applyDraftWorkspace({
+    cacheRoot,
+    projectPath,
+    draftId: prepared.draftId,
+  });
+  assert.equal(applied.ok, true);
+  assert.deepEqual(
+    applied.changedFiles.map((change) => `${change.kind}:${change.path}`).sort(),
+    ["created:draft-feature.js", "updated:index.html"],
+  );
+  assert.equal(
+    readFileSync(path.join(projectPath, "index.html"), "utf8"),
+    "<main><h1>Tasks</h1><form><input placeholder=\"Quick add\" /></form></main>\n",
+  );
+  assert.equal(
+    readFileSync(path.join(projectPath, "draft-feature.js"), "utf8"),
+    "export const draftOnly = true;\n",
+  );
+  const afterApplyRegistry = await _test.readDraftRegistry(cacheRoot);
+  assert.equal(afterApplyRegistry.drafts[prepared.draftId]?.status, "built");
+  await assert.rejects(
+    () =>
+      applyDraftWorkspace({
+        cacheRoot,
+        projectPath,
+        draftId: prepared.draftId,
+      }),
+    /must be active/,
+  );
 
   const discarded = await updateDraftLifecycle({
     cacheRoot,
@@ -187,10 +224,32 @@ try {
   assert.doesNotMatch(brief, new RegExp(escapeRegExp(prepared.workspacePath)));
   assert.doesNotMatch(brief, new RegExp(escapeRegExp(prepared.registryId)));
   assert.doesNotMatch(brief, new RegExp(escapeRegExp(prepared.previewOwnerId)));
-  assert.deepEqual(
-    await sourceSnapshot(projectPath),
-    sourceBefore,
-    "Brief and lifecycle updates should not alter Live implementation source",
+
+  const conflictProjectPath = path.join(tempRoot, "conflict-live");
+  mkdirSync(conflictProjectPath, { recursive: true });
+  writeFileSync(path.join(conflictProjectPath, "index.html"), "<h1>Live</h1>\n");
+  const conflictPrepared = await prepareDraftWorkspace({
+    cacheRoot,
+    projectPath: conflictProjectPath,
+    draftId: "draft-conflict",
+    name: "Conflict proof",
+    goal: "Prove live conflicts are blocked.",
+  });
+  writeFileSync(
+    path.join(conflictPrepared.workspacePath, "index.html"),
+    "<h1>Draft</h1>\n",
+  );
+  writeFileSync(path.join(conflictProjectPath, "index.html"), "<h1>Live changed</h1>\n");
+  const conflictResult = await applyDraftWorkspace({
+    cacheRoot,
+    projectPath: conflictProjectPath,
+    draftId: conflictPrepared.draftId,
+  });
+  assert.equal(conflictResult.ok, false);
+  assert.equal(conflictResult.conflicts[0]?.path, "index.html");
+  assert.equal(
+    readFileSync(path.join(conflictProjectPath, "index.html"), "utf8"),
+    "<h1>Live changed</h1>\n",
   );
 
   console.log("P33 draft workspace proof passed.");

@@ -3,6 +3,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const {
+  applyProposalWorkspace,
   diffProposalWorkspace,
   prepareProposalWorkspaces,
 } = require("./proposal-workspaces.cjs");
@@ -87,6 +88,46 @@ async function diffDraftWorkspace(args) {
     workspacePath: record.workspacePath,
     previewOwnerId: record.previewOwnerId,
     changedFiles: diff.changedFiles,
+  };
+}
+
+async function applyDraftWorkspace(args) {
+  const cacheRoot = path.resolve(String(args.cacheRoot ?? ""));
+  const draftId = cleanSegment(args.draftId, "");
+  const projectPath = path.resolve(String(args.projectPath ?? ""));
+  if (!draftId) throw new Error("Draft id is required.");
+  const record = await registeredDraftRecord(cacheRoot, draftId, {
+    projectPath,
+  });
+  if (record.status !== "active") {
+    throw new Error("Draft must be active before it can be built.");
+  }
+  const result = await applyProposalWorkspace({
+    projectPath,
+    workspacePath: record.workspacePath,
+  });
+  if (result?.ok) {
+    const next = normalizeDraftRecord({
+      ...record,
+      status: "built",
+      updatedAt: Date.now(),
+    });
+    await upsertDraftRecord(cacheRoot, next);
+    return {
+      ...result,
+      draftId: next.draftId,
+      registryId: next.registryId,
+      status: next.status,
+      changedFiles: result.changedFiles ?? [],
+    };
+  }
+  return {
+    ok: false,
+    draftId: record.draftId,
+    registryId: record.registryId,
+    status: record.status,
+    changedFiles: result?.changedFiles ?? [],
+    conflicts: result?.conflicts ?? [],
   };
 }
 
@@ -374,6 +415,7 @@ function samePath(left, right) {
 }
 
 module.exports = {
+  applyDraftWorkspace,
   diffDraftWorkspace,
   prepareDraftWorkspace,
   updateDraftBrief,

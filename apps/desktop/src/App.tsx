@@ -154,7 +154,6 @@ type SubmissionDraft = {
   codeProposalOnComplete?: boolean;
   codeProposalHistoryOnComplete?: boolean;
   featureDraftOnComplete?: boolean;
-  featureDraftBuildOnComplete?: boolean;
   featureDraftId?: string | null;
   mockupHistoryOnComplete?: boolean;
   proposalSetId?: string | null;
@@ -408,10 +407,24 @@ export function App() {
       ? desktop.codeProposalCompareSetIdsByThreadId[desktop.activeThreadId] ??
         null
       : null;
-  const activeThreadFeatureDraftId =
-    desktop.activeThreadId != null
-      ? desktop.featureDraftActiveIdsByThreadId[desktop.activeThreadId] ?? null
+  const activeFeatureDraftThreadId =
+    desktop.activeThreadId ?? activeProject?.lastActiveThreadId ?? null;
+  const fallbackProjectFeatureDraftId =
+    activeProject && activeFeatureDraftThreadId == null
+      ? Object.values(desktop.featureDrafts)
+          .filter(
+            (draft) =>
+              draft.projectId === activeProject.id &&
+              (draft.lifecycle === "active" || draft.lifecycle === "parked"),
+          )
+          .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.draftId ??
+        null
       : null;
+  const activeThreadFeatureDraftId =
+    activeFeatureDraftThreadId != null
+      ? desktop.featureDraftActiveIdsByThreadId[activeFeatureDraftThreadId] ??
+        null
+      : fallbackProjectFeatureDraftId;
 
   useEffect(() => {
     if (!activeProject) return;
@@ -517,10 +530,20 @@ export function App() {
         proposalTurnId: activeLiveProposal.turnId,
       };
     }
+    const project = desktop.projects.find((item) => item.id === projectId);
+    const featureDraftThreadId = threadId ?? project?.lastActiveThreadId ?? null;
     const featureDraftId =
-      threadId != null
-        ? desktop.featureDraftActiveIdsByThreadId[threadId]?.trim() || ""
-        : "";
+      featureDraftThreadId != null
+        ? desktop.featureDraftActiveIdsByThreadId[featureDraftThreadId]?.trim() ||
+          ""
+        : Object.values(desktop.featureDrafts)
+            .filter(
+              (draft) =>
+                draft.projectId === projectId &&
+                (draft.lifecycle === "active" || draft.lifecycle === "parked"),
+            )
+            .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.draftId ??
+          "";
     const featureDraft = featureDraftId
       ? desktop.featureDrafts[featureDraftId]
       : null;
@@ -1308,25 +1331,6 @@ export function App() {
       );
       return;
     }
-    if (draft.featureDraftBuildOnComplete && targetFeatureDraftId) {
-      setDesktop((current) =>
-        markFeatureDraftBuilt(current, targetFeatureDraftId),
-      );
-      if (project) {
-        void desktopInvoke("draft_workspace_update_lifecycle", {
-          projectPath: project.path,
-          draftId: targetFeatureDraftId,
-          status: "built",
-          goal:
-            desktopRef.current.featureDrafts[targetFeatureDraftId]
-              ?.originalPrompt ?? "Draft",
-          currentSummary: "Built into Live.",
-          buildPlan: ["Built into Live."],
-        })?.catch(() => null);
-        void refreshProjectEmptyStatus(project);
-        openPreviewInspector(project.id);
-      }
-    }
     if (draft.codeProposalOnComplete && targetProposalSetId && project) {
       void finalizeCodeProposalTurn(
         project.id,
@@ -1729,15 +1733,15 @@ export function App() {
     );
     if (!project) {
       setSendError("That draft belongs to a project that is no longer available.");
-      return;
+      return false;
     }
     if (draft.lifecycle !== "active") {
       setSendError("Resume the draft before building it.");
-      return;
+      return false;
     }
     if (draft.status !== "ready" || draft.changedFiles.length === 0) {
       setSendError("Wait for the draft to finish before building it.");
-      return;
+      return false;
     }
     setSendError(null);
     setDesktop((current) => {
@@ -1755,23 +1759,76 @@ export function App() {
         },
       };
     });
-    const sent = await sendDraft(
-      {
-        prompt: featureDraftBuildPrompt(draft, project),
-        visiblePrompt: "Build this.",
-        projectId: project.id,
-        settings: { ...project.settings, planMode: false },
-        attachments: [],
-        contexts: [],
-        createdAt: Date.now(),
-        localDraftProjectId: null,
-        targetThreadId: draft.threadId,
-        featureDraftBuildOnComplete: true,
-        featureDraftId: draft.draftId,
-      },
-      { clearComposer: false, desktopOverride: desktop },
-    );
-    if (!sent) {
+    try {
+      await desktopInvoke("app_preview_stop", {
+        projectPath: draft.workspacePath,
+      })?.catch(() => null);
+      const result = await desktopInvoke<ProposalWorkspaceApplyResult>(
+        "draft_workspace_apply",
+        {
+          projectPath: project.path,
+          draftId: draft.draftId,
+        },
+      );
+      if (!result?.ok) {
+        throw new Error(
+          result?.conflicts?.length
+            ? "Live changed since this draft started. Refresh or create a new draft before building."
+            : "The draft could not be built.",
+        );
+      }
+      setDesktop((current) => {
+        const stored = current.featureDrafts[draft.draftId];
+        if (!stored) return current;
+        return markFeatureDraftBuilt(
+          {
+            ...current,
+            featureDrafts: {
+              ...current.featureDrafts,
+              [draft.draftId]: {
+                ...stored,
+                changedFiles: result.changedFiles,
+                summary: codeProposalChangeSummary(result.changedFiles),
+                error: undefined,
+                updatedAt: Date.now(),
+              },
+            },
+          },
+          draft.draftId,
+        );
+      });
+      void desktopInvoke("draft_workspace_update_brief", {
+        projectPath: project.path,
+        draftId: draft.draftId,
+        goal: draft.originalPrompt,
+        currentSummary: "Built into Live.",
+        affectedRoutes: draft.affectedRoutes,
+        mockAssumptions: draft.mockAssumptions,
+        approvedDecisions: ["Built into Live after explicit Build this."],
+        buildPlan: ["Built into Live."],
+      })?.catch(() => null);
+      await refreshProjectEmptyStatus(project);
+      const previewResult = await desktopInvoke<{
+        status?: string;
+        reason?: string;
+      }>("app_preview_start", {
+        projectPath: project.path,
+      })?.catch((error) => ({
+        status: "unavailable",
+        reason: errorMessage(error),
+      }));
+      if (previewResult && previewResult.status !== "running") {
+        setSendError(
+          `Built draft, but Live preview did not start: ${
+            previewResult.reason || "Preview unavailable."
+          }`,
+        );
+      }
+      openPreviewInspector(project.id);
+      return true;
+    } catch (error) {
+      const message = `Could not build draft: ${errorMessage(error)}`;
+      setSendError(message);
       setDesktop((current) => {
         const stored = current.featureDrafts[draft.draftId];
         if (!stored) return current;
@@ -1782,11 +1839,13 @@ export function App() {
             [draft.draftId]: {
               ...stored,
               status: stored.changedFiles.length > 0 ? "ready" : "failed",
+              error: message,
               updatedAt: Date.now(),
             },
           },
         };
       });
+      return false;
     }
   }
 
@@ -1796,7 +1855,7 @@ export function App() {
     );
     if (!project) {
       setSendError("That draft belongs to a project that is no longer available.");
-      return;
+      return false;
     }
     setSendError(null);
     try {
@@ -1819,12 +1878,13 @@ export function App() {
       );
     } catch (error) {
       setSendError(`Could not park draft: ${errorMessage(error)}`);
-      return;
+      return false;
     }
     setDesktop((current) => parkFeatureDraftInState(current, draft.draftId));
     if (inspector.type === "draftPreview" && inspector.draftId === draft.draftId) {
       openPreviewInspector(project.id);
     }
+    return true;
   }
 
   async function resumeFeatureDraft(draft: FeatureDraft) {
@@ -1833,12 +1893,12 @@ export function App() {
     );
     if (!project) {
       setSendError("That draft belongs to a project that is no longer available.");
-      return;
+      return false;
     }
     const threadId = draft.threadId ?? desktop.activeThreadId;
     if (!threadId) {
       setSendError("Open the draft's chat before resuming it.");
-      return;
+      return false;
     }
     setSendError(null);
     try {
@@ -1858,12 +1918,13 @@ export function App() {
       );
     } catch (error) {
       setSendError(`Could not resume draft: ${errorMessage(error)}`);
-      return;
+      return false;
     }
     setDesktop((current) =>
       resumeFeatureDraftInState(current, draft.draftId, threadId),
     );
     openFeatureDraftInspector(project.id, draft.draftId);
+    return true;
   }
 
   async function discardFeatureDraft(draft: FeatureDraft) {
@@ -1888,7 +1949,7 @@ export function App() {
       );
     } catch (error) {
       setSendError(`Could not discard draft: ${errorMessage(error)}`);
-      return;
+      return false;
     }
     setDesktop((current) => ({
       ...current,
@@ -1911,6 +1972,7 @@ export function App() {
     } else {
       setInspector({ type: "empty" });
     }
+    return true;
   }
 
   function selectCodeProposal(proposalSetId: string, optionId: "A" | "B" | "C") {
@@ -3132,6 +3194,12 @@ export function App() {
     return candidate;
   }
 
+  function clearComposerAfterLocalAction() {
+    setComposerText("");
+    setAttachments([]);
+    setVisualDecisionComposerAction(null);
+  }
+
   async function sendPrompt(event?: FormEvent) {
     event?.preventDefault();
     if (!activeProject) {
@@ -3255,7 +3323,6 @@ export function App() {
     let codeProposalOnComplete = false;
     let codeProposalHistoryOnComplete = false;
     let featureDraftOnComplete = false;
-    let featureDraftBuildOnComplete = false;
     let featureDraftId: string | null = null;
     let mockupHistoryOnComplete = false;
     let proposalSetId: string | null = null;
@@ -3282,28 +3349,36 @@ export function App() {
       selectedFeatureDraft &&
       isFeatureDraftParkRequest(visiblePrompt)
     ) {
-      await parkFeatureDraft(selectedFeatureDraft);
+      if (await parkFeatureDraft(selectedFeatureDraft)) {
+        clearComposerAfterLocalAction();
+      }
       return;
     } else if (
       !visualDecisionComposerAction &&
       selectedFeatureDraft &&
       isFeatureDraftResumeRequest(visiblePrompt)
     ) {
-      await resumeFeatureDraft(selectedFeatureDraft);
+      if (await resumeFeatureDraft(selectedFeatureDraft)) {
+        clearComposerAfterLocalAction();
+      }
       return;
     } else if (
       !visualDecisionComposerAction &&
       selectedFeatureDraft &&
       isFeatureDraftDiscardRequest(visiblePrompt)
     ) {
-      await discardFeatureDraft(selectedFeatureDraft);
+      if (await discardFeatureDraft(selectedFeatureDraft)) {
+        clearComposerAfterLocalAction();
+      }
       return;
     } else if (
       !visualDecisionComposerAction &&
       selectedFeatureDraft &&
       isFeatureDraftBuildRequest(visiblePrompt)
     ) {
-      await buildFeatureDraft(selectedFeatureDraft);
+      if (await buildFeatureDraft(selectedFeatureDraft)) {
+        clearComposerAfterLocalAction();
+      }
       return;
     } else if (
       !visualDecisionComposerAction &&
@@ -3644,7 +3719,6 @@ export function App() {
       codeProposalOnComplete,
       codeProposalHistoryOnComplete,
       featureDraftOnComplete,
-      featureDraftBuildOnComplete,
       featureDraftId,
       mockupHistoryOnComplete,
       proposalSetId,
@@ -3908,8 +3982,7 @@ export function App() {
                 }
               : current.featureDraftActiveIdsByThreadId,
           featureDrafts:
-            (draft.featureDraftOnComplete ||
-              draft.featureDraftBuildOnComplete) &&
+            draft.featureDraftOnComplete &&
             targetFeatureDraftId &&
             targetFeatureDraft
               ? {
@@ -3918,9 +3991,7 @@ export function App() {
                     ...targetFeatureDraft,
                     threadId: targetThread.id,
                     turnId: response.turn.id,
-                    status: draft.featureDraftBuildOnComplete
-                      ? ("building" as const)
-                      : ("generating" as const),
+                    status: "generating" as const,
                     updatedAt: Date.now(),
                   },
                 }
@@ -5041,7 +5112,8 @@ export function App() {
         .filter(
           (draft) =>
             draft.projectId === activeProject.id &&
-            draft.threadId === desktop.activeThreadId &&
+            (activeFeatureDraftThreadId == null ||
+              draft.threadId === activeFeatureDraftThreadId) &&
             (draft.lifecycle === "active" || draft.lifecycle === "parked"),
         )
         .sort((left, right) => right.updatedAt - left.updatedAt)
@@ -7201,35 +7273,6 @@ Draft revision rules:
 
 User request:
 ${userPrompt.trim() || "Revise the draft."}`;
-}
-
-function featureDraftBuildPrompt(draft: FeatureDraft, project: Project) {
-  const changes =
-    draft.changedFiles.length > 0
-      ? draft.changedFiles
-          .map((change) => `- ${change.kind}: ${change.path}`)
-          .join("\n")
-      : "- No changed file summary recorded; inspect the Draft workspace.";
-  return [
-    "Build this.",
-    "",
-    "Project context explicitly attached by the user:",
-    "The user accepted the active Draft and asked to build it into Live.",
-    "Inspect the current Live project and use the Draft workspace as reference.",
-    "Update the real project source using existing conventions. Do not replace the project wholesale unless that is the smallest safe implementation.",
-    "Do not add Codex proposal chrome, Draft banners, fake controls, or temporary preview metadata to the accepted app UI.",
-    "Do not start or stop local preview servers from this implementation turn; the App Preview toolbar owns that.",
-    "After editing, summarize user-facing source changes and mention any mismatch or uncertainty versus the Draft.",
-    "In visible progress and the final response, do not mention internal paths, workspace IDs, registry IDs, selectors, source paths, hidden JSON, or coordinates.",
-    "",
-    `Live project path: ${project.path}`,
-    `Draft workspace path: ${draft.workspacePath}`,
-    `Draft brief path: ${draft.briefPath}`,
-    `Original Draft request: ${draft.originalPrompt}`,
-    `Draft summary: ${draft.summary}`,
-    "Draft file change summary:",
-    changes,
-  ].join("\n");
 }
 
 function liveOverlayProposalOutputRules(wantsOptions: boolean) {

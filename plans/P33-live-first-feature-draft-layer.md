@@ -2,15 +2,16 @@
 
 ## Status
 
-- WIP: Phase 0 audit complete; Phase 1 now has a manual-testable `Live + Draft` renderer path.
+- WIP: Phase 0 audit complete; Phase 1/2/2b/4/5/6 have a tested first implementation for the local single-draft loop.
 - Goal: replace proposal-lane-first thinking with a Live-first feature draft workflow for existing projects.
 - Product reset: A/B/C, Canvas Edit move mode, and semantic proxy editing are not the core product. They are supporting/fallback capabilities. The primary builder loop is: show one feature inside the real app, shape it conversationally, then build it into real source/backend only after approval.
 - Owner thesis: builders want to feel a feature in their app before paying the backend/integration cost. They do not want DevTools UI, lane mechanics, visible internal honesty, or mandatory A/B/C decision workflows.
 - Cleanup note: the uncommitted P31/P32 direct-manipulation implementation was discarded from the working tree on owner direction. P33 docs/plan are the durable direction to carry forward.
 - Implemented slice: added hidden draft workspace helpers that reuse code-backed proposal workspace isolation/diff/bounds under a separate draft registry, plus draft brief creation/update under `.codex/drafts/<draft-slug>/brief.md`.
-- Implemented slice: added renderer draft state, a `DraftPreview` surface that reuses the locked Live/proposal header shape as `Live + Draft`, single-draft routing for existing-project feature-preview prompts, draft revision routing, explicit `Build this` / `Discard` actions, and a compact owning-thread draft strip for `Park` / `Resume` / `Discard`.
+- Implemented slice: added renderer draft state, a `DraftPreview` surface that reuses the locked Live/proposal header shape as `Live + Draft`, single-draft routing for existing-project feature-preview prompts, draft revision routing, direct conflict-checked `Build this`, `Discard`, and a compact owning-thread draft strip for `Park` / `Resume` / `Discard`.
 - Audit result: A/B/C still exists for explicit options and legacy proposal flows; normal existing-project single-feature preview now has a draft path without source mutation before `Build this`.
-- Next slice: dogfood the manual path in Electron on two projects, then harden route/viewport continuity, named-draft selection, and build/discard recovery states.
+- Electron dogfood: `scripts/p33-electron-dogfood.mjs` passes on interface-heavy static and backend/workflow-heavy Node fixtures, capturing Live-only, Draft, Park, Resume, Discard, Build, and built-Live screenshots under `artifacts/p33-dogfood/evidence/`.
+- Next slice: dogfood real agent-created drafts, then harden route/viewport continuity, named-draft selection, explicit alternatives, and build/discard recovery states.
 
 ## Relevant Docs
 
@@ -350,7 +351,7 @@ Exit criteria:
 
 ### Phase 1 - Manual Draft Loop Proof
 
-Status: manual-testable renderer loop implemented for one active draft; real Electron dogfood remains.
+Status: implemented and dogfooded for one interface-heavy static project plus one backend/workflow-heavy Node project.
 
 Prove the product by hand before automating it.
 
@@ -363,7 +364,7 @@ In one real app:
 5. Show it in the preview as `Live + Draft`.
 6. Confirm the main project source stays untouched.
 7. Revise the draft once from a natural chat prompt.
-8. Manually promote it by removing the draft gate and replacing mock behavior with a real or clearly stubbed integration path.
+8. Promote it through explicit `Build this`; the current v1 directly applies the conflict-checked draft workspace diff into Live and reloads Live.
 
 Exit criteria:
 
@@ -465,17 +466,12 @@ Exit criteria:
 
 ### Phase 6 - Build This Conversion
 
-Status: first explicit `Build this` action implemented as a normal source-editing turn using the active draft as hidden reference; promotion polish remains.
+Status: first explicit `Build this` action implemented as direct draft workspace apply using the existing proposal workspace promotion/conflict machinery; richer backend/mock replacement remains.
 
 - Add a `Build this` path for the current draft.
-- Hidden prompt should include:
-  - approved draft diff/summary;
-  - draft brief;
-  - route/viewport/screenshot evidence;
-  - mock calls/data to replace;
-  - user revision history;
-  - app architecture findings.
-- Agent promotes UI into main source and removes/replaces mock behavior.
+- V1 direct apply uses the registered draft workspace diff and rejects conflicts if Live changed since the draft baseline.
+- Future richer builds should include the draft brief, route/viewport/screenshot evidence, mock calls/data to replace, user revision history, and app architecture findings when an agent turn is needed for backend integration.
+- Agent-assisted promotion can later replace mock behavior and remove draft-only helpers when direct apply is insufficient.
 - Reload Live and compare against the draft.
 
 Exit criteria:
@@ -513,6 +509,8 @@ Exit criteria:
 - Separate drafts can coexist without being mislabeled as A/B/C variants.
 
 ### Phase 9 - Dogfood
+
+Status: real Electron dogfood passes for interface-heavy static and backend/workflow-heavy Node fixtures. Real agent-generated drafts and explicit alternatives remain.
 
 Dogfood in real Electron with:
 
