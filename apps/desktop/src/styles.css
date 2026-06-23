@@ -1756,6 +1756,12 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   color: #d9ecff;
 }
 
+.mockup-option-actions .ghost-button.danger {
+  border-color: rgba(255, 141, 121, 0.38);
+  background: rgba(255, 141, 121, 0.1);
+  color: #ffd6cf;
+}
+
 .segmented-control {
   display: inline-grid;
   grid-auto-columns: minmax(34px, auto);

@@ -12,6 +12,12 @@ const {
   diffProposalWorkspace,
   prepareProposalWorkspaces,
 } = require("./proposal-workspaces.cjs");
+const {
+  diffDraftWorkspace,
+  prepareDraftWorkspace,
+  updateDraftBrief,
+  updateDraftLifecycle,
+} = require("./draft-workspaces.cjs");
 
 const APP_SERVER_PORT = 48889;
 const BRIDGE_PORT = 48890;
@@ -170,6 +176,98 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
         keepSetIds: Array.isArray(args.keepSetIds)
           ? args.keepSetIds.map(String)
           : [],
+      });
+    case "draft_workspace_prepare":
+      return prepareDraftWorkspace({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        draftId: String(args.draftId ?? ""),
+        name: String(args.name ?? ""),
+        slug: String(args.slug ?? ""),
+        threadId: String(args.threadId ?? ""),
+        goal: String(args.goal ?? ""),
+        currentSummary: String(args.currentSummary ?? ""),
+        affectedRoutes: Array.isArray(args.affectedRoutes)
+          ? args.affectedRoutes.map(String)
+          : [],
+        mockAssumptions: Array.isArray(args.mockAssumptions)
+          ? args.mockAssumptions.map(String)
+          : [],
+        approvedDecisions: Array.isArray(args.approvedDecisions)
+          ? args.approvedDecisions.map(String)
+          : [],
+        rejectedIdeas: Array.isArray(args.rejectedIdeas)
+          ? args.rejectedIdeas.map(String)
+          : [],
+        openQuestions: Array.isArray(args.openQuestions)
+          ? args.openQuestions.map(String)
+          : [],
+        buildPlan: Array.isArray(args.buildPlan)
+          ? args.buildPlan.map(String)
+          : [],
+        risks: Array.isArray(args.risks) ? args.risks.map(String) : [],
+      });
+    case "draft_workspace_diff":
+      return diffDraftWorkspace({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        draftId: String(args.draftId ?? ""),
+      });
+    case "draft_workspace_update_lifecycle":
+      return updateDraftLifecycle({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        draftId: String(args.draftId ?? ""),
+        status: String(args.status ?? ""),
+        goal: String(args.goal ?? ""),
+        currentSummary: String(args.currentSummary ?? ""),
+        affectedRoutes: Array.isArray(args.affectedRoutes)
+          ? args.affectedRoutes.map(String)
+          : undefined,
+        mockAssumptions: Array.isArray(args.mockAssumptions)
+          ? args.mockAssumptions.map(String)
+          : undefined,
+        approvedDecisions: Array.isArray(args.approvedDecisions)
+          ? args.approvedDecisions.map(String)
+          : [],
+        rejectedIdeas: Array.isArray(args.rejectedIdeas)
+          ? args.rejectedIdeas.map(String)
+          : [],
+        openQuestions: Array.isArray(args.openQuestions)
+          ? args.openQuestions.map(String)
+          : [],
+        buildPlan: Array.isArray(args.buildPlan)
+          ? args.buildPlan.map(String)
+          : [],
+        risks: Array.isArray(args.risks) ? args.risks.map(String) : [],
+        updateBrief: args.updateBrief,
+      });
+    case "draft_workspace_update_brief":
+      return updateDraftBrief({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: nativeFilePath(String(args.projectPath ?? "")),
+        draftId: String(args.draftId ?? ""),
+        goal: String(args.goal ?? ""),
+        currentSummary: String(args.currentSummary ?? ""),
+        affectedRoutes: Array.isArray(args.affectedRoutes)
+          ? args.affectedRoutes.map(String)
+          : undefined,
+        mockAssumptions: Array.isArray(args.mockAssumptions)
+          ? args.mockAssumptions.map(String)
+          : undefined,
+        approvedDecisions: Array.isArray(args.approvedDecisions)
+          ? args.approvedDecisions.map(String)
+          : [],
+        rejectedIdeas: Array.isArray(args.rejectedIdeas)
+          ? args.rejectedIdeas.map(String)
+          : [],
+        openQuestions: Array.isArray(args.openQuestions)
+          ? args.openQuestions.map(String)
+          : [],
+        buildPlan: Array.isArray(args.buildPlan)
+          ? args.buildPlan.map(String)
+          : [],
+        risks: Array.isArray(args.risks) ? args.risks.map(String) : [],
       });
     case "workspace_progress_snapshot":
       return workspaceProgressSnapshot(args);
@@ -1944,6 +2042,10 @@ function readImageDataUrl(filePath) {
 
 function proposalWorkspacesRoot() {
   return path.join(app.getPath("userData"), "proposal-workspaces");
+}
+
+function draftWorkspacesRoot() {
+  return path.join(app.getPath("userData"), "draft-workspaces");
 }
 
 function nativeFilePath(filePath) {

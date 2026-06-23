@@ -11,6 +11,7 @@ import {
   Search,
   Smartphone,
   Square,
+  X,
 } from "lucide-react";
 import {
   type DragEvent,
@@ -156,12 +157,18 @@ export function LiveAppPreview(props: {
   onVariantChange?: (variantId: string) => void;
   onBuildBaselineRequest?: (project: Project) => void;
   onLaneTransfer?: (from: string, to: string) => void;
+  proposalLaneTitle?: string;
+  proposalLaneStatus?: string;
   proposalControls?: {
     autoStart?: boolean;
     buildDisabled?: boolean;
     buildLabel: string;
     buildTitle?: string;
     onBuild: () => void;
+    secondaryDanger?: boolean;
+    secondaryLabel?: string;
+    secondaryTitle?: string;
+    onSecondary?: () => void;
   };
 }) {
   const storageKey = `codex.preview.url.${props.project.id}`;
@@ -1363,6 +1370,10 @@ export function LiveAppPreview(props: {
   const showOpenIconOnly = showLiveActionIconOnly;
   const showBuildIconOnly = proposalLaneActive && toolbarWidth < 620;
   const overflowBuildAction = proposalLaneActive && toolbarWidth < 450;
+  const hasSecondaryAction = Boolean(proposalControls?.onSecondary);
+  const showSecondaryIconOnly = proposalLaneActive && toolbarWidth < 720;
+  const overflowSecondaryAction =
+    proposalLaneActive && hasSecondaryAction && toolbarWidth < 540;
   const overflowChangesAction = proposalLaneActive
     ? false
     : toolbarWidth < 680;
@@ -1394,6 +1405,10 @@ export function LiveAppPreview(props: {
   const showMarkInMenu = canMarkArea && overflowMarkAction;
   const showBuildInline = proposalLaneActive && !overflowBuildAction;
   const showBuildInMenu = proposalLaneActive && overflowBuildAction;
+  const showSecondaryInline =
+    proposalLaneActive && hasSecondaryAction && !overflowSecondaryAction;
+  const showSecondaryInMenu =
+    proposalLaneActive && hasSecondaryAction && overflowSecondaryAction;
   const proposalBuildDisabled = Boolean(
     proposalControls?.buildDisabled || proposalStaleness.stale,
   );
@@ -1411,6 +1426,7 @@ export function LiveAppPreview(props: {
     showChangesInMenu ||
     showMarkInMenu ||
     showBuildInMenu ||
+    showSecondaryInMenu ||
     showReloadInMenu ||
     showStopInMenu ||
     showOpenInMenu ||
@@ -1654,6 +1670,25 @@ export function LiveAppPreview(props: {
             {!showBuildIconOnly && proposalControls.buildLabel}
           </button>
         )}
+        {proposalControls?.onSecondary && showSecondaryInline && (
+          <button
+            aria-label={proposalControls.secondaryLabel ?? "Discard"}
+            className={[
+              "ghost-button",
+              proposalControls.secondaryDanger ? "danger" : "",
+              showSecondaryIconOnly ? "icon-only" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            onClick={proposalControls.onSecondary}
+            title={proposalControls.secondaryTitle ?? "Discard"}
+            type="button"
+          >
+            <X size={15} />
+            {!showSecondaryIconOnly &&
+              (proposalControls.secondaryLabel ?? "Discard")}
+          </button>
+        )}
         {runningPreview && showReloadInline && (
           <button
             aria-label={reloadLabel}
@@ -1798,6 +1833,19 @@ export function LiveAppPreview(props: {
                     {proposalControls.buildLabel}
                   </button>
                 )}
+                {proposalControls?.onSecondary && showSecondaryInMenu && (
+                  <button
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      proposalControls.onSecondary?.();
+                    }}
+                    title={proposalControls.secondaryTitle ?? "Discard"}
+                    type="button"
+                  >
+                    <X size={15} />
+                    {proposalControls.secondaryLabel ?? "Discard"}
+                  </button>
+                )}
                 {showReloadInMenu && (
                   <button
                     onClick={() => {
@@ -1924,8 +1972,11 @@ export function LiveAppPreview(props: {
           >
             <div className="preview-toolbar-left">
               <div className="preview-title-row">
-                <strong>Proposals</strong>
-                <span>{proposalLaneActive ? "Selected" : "Available"}</span>
+                <strong>{props.proposalLaneTitle ?? "Proposals"}</strong>
+                <span>
+                  {props.proposalLaneStatus ??
+                    (proposalLaneActive ? "Selected" : "Available")}
+                </span>
               </div>
               <div className="preview-chip-row">
                 {selectedVariant?.title && (

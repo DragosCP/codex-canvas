@@ -11,6 +11,7 @@ import type {
   CodeProposalSet,
   ComposerAppPreviewContext,
   ComposerMockupPreviewContext,
+  FeatureDraft,
   InspectorSelection,
   MockupPreviewSet,
   PendingApproval,
@@ -24,6 +25,7 @@ import type {
   Turn,
 } from "../types";
 import { CodeProposalPreview } from "./CodeProposalPreview";
+import { DraftPreview } from "./DraftPreview";
 import {
   LiveAppPreview,
   type LiveAppPreviewMarkMeta,
@@ -41,6 +43,8 @@ export function Inspector(props: {
   appPreviewContexts: ComposerAppPreviewContext[];
   codeProposalCanShowLive: boolean;
   codeProposalSet: CodeProposalSet | null;
+  featureDraft: FeatureDraft | null;
+  featureDraftCanShowLive: boolean;
   mockupPreviewSet: MockupPreviewSet | null;
   mockupCanShowLive: boolean;
   mockupPreviewLiveResetToken: number;
@@ -85,6 +89,10 @@ export function Inspector(props: {
     previewSet: CodeProposalSet,
     option: CodeProposalOption,
   ) => void;
+  onBuildFeatureDraft: (draft: FeatureDraft) => void;
+  onDiscardFeatureDraft: (draft: FeatureDraft) => void;
+  onParkFeatureDraft: (draft: FeatureDraft) => void;
+  onResumeFeatureDraft: (draft: FeatureDraft) => void;
   onTransferCodeProposalLane: (
     previewSet: CodeProposalSet,
     from: "live" | "A" | "B" | "C",
@@ -107,6 +115,7 @@ export function Inspector(props: {
   const previewSelected =
     props.selection.type === "appPreview" ||
     props.selection.type === "planPreview" ||
+    props.selection.type === "draftPreview" ||
     props.selection.type === "codeProposalPreview" ||
     props.selection.type === "mockupPreview";
   const mockupPreviewProjectId =
@@ -200,6 +209,22 @@ export function Inspector(props: {
           }
           onSelect={props.onSelectCodeProposal}
           previewSet={props.codeProposalSet}
+          project={props.previewProject}
+        />
+      )}
+      {props.selection.type === "draftPreview" && (
+        <DraftPreview
+          appPreviewContexts={props.appPreviewContexts}
+          canShowLive={props.featureDraftCanShowLive}
+          draft={props.featureDraft}
+          onBuild={props.onBuildFeatureDraft}
+          onBuildBaselineRequest={props.onBuildBaselineApp}
+          onDiscard={props.onDiscardFeatureDraft}
+          onPark={props.onParkFeatureDraft}
+          onResume={props.onResumeFeatureDraft}
+          onMarkArea={(project, areaMark, meta) =>
+            props.onAttachAppPreviewMark(project, areaMark, meta)
+          }
           project={props.previewProject}
         />
       )}
@@ -502,6 +527,8 @@ function inspectorTitle(selection: InspectorSelection) {
       return "Mockup Preview";
     case "codeProposalPreview":
       return "Proposal Preview";
+    case "draftPreview":
+      return "Draft";
     case "planPreview":
       return "App Preview";
     case "command":

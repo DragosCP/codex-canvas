@@ -88,6 +88,8 @@ export type DesktopState = {
   expandedProjectIds: string[];
   planProposals: Record<string, PlanProposal>;
   sentComposerContextsByTurnId: Record<string, ComposerContextReference[]>;
+  featureDrafts: Record<string, FeatureDraft>;
+  featureDraftActiveIdsByThreadId: Record<string, string>;
   codeProposalSets: Record<string, CodeProposalSet>;
   codeProposalActiveSetIdsByThreadId: Record<string, string>;
   codeProposalCompareSetIdsByThreadId: Record<string, string>;
@@ -113,6 +115,11 @@ export type InspectorSelection =
       type: "mockupPreview";
       projectId: string;
       proposalSetId: string;
+    }
+  | {
+      type: "draftPreview";
+      projectId: string;
+      draftId: string;
     }
   | {
       type: "codeProposalPreview";
@@ -205,6 +212,39 @@ export type CodeProposalSet = {
   selectedOptionId: "A" | "B" | "C" | null;
   options: CodeProposalOption[];
   status: CodeProposalStatus;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type FeatureDraftLifecycle = "active" | "parked" | "built" | "discarded";
+
+export type FeatureDraftStatus =
+  | "preparing"
+  | "generating"
+  | "ready"
+  | "building"
+  | "failed";
+
+export type FeatureDraft = {
+  draftId: string;
+  registryId: string;
+  projectId: string;
+  threadId: string | null;
+  turnId: string | null;
+  name: string;
+  slug: string;
+  lifecycle: FeatureDraftLifecycle;
+  status: FeatureDraftStatus;
+  rootPath: string;
+  workspacePath: string;
+  previewOwnerId: string;
+  affectedRoutes: string[];
+  mockAssumptions: string[];
+  briefPath: string;
+  originalPrompt: string;
+  summary: string;
+  changedFiles: CodeProposalFileChange[];
   error?: string;
   createdAt: number;
   updatedAt: number;

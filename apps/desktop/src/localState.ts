@@ -4,6 +4,9 @@ import type {
   CodeProposalSet,
   CodeProposalStatus,
   DesktopState,
+  FeatureDraft,
+  FeatureDraftLifecycle,
+  FeatureDraftStatus,
   PlanProposal,
   PlanProposalKind,
   PlanProposalStatus,
@@ -73,6 +76,8 @@ export function createDefaultState(): DesktopState {
     expandedProjectIds: [],
     planProposals: {},
     sentComposerContextsByTurnId: {},
+    featureDrafts: {},
+    featureDraftActiveIdsByThreadId: {},
     codeProposalSets: {},
     codeProposalActiveSetIdsByThreadId: {},
     codeProposalCompareSetIdsByThreadId: {},
@@ -112,6 +117,10 @@ export function loadDesktopState(): DesktopState {
       planProposals: normalizePlanProposals(parsed.planProposals),
       sentComposerContextsByTurnId: normalizeSentComposerContextsByTurnId(
         parsed.sentComposerContextsByTurnId,
+      ),
+      featureDrafts: normalizeFeatureDrafts(parsed.featureDrafts),
+      featureDraftActiveIdsByThreadId: stringRecord(
+        parsed.featureDraftActiveIdsByThreadId,
       ),
       codeProposalSets: normalizeCodeProposalSets(parsed.codeProposalSets),
       codeProposalActiveSetIdsByThreadId: stringRecord(
@@ -271,6 +280,68 @@ function codeProposalStatus(value: unknown): CodeProposalStatus {
     return value;
   }
   return "ready";
+}
+
+function normalizeFeatureDrafts(value: unknown): Record<string, FeatureDraft> {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return {};
+  const normalized: Record<string, FeatureDraft> = {};
+  for (const [draftId, raw] of Object.entries(
+    value as Record<string, Partial<FeatureDraft>>,
+  )) {
+    if (!raw || typeof raw !== "object") continue;
+    const projectId = stringValue(raw.projectId);
+    const rootPath = stringValue(raw.rootPath);
+    const workspacePath = stringValue(raw.workspacePath);
+    if (!projectId || !rootPath || !workspacePath) continue;
+    const storedDraftId = stringValue(raw.draftId) || draftId;
+    normalized[storedDraftId] = {
+      draftId: storedDraftId,
+      registryId:
+        stringValue(raw.registryId) ||
+        `local-draft:${projectId}:${storedDraftId}`,
+      projectId,
+      threadId: stringValue(raw.threadId) || null,
+      turnId: stringValue(raw.turnId) || null,
+      name: stringValue(raw.name) || "Draft",
+      slug: stringValue(raw.slug) || storedDraftId,
+      lifecycle: featureDraftLifecycle(raw.lifecycle),
+      status: featureDraftStatus(raw.status),
+      rootPath,
+      workspacePath,
+      previewOwnerId:
+        stringValue(raw.previewOwnerId) ||
+        `feature-draft:${projectId}:${storedDraftId}`,
+      affectedRoutes: stringArray(raw.affectedRoutes),
+      mockAssumptions: stringArray(raw.mockAssumptions),
+      briefPath: stringValue(raw.briefPath),
+      originalPrompt: stringValue(raw.originalPrompt),
+      summary: stringValue(raw.summary) || "Draft ready for review.",
+      changedFiles: normalizeCodeProposalChanges(raw.changedFiles),
+      error: stringValue(raw.error) || undefined,
+      createdAt: numberValue(raw.createdAt),
+      updatedAt: numberValue(raw.updatedAt),
+    };
+  }
+  return normalized;
+}
+
+function featureDraftLifecycle(value: unknown): FeatureDraftLifecycle {
+  return value === "parked" ||
+    value === "built" ||
+    value === "discarded" ||
+    value === "active"
+    ? value
+    : "active";
+}
+
+function featureDraftStatus(value: unknown): FeatureDraftStatus {
+  return value === "preparing" ||
+    value === "generating" ||
+    value === "ready" ||
+    value === "building" ||
+    value === "failed"
+    ? value
+    : "ready";
 }
 
 function stringArray(value: unknown): string[] {
