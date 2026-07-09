@@ -555,6 +555,7 @@ impl AppServerSession {
                     approvals_reviewer: Some(approvals_reviewer.into()),
                     sandbox_policy,
                     permissions,
+                    planning_only: false,
                     model: Some(model),
                     service_tier,
                     effort,

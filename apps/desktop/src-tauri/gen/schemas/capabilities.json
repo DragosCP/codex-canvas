@@ -1,1 +1,0 @@
-{"default":{"identifier":"default","description":"Default capabilities for the P03 desktop shell.","local":true,"windows":["main"],"permissions":["core:default"]}}

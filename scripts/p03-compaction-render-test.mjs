@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createRequire } from "node:module";
+import fs from "node:fs";
 import path from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
@@ -33,8 +34,22 @@ try {
 
   assert.match(markup, /context-compaction-divider/);
   assert.match(markup, /Context automatically compacted/);
+  assert.equal(
+    [...markup.matchAll(/context-compaction-divider/g)].length,
+    1,
+    "duplicate compaction items should render as one notice",
+  );
   assert.doesNotMatch(markup, /assistant-message/);
   assert.doesNotMatch(markup, /debug/i);
+  const eventsSource = fs.readFileSync(
+    path.join(appDir, "src/hooks/useAppServerEvents.ts"),
+    "utf8",
+  );
+  assert.match(
+    eventsSource,
+    /thread\/compacted[\s\S]*insertOptimisticCompactionItem[\s\S]*syncThread/,
+    "compaction notifications should insert an inline marker before syncing",
+  );
   console.log("Compaction divider fixture render checks passed.");
 } finally {
   await vite.close();
@@ -77,7 +92,10 @@ function threadFixture() {
         durationMs: null,
         error: null,
         itemsView: "full",
-        items: [{ type: "contextCompaction", id: "compact-fixture" }],
+        items: [
+          { type: "contextCompaction", id: "compact-fixture-a" },
+          { type: "contextCompaction", id: "compact-fixture-b" },
+        ],
       },
     ],
   };

@@ -1,0 +1,42 @@
+{
+  "appId": "com.agent4cat.codexlocal",
+  "productName": "Codex Local",
+  "asar": true,
+  "npmRebuild": false,
+  "directories": {
+    "output": "release"
+  },
+  "files": [
+    "dist/**",
+    "electron/**/*.cjs",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "electron/resources/codex-sidecar",
+      "to": "codex-sidecar",
+      "filter": [
+        "**/*"
+      ]
+    }
+  ],
+  "win": {
+    "target": [
+      {
+        "target": "nsis",
+        "arch": [
+          "x64"
+        ]
+      }
+    ],
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "Codex Local"
+  }
+}

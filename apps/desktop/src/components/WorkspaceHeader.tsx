@@ -1,23 +1,23 @@
 import {
-  LayoutDashboard,
+  AppWindow,
   PanelLeftOpen,
   PanelRightClose,
   PanelRightOpen,
 } from "lucide-react";
 import { ConnectionBadge } from "./ConnectionBadge";
 import { threadTitle } from "../itemUtils";
-import { runtimeInfo } from "../runtime";
 import type { ConnectionStatus, Project, Thread } from "../types";
 
 export function WorkspaceHeader(props: {
   activeProject: Project | null;
-  activeCanvasSelected: boolean;
+  activeAppPreviewSelected: boolean;
   activeThread: Thread | null;
   hasActiveProject: boolean;
   connectionStatus: ConnectionStatus;
   connectionError: string | null;
+  backendLabel: string;
   inspectorOpen: boolean;
-  onOpenCanvas: () => void;
+  onOpenAppPreview: () => void;
   onOpenSidebar: () => void;
   onToggleInspector: () => void;
 }) {
@@ -52,22 +52,23 @@ export function WorkspaceHeader(props: {
         <ConnectionBadge
           status={props.connectionStatus}
           error={props.connectionError}
-          backendLabel={runtimeInfo.backendLabel}
+          backendLabel={props.backendLabel}
         />
         <button
-          className={`icon-button canvas-toggle ${
-            props.activeCanvasSelected ? "active" : ""
+          className={`icon-button app-preview-toggle ${
+            props.activeAppPreviewSelected ? "active" : ""
           }`}
-          onClick={props.onOpenCanvas}
+          onClick={props.onOpenAppPreview}
           disabled={!props.activeProject}
-          aria-pressed={props.activeCanvasSelected}
+          aria-pressed={props.activeAppPreviewSelected}
           title={
             props.activeProject
-              ? "Open project canvas"
-              : "Select a project before opening Canvas"
+              ? "Open live preview"
+              : "Select a project before opening live preview"
           }
+          type="button"
         >
-          <LayoutDashboard size={18} />
+          <AppWindow size={18} />
         </button>
         <button
           className={`icon-button inspector-toggle ${

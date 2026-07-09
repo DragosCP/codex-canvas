@@ -1,16 +1,26 @@
 import { Check, FileText, Loader2, Undo2, X } from "lucide-react";
 import type { PointerEvent } from "react";
 import { threadTitle } from "../itemUtils";
+import {
+  projectRelativeDisplayPath,
+  proposalWorkspaceDisplayPath,
+} from "../proposalWorkspaceDisplay";
 import type {
+  ComposerAppPreviewContext,
+  FeatureDraft,
   InspectorSelection,
   PendingApproval,
+  PlanPreviewAreaMark,
   Project,
-  ProjectCanvas,
   Thread,
   ThreadItem,
   Turn,
 } from "../types";
-import { CanvasInspector } from "./CanvasInspector";
+import { DraftPreview } from "./DraftPreview";
+import {
+  LiveAppPreview,
+  type LiveAppPreviewMarkMeta,
+} from "./LiveAppPreview";
 import { RichText } from "./RichText";
 
 export function Inspector(props: {
@@ -18,9 +28,12 @@ export function Inspector(props: {
   activeTurn: Turn | null;
   activeProject: Project | null;
   activeThread: Thread | null;
-  canvas: ProjectCanvas | null;
-  canvasProject: Project | null;
-  canvasReadOnly: boolean;
+  previewProject: Project | null;
+  appPreviewContexts: ComposerAppPreviewContext[];
+  featureDraft: FeatureDraft | null;
+  featureDraftCanShowLive: boolean;
+  featureDraftRefreshNonce: number;
+  livePreviewAutoStartNonce: number;
   documentError: string | null;
   documentText: string | null;
   fileChanges: Extract<ThreadItem, { type: "fileChange" }>[];
@@ -30,9 +43,24 @@ export function Inspector(props: {
   onReviewChanges: () => void;
   onRollback: () => void;
   onSelect: (selection: InspectorSelection) => void;
-  onUpdateCanvas: (projectId: string, canvas: ProjectCanvas) => void;
+  onAttachAppPreviewMark: (
+    project: Project,
+    areaMark: PlanPreviewAreaMark | null,
+    meta: LiveAppPreviewMarkMeta,
+  ) => void;
+  onBuildBaselineApp: (project: Project) => void;
+  onBuildFeatureDraft: (draft: FeatureDraft) => void;
+  onContinueFeatureDraft: (draft: FeatureDraft) => void;
+  onDiscardFeatureDraft: (draft: FeatureDraft) => void;
+  onParkFeatureDraft: (draft: FeatureDraft) => void;
+  onRefreshFeatureDraft: (draft: FeatureDraft) => void;
+  onResumeFeatureDraft: (draft: FeatureDraft) => void;
   selection: InspectorSelection;
 }) {
+  const previewSelected =
+    props.selection.type === "appPreview" ||
+    props.selection.type === "draftPreview";
+
   return (
     <aside className="inspector">
       <button
@@ -41,10 +69,11 @@ export function Inspector(props: {
         aria-label="Resize inspector"
         onPointerDown={props.onResizePointerDown}
       />
-      <header className="inspector-header">
-        <h2>{inspectorTitle(props.selection)}</h2>
-        <span>{props.activeTurn?.status ?? "idle"}</span>
-      </header>
+      {!previewSelected && (
+        <header className="inspector-header">
+          <h2>{inspectorTitle(props.selection)}</h2>
+        </header>
+      )}
       {props.selection.type === "empty" && (
         <ActivityPanel
           activeProject={props.activeProject}
@@ -55,16 +84,60 @@ export function Inspector(props: {
           onSelect={props.onSelect}
         />
       )}
-      {props.selection.type === "canvas" &&
-        props.canvas &&
-        props.canvasProject && (
-          <CanvasInspector
-            canvas={props.canvas}
-            project={props.canvasProject}
-            readOnly={props.canvasReadOnly}
-            onChange={(canvas) => props.onUpdateCanvas(canvas.projectId, canvas)}
+      {props.selection.type === "appPreview" &&
+        props.previewProject &&
+        (props.featureDraft ? (
+          <DraftPreview
+            appPreviewContexts={props.appPreviewContexts}
+            canShowLive={props.featureDraftCanShowLive}
+            draft={props.featureDraft}
+            refreshNonce={props.featureDraftRefreshNonce}
+            onBuild={props.onBuildFeatureDraft}
+            onBuildBaselineRequest={props.onBuildBaselineApp}
+            onContinue={props.onContinueFeatureDraft}
+            onDiscard={props.onDiscardFeatureDraft}
+            onPark={props.onParkFeatureDraft}
+            onRefresh={props.onRefreshFeatureDraft}
+            onResume={props.onResumeFeatureDraft}
+            onMarkArea={(project, areaMark, meta) =>
+              props.onAttachAppPreviewMark(project, areaMark, meta)
+            }
+            project={props.previewProject}
           />
-        )}
+        ) : (
+          <LiveAppPreview
+            project={props.previewProject}
+            appPreviewContexts={props.appPreviewContexts}
+            autoStartNonce={props.livePreviewAutoStartNonce}
+            onBuildBaselineRequest={props.onBuildBaselineApp}
+            onAreaMarkChange={(areaMark, meta) =>
+              props.previewProject &&
+              props.onAttachAppPreviewMark(props.previewProject, areaMark, {
+                ...meta,
+                surface: "live",
+              })
+            }
+          />
+        ))}
+      {props.selection.type === "draftPreview" && (
+        <DraftPreview
+          appPreviewContexts={props.appPreviewContexts}
+          canShowLive={props.featureDraftCanShowLive}
+          draft={props.featureDraft}
+          refreshNonce={props.featureDraftRefreshNonce}
+          onBuild={props.onBuildFeatureDraft}
+          onBuildBaselineRequest={props.onBuildBaselineApp}
+          onContinue={props.onContinueFeatureDraft}
+          onDiscard={props.onDiscardFeatureDraft}
+          onPark={props.onParkFeatureDraft}
+          onRefresh={props.onRefreshFeatureDraft}
+          onResume={props.onResumeFeatureDraft}
+          onMarkArea={(project, areaMark, meta) =>
+            props.onAttachAppPreviewMark(project, areaMark, meta)
+          }
+          project={props.previewProject}
+        />
+      )}
       {props.selection.type === "document" && (
         <div className="document-surface">
           {props.documentError && (
@@ -213,20 +286,33 @@ function ActivityPanel(props: {
         {recentChanges.map((item) => (
           <button
             key={item.id}
-            className="activity-row"
+            className="activity-row activity-row-rich"
             onClick={() => props.onSelect({ type: "fileChange", item })}
           >
             <FileText size={15} />
-            <span>
-              {item.changes.length} changed file
-              {item.changes.length === 1 ? "" : "s"}
+            <span className="activity-row-copy">
+              <strong>
+                {item.changes.length} changed file
+                {item.changes.length === 1 ? "" : "s"}
+              </strong>
+              <small>{fileChangePreview(item, props.activeProject)}</small>
             </span>
           </button>
         ))}
       </section>
-
     </div>
   );
+}
+
+function fileChangePreview(
+  item: Extract<ThreadItem, { type: "fileChange" }>,
+  activeProject: Project | null,
+) {
+  const labels = item.changes
+    .slice(0, 4)
+    .map((change) => friendlyPath(change.path, activeProject));
+  const hidden = item.changes.length - labels.length;
+  return hidden > 0 ? `${labels.join(", ")} +${hidden} more` : labels.join(", ");
 }
 
 function ApprovalDetail(props: {
@@ -256,8 +342,10 @@ function inspectorTitle(selection: InspectorSelection) {
   switch (selection.type) {
     case "document":
       return selection.title ?? "Document";
-    case "canvas":
-      return "Canvas";
+    case "appPreview":
+      return "App Preview";
+    case "draftPreview":
+      return "Draft";
     case "command":
       return "Command";
     case "fileChange":
@@ -281,7 +369,11 @@ function documentPath(path: string, activeProject: Project | null) {
 }
 
 function friendlyPath(path: string, activeProject: Project | null) {
+  const proposalPath = proposalWorkspaceDisplayPath(path);
+  if (proposalPath) return proposalPath;
   if (!activeProject) return path;
+  const relativePath = projectRelativeDisplayPath(path, activeProject.path);
+  if (relativePath) return relativePath;
   const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
   return path
     .replace(new RegExp(escapeRegExp(projectPath), "g"), ".")

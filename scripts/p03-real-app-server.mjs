@@ -13,11 +13,29 @@ const bridgePort = process.env.P03_REAL_BRIDGE_PORT ?? "48890";
 const bridgeHost = process.env.P03_REAL_BRIDGE_HOST ?? "0.0.0.0";
 const appServerUrl = `ws://127.0.0.1:${appServerPort}`;
 const bridgeUrl = `ws://127.0.0.1:${bridgePort}`;
+const desktopParentPid = Number.parseInt(
+  process.env.P03_DESKTOP_PARENT_PID ?? "",
+  10,
+);
+const watchedParentPid = process.platform === "win32" ? desktopParentPid : NaN;
+const hasWatchedParentPid =
+  Number.isFinite(watchedParentPid) && watchedParentPid > 0;
+
+let cleanupAndExit = () => process.exit(0);
+watchParentProcess(() => cleanupAndExit());
 
 if (process.platform === "win32") {
   const wslScript = wslpath(scriptPath);
   const wslRepo = wslpath(repoRoot);
-  const result = spawnSync(
+  if (await readyz(bridgePort)) {
+    console.log(`Using existing Windows bridge at ${bridgeUrl}`);
+    while (await readyz(bridgePort)) {
+      await wait(1000);
+    }
+    console.log("Existing Windows bridge stopped; starting a managed bridge.");
+  }
+
+  const wslProcess = spawn(
     "wsl.exe",
     [
       "-d",
@@ -25,11 +43,53 @@ if (process.platform === "win32") {
       "--",
       "bash",
       "-lc",
-      `cd ${sh(wslRepo)} && node ${sh(wslScript)}`,
+      `cd ${sh(wslRepo)} && P03_DESKTOP_PARENT_PID= node ${sh(wslScript)}`,
     ],
-    { stdio: "inherit" },
+    {
+      stdio: "inherit",
+      env: {
+        ...process.env,
+        P03_REAL_BRIDGE_HOST: "0.0.0.0",
+      },
+      windowsHide: true,
+    },
   );
-  process.exit(result.status ?? 1);
+
+  let windowsBridgeServer = null;
+  cleanupAndExit = () => {
+    wslProcess.kill();
+    windowsBridgeServer?.close();
+    process.exit(0);
+  };
+
+  for (const signal of ["SIGINT", "SIGTERM"]) {
+    process.on(signal, cleanupAndExit);
+  }
+
+  const wslBridgeHost = await waitForWslBridgeHost(bridgePort);
+  windowsBridgeServer = (await readyz(bridgePort))
+    ? null
+    : await startWebSocketBridge(
+        bridgePort,
+        bridgePort,
+        wslBridgeHost,
+        "127.0.0.1",
+      );
+
+  console.log(`P03 WSL bridge reachable at ws://${wslBridgeHost}:${bridgePort}`);
+  console.log(
+    windowsBridgeServer
+      ? `P03 Windows desktop bridge listening at ${bridgeUrl}`
+      : `P03 Windows desktop bridge using WSL localhost forwarding at ${bridgeUrl}`,
+  );
+  console.log("Use Ctrl+C to stop.");
+
+  wslProcess.on("exit", (code) => {
+    console.log(`WSL app-server helper exited with code ${code}; keeping Windows bridge alive.`);
+  });
+
+  keepAlive();
+  await waitForever();
 }
 
 const codexBin = join(repoRoot, "codex-rs", "target", "debug", "codex");
@@ -38,6 +98,13 @@ if (!existsSync(codexBin)) {
 }
 
 let appServer = null;
+let bridgeServer = null;
+cleanupAndExit = () => {
+  appServer?.kill();
+  bridgeServer?.close();
+  process.exit(0);
+};
+
 if (await readyz(appServerPort)) {
   console.log(`Using existing real WSL app-server at ${appServerUrl}`);
 } else {
@@ -52,14 +119,15 @@ if (await readyz(appServerPort)) {
 }
 
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => {
-    appServer?.kill();
-    process.exit(0);
-  });
+  process.on(signal, cleanupAndExit);
 }
 
 await waitForReady(appServerPort);
-const bridgeServer = await startWebSocketBridge(bridgePort, appServerPort);
+if (await readyz(bridgePort)) {
+  console.log(`Using existing real WSL browser bridge at ${bridgeUrl}`);
+} else {
+  bridgeServer = await startWebSocketBridge(bridgePort, appServerPort);
+}
 
 console.log(`P03 real WSL app-server listening at ${appServerUrl}`);
 console.log(`P03 browser dev bridge listening at ${bridgeUrl}`);
@@ -75,13 +143,13 @@ console.log("Use Ctrl+C to stop.");
 if (appServer) {
   await new Promise((resolvePromise, reject) => {
     appServer.on("exit", (code) => {
-      bridgeServer.close();
+      bridgeServer?.close();
       if (code === 0) resolvePromise();
       reject(new Error(`app-server exited with code ${code}`));
     });
   });
 } else {
-  await new Promise(() => {});
+  keepAlive();
 }
 
 async function waitForReady(port) {
@@ -92,9 +160,9 @@ async function waitForReady(port) {
   throw new Error(`app-server did not become ready on 127.0.0.1:${port}`);
 }
 
-function readyz(port) {
+function readyz(port, host = "127.0.0.1") {
   return new Promise((resolvePromise) => {
-    const request = get(`http://127.0.0.1:${port}/readyz`, (response) => {
+    const request = get(`http://${host}:${port}/readyz`, (response) => {
       response.resume();
       resolvePromise(response.statusCode === 200);
     });
@@ -106,10 +174,15 @@ function readyz(port) {
   });
 }
 
-function startWebSocketBridge(port, targetPort) {
+function startWebSocketBridge(
+  port,
+  targetPort,
+  targetHost = "127.0.0.1",
+  listenHost = bridgeHost,
+) {
   const server = createServer(async (req, res) => {
     if (req.url === "/readyz") {
-      res.statusCode = (await readyz(targetPort)) ? 200 : 503;
+      res.statusCode = (await readyz(targetPort, targetHost)) ? 200 : 503;
       res.end(res.statusCode === 200 ? "ok" : "not ready");
       return;
     }
@@ -118,7 +191,7 @@ function startWebSocketBridge(port, targetPort) {
   });
 
   server.on("upgrade", (req, socket, head) => {
-    const upstream = connectTcp(Number(targetPort), "127.0.0.1");
+    const upstream = connectTcp(Number(targetPort), targetHost);
     upstream.on("connect", () => {
       const lines = [`GET ${req.url} HTTP/${req.httpVersion}`];
       for (const [name, value] of Object.entries(req.headers)) {
@@ -139,14 +212,62 @@ function startWebSocketBridge(port, targetPort) {
   });
 
   return new Promise((resolvePromise) => {
-    server.listen(Number(port), bridgeHost, () => resolvePromise(server));
+    server.listen(Number(port), listenHost, () => resolvePromise(server));
   });
+}
+
+async function waitForWslBridgeHost(port) {
+  for (let attempt = 0; attempt < 80; attempt += 1) {
+    const host = wslHost();
+    if (host && (await readyz(port, host))) return host;
+    await wait(250);
+  }
+  throw new Error(`WSL bridge did not become reachable from Windows on port ${port}`);
+}
+
+function wslHost() {
+  const result = spawnSync("wsl.exe", ["-d", "Ubuntu", "--", "hostname", "-I"], {
+    encoding: "utf8",
+  });
+  if (result.status !== 0) return null;
+  return (
+    result.stdout
+      .trim()
+      .split(/\s+/)
+      .find((address) => /^\d+\.\d+\.\d+\.\d+$/.test(address)) ?? null
+  );
 }
 
 function wait(ms) {
   return new Promise((resolvePromise) => {
     setTimeout(resolvePromise, ms);
   });
+}
+
+function watchParentProcess(onExit) {
+  if (!hasWatchedParentPid) return;
+  const timer = setInterval(() => {
+    if (isProcessAlive(watchedParentPid)) return;
+    onExit();
+  }, 1000);
+  timer.unref?.();
+}
+
+function isProcessAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (error) {
+    return error?.code === "EPERM";
+  }
+}
+
+function keepAlive() {
+  setInterval(() => {}, 2 ** 30);
+}
+
+function waitForever() {
+  return new Promise(() => {});
 }
 
 function wslpath(path) {

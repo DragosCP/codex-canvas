@@ -1,7 +1,7 @@
 param(
     [ValidateSet("real", "mock")]
     [string]$Backend = "real",
-    [ValidateSet("desktop", "tauri", "browser")]
+    [ValidateSet("desktop", "browser")]
     [string]$Shell = "desktop",
     [switch]$NoOpen
 )
@@ -14,10 +14,6 @@ $Url = "http://127.0.0.1:4317"
 
 New-Item -ItemType Directory -Force -Path $CacheDir | Out-Null
 Set-Location $Root
-
-function Get-DesktopExePath {
-    Join-Path $Root "apps\desktop\src-tauri\target\release\codex-desktop.exe"
-}
 
 function Test-LocalPort {
     param([int]$Port)
@@ -50,63 +46,70 @@ function Start-HiddenServer {
     Write-Host "Started $Name. Log: $LogFile"
 }
 
+function Convert-ToWslPath {
+    param([string]$Path)
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    if ($resolved -match "^([A-Za-z]):\\(.*)$") {
+        $drive = $matches[1].ToLowerInvariant()
+        $rest = $matches[2] -replace "\\", "/"
+        return "/mnt/$drive/$rest"
+    }
+
+    return $resolved -replace "\\", "/"
+}
+
+function Test-CodexLocalWindow {
+    $mainScript = (Join-Path $Root "apps\desktop\electron\main.cjs").ToLowerInvariant()
+    $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
+        Where-Object {
+            $_.Name -eq "electron.exe" -and
+            $_.CommandLine -and
+            $_.CommandLine.ToLowerInvariant().Contains($mainScript)
+        } |
+        Select-Object -First 1
+    return [bool]$processes
+}
+
 if ($Shell -eq "desktop") {
     if ($Backend -ne "real") {
-        Write-Host "The built desktop app currently supports the real WSL backend path only."
+        Write-Host "The Electron desktop app currently supports the real native backend path only."
         Write-Host "Use -Shell browser -Backend mock for the mock/demo fallback."
         exit 1
     }
 
-    $exe = Get-DesktopExePath
-    if (-not (Test-Path $exe)) {
-        Write-Host "Built desktop app not found: $exe"
-        Write-Host "Run: corepack pnpm --filter @openai/codex-desktop tauri:build"
-        Write-Host "Or use: .\run-codex-desktop-ui.ps1 -Shell tauri -Backend real"
+    $electronRunner = Join-Path $Root "apps\desktop\electron\run.mjs"
+    $desktopBundle = Join-Path $Root "apps\desktop\dist\index.html"
+
+    if (-not (Test-Path $electronRunner)) {
+        Write-Host "Electron launcher not found: $electronRunner"
+        Write-Host "Check that apps\desktop\electron is present on this branch."
+        exit 1
+    }
+
+    if (-not (Test-Path $desktopBundle)) {
+        Write-Host "Desktop renderer bundle not found: $desktopBundle"
+        Write-Host "Run: corepack pnpm --filter codex-local-desktop build"
         exit 1
     }
 
     if ($NoOpen) {
-        Write-Host "Desktop app is ready: $exe"
+        Write-Host "Electron desktop app is ready: $electronRunner"
         exit 0
     }
 
-    Start-Process -FilePath $exe -WorkingDirectory (Split-Path $exe)
-    Write-Host "Started Codex Desktop app: $exe"
-    exit 0
-}
-
-if ($Shell -eq "tauri") {
-    if ($Backend -ne "real") {
-        Write-Host "Tauri dev currently supports the real WSL backend path only."
-        Write-Host "Use -Shell browser -Backend mock for the mock/demo fallback."
-        exit 1
-    }
-
-    $CargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
-    if ((Test-Path $CargoBin) -and (($env:Path -split ';') -notcontains $CargoBin)) {
-        $env:Path = "$CargoBin;$env:Path"
-    }
-
-    foreach ($tool in @("corepack", "cargo")) {
-        if (-not (Get-Command $tool -ErrorAction SilentlyContinue)) {
-            Write-Host "$tool is not available on PATH."
-            Write-Host "Install Windows Rust/Cargo and open a new terminal, then retry."
-            exit 1
-        }
-    }
-
-    if (Test-LocalPort -Port 4317) {
-        Write-Host "Desktop UI dev server is already running on 127.0.0.1:4317."
-        Write-Host "If you changed shell/backend modes, stop the existing dev server first."
+    if (Test-CodexLocalWindow) {
+        Write-Host "Codex Local already appears to be running."
         exit 0
     }
 
+    $launchLog = Join-Path $CacheDir ("codex-local-electron-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
     Start-HiddenServer `
-        -Name "Tauri desktop app" `
-        -Command "set `"PATH=$CargoBin;%PATH%`" && corepack pnpm --filter @openai/codex-desktop tauri:dev" `
-        -LogFile (Join-Path $CacheDir "p03-tauri-dev.log")
+        -Name "Codex Local Electron" `
+        -Command "corepack pnpm --filter codex-local-desktop electron:run" `
+        -LogFile $launchLog
 
-    Write-Host "Tauri desktop app is starting. A native window should open shortly."
+    Write-Host "Codex Local Electron is starting. A native window should open shortly."
     exit 0
 }
 
@@ -115,19 +118,32 @@ $BackendName = if ($Backend -eq "real") { "real WSL app-server" } else { "mock a
 $BackendScript = if ($Backend -eq "real") { "app-server:real" } else { "app-server:mock" }
 $BackendMode = if ($Backend -eq "real") { "real-wsl" } else { "mock-dev" }
 $BackendLabel = if ($Backend -eq "real") { "Real WSL app-server" } else { "Mock app-server dev backend" }
-$ProjectPathHint = if ($Backend -eq "real") { "/mnt/c/Users/drago/Desktop/harnesses/codex-main" } else { "/mnt/c/Users/drago/Desktop/harnesses/codex-main/.cache/p03-desktop-demo-workspace" }
+$ProjectPathHintOverride = $env:VITE_CODEX_PROJECT_PATH_HINT
+if ([string]::IsNullOrWhiteSpace($ProjectPathHintOverride)) {
+    $ProjectPathHintOverride = $env:CODEX_PROJECT_PATH_HINT
+}
+$DefaultProjectPathHint = if ($Backend -eq "real") {
+    Convert-ToWslPath -Path $Root
+} else {
+    Convert-ToWslPath -Path (Join-Path $CacheDir "p03-desktop-demo-workspace")
+}
+$ProjectPathHint = if ([string]::IsNullOrWhiteSpace($ProjectPathHintOverride)) {
+    $DefaultProjectPathHint
+} else {
+    $ProjectPathHintOverride
+}
 
 if (-not (Test-LocalPort -Port $BackendPort)) {
     Start-HiddenServer `
         -Name $BackendName `
-        -Command "corepack pnpm --filter @openai/codex-desktop $BackendScript" `
+        -Command "corepack pnpm --filter codex-local-desktop $BackendScript" `
         -LogFile (Join-Path $CacheDir "p03-$Backend-app-server.log")
 } else {
     Write-Host "$BackendName already running on 127.0.0.1:$BackendPort."
 }
 
 if (-not (Test-LocalPort -Port 4317)) {
-    $devCommand = "set `"VITE_CODEX_APP_SERVER_URL=ws://127.0.0.1:$BackendPort`" && set `"VITE_CODEX_BACKEND_LABEL=$BackendLabel`" && set `"VITE_CODEX_BACKEND_MODE=$BackendMode`" && set `"VITE_CODEX_PROJECT_PATH_HINT=$ProjectPathHint`" && corepack pnpm --filter @openai/codex-desktop dev"
+    $devCommand = "set `"VITE_CODEX_APP_SERVER_URL=ws://127.0.0.1:$BackendPort`" && set `"VITE_CODEX_BACKEND_LABEL=$BackendLabel`" && set `"VITE_CODEX_BACKEND_MODE=$BackendMode`" && set `"VITE_CODEX_PROJECT_PATH_HINT=$ProjectPathHint`" && corepack pnpm --filter codex-local-desktop dev"
     Start-HiddenServer `
         -Name "desktop UI" `
         -Command $devCommand `

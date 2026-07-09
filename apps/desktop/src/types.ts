@@ -9,6 +9,16 @@ import type { Thread } from "../../../codex-rs/app-server-protocol/schema/typesc
 import type { ThreadItem } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/ThreadItem";
 import type { ThreadTokenUsage } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/ThreadTokenUsage";
 import type { Turn } from "../../../codex-rs/app-server-protocol/schema/typescript/v2/Turn";
+import type {
+  BuildSelectedStrategy,
+  ProposalBacking,
+  ProposalLifecycle,
+} from "./canvasProposalModel";
+import type {
+  TargetResolutionConfidence,
+  TargetResolutionKind,
+} from "./canvasTargeting";
+import type { VisualPatchBundle } from "./visualPatchRuntime";
 
 export type {
   AskForApproval,
@@ -66,6 +76,8 @@ export type LayoutState = {
   commandSurfaceOpen: boolean;
 };
 
+export type PreviewArtifactKind = "mockup" | "wireframe" | "preview";
+
 export type DesktopState = {
   version: 1;
   appServerUrl: string;
@@ -74,7 +86,15 @@ export type DesktopState = {
   activeThreadId: string | null;
   pinnedThreadIds: string[];
   expandedProjectIds: string[];
-  canvases: Record<string, ProjectCanvas>;
+  planProposals: Record<string, PlanProposal>;
+  sentComposerContextsByTurnId: Record<string, ComposerContextReference[]>;
+  featureDrafts: Record<string, FeatureDraft>;
+  featureDraftActiveIdsByThreadId: Record<string, string>;
+  codeProposalSets: Record<string, CodeProposalSet>;
+  codeProposalActiveSetIdsByThreadId: Record<string, string>;
+  codeProposalCompareSetIdsByThreadId: Record<string, string>;
+  mockupActiveProposalSetIdsByThreadId: Record<string, string>;
+  mockupHistoryProposalSetIds: Record<string, boolean>;
   layout: LayoutState;
 };
 
@@ -87,7 +107,15 @@ export type PendingApproval = {
 
 export type InspectorSelection =
   | { type: "empty" }
-  | { type: "canvas"; projectId: string }
+  | {
+      type: "appPreview";
+      projectId: string;
+    }
+  | {
+      type: "draftPreview";
+      projectId: string;
+      draftId: string;
+    }
   | { type: "document"; path: string; title?: string }
   | { type: "command"; item: Extract<ThreadItem, { type: "commandExecution" }> }
   | { type: "fileChange"; item: Extract<ThreadItem, { type: "fileChange" }> }
@@ -96,6 +124,133 @@ export type InspectorSelection =
 export type ThreadMap = Record<string, Thread>;
 
 export type ThreadTokenUsageMap = Record<string, ThreadTokenUsage>;
+
+export type MockupDepth = "quick" | "full";
+
+export type SavedMockup = {
+  id: string;
+  label: string;
+  title: string;
+  summary: string;
+  filePath: string;
+  html: string;
+  highlights?: ProposalHighlight[];
+};
+
+export type MockupPreviewSet = {
+  proposalSetId: string;
+  projectId: string;
+  threadId: string | null;
+  artifactKind: PreviewArtifactKind;
+  proposalBacking: Extract<
+    ProposalBacking,
+    "wireframe_artifact" | "mockup_artifact"
+  >;
+  buildStrategy: Extract<
+    BuildSelectedStrategy,
+    "implement_from_wireframe" | "implement_from_mockup"
+  >;
+  baseDir: string;
+  originalPrompt: string;
+  depth: MockupDepth;
+  selectedMockupId: string | null;
+  mockups: SavedMockup[];
+};
+
+export type CodeProposalStatus =
+  | "preparing"
+  | "generating"
+  | "ready"
+  | "applying"
+  | "applied"
+  | "failed"
+  | "history";
+
+export type CodeProposalFileChange = {
+  kind: "created" | "updated" | "deleted";
+  path: string;
+  hash: string;
+  size: number;
+};
+
+export type CodeProposalOption = {
+  id: "A" | "B" | "C";
+  title: string;
+  summary: string;
+  workspacePath: string;
+  previewOwnerId: string;
+  status: CodeProposalStatus;
+  changedFiles: CodeProposalFileChange[];
+  appliedAt?: number;
+};
+
+export type CodeProposalSet = {
+  proposalSetId: string;
+  registryId: string;
+  projectId: string;
+  threadId: string | null;
+  turnId: string | null;
+  proposalBacking: Extract<ProposalBacking, "code_backed_workspace">;
+  buildStrategy: Extract<BuildSelectedStrategy, "promote_code_workspace">;
+  rootPath: string;
+  originalPrompt: string;
+  selectedOptionId: "A" | "B" | "C" | null;
+  options: CodeProposalOption[];
+  status: CodeProposalStatus;
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type FeatureDraftLifecycle = "active" | "parked" | "built" | "discarded";
+
+export type FeatureDraftStatus =
+  | "preparing"
+  | "generating"
+  | "ready"
+  | "building"
+  | "failed";
+
+export type FeatureDraft = {
+  draftId: string;
+  registryId: string;
+  projectId: string;
+  threadId: string | null;
+  turnId: string | null;
+  name: string;
+  slug: string;
+  lifecycle: FeatureDraftLifecycle;
+  status: FeatureDraftStatus;
+  rootPath: string;
+  workspacePath: string;
+  previewOwnerId: string;
+  affectedRoutes: string[];
+  mockAssumptions: string[];
+  briefPath: string;
+  originalPrompt: string;
+  summary: string;
+  changedFiles: CodeProposalFileChange[];
+  error?: string;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type CanvasVisualReferenceMeta = {
+  threadId?: string | null;
+  canvasId?: string;
+  sourceFile?: string;
+  componentName?: string;
+  screenshotRef?: string;
+  targetResolutionKind?: TargetResolutionKind;
+  targetResolutionConfidence?: TargetResolutionConfidence;
+};
+
+export type ProposalHighlight = CanvasVisualReferenceMeta & {
+  id: string;
+  label: string;
+  note: string;
+  areaMark: PlanPreviewAreaMark;
+};
 
 export type ComposerAttachmentStatus = "attached" | "ready" | "unsupported";
 
@@ -110,34 +265,131 @@ export type ComposerAttachment = {
   title: string;
 };
 
+export type ComposerAppPreviewContext = {
+  type: "appPreview";
+  id: string;
+  projectId: string;
+  projectName: string;
+  surface: "live" | "draft";
+  draftId?: string;
+  threadId?: string | null;
+  route?: string;
+  previewUrl: string;
+  viewport: "desktop" | "mobile";
+  markLabel?: string;
+  markNumber?: number;
+  areaMark: PlanPreviewAreaMark;
+  thumbnailDataUrl?: string;
+} & CanvasVisualReferenceMeta;
+
+export type ComposerContextReference = ComposerAppPreviewContext;
+
+export type PlanProposalStatus =
+  | "pending"
+  | "accepted"
+  | "declined"
+  | "superseded";
+
+export type PlanProposalKind = "plan" | "safer_alternative" | "live_proposal";
+
+export type PlanProposal = {
+  id: string;
+  projectId: string;
+  threadId: string;
+  turnId: string;
+  prompt: string;
+  contexts: ComposerContextReference[];
+  previewSpec?: PlanPreviewSpec | null;
+  previewSelectedVariantId?: string | null;
+  previewAreaMark?: PlanPreviewAreaMark | null;
+  previewSession?: PlanPreviewSessionState | null;
+  previewBaselineSession?: PlanPreviewSessionState | null;
+  previewUserEditedAt?: number;
+  proposalBacking?: ProposalBacking;
+  proposalLifecycle?: ProposalLifecycle;
+  buildStrategy?: BuildSelectedStrategy;
+  proposalKind: PlanProposalKind;
+  status: PlanProposalStatus;
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type PlanPreviewComponentKind =
+  | "button"
+  | "panel"
+  | "menu"
+  | "modal"
+  | "input"
+  | "badge";
+
+export type PlanPreviewPlacement = "topbar" | "sidePanel" | "modal";
+
+export type PlanPreviewComponent = {
+  kind: PlanPreviewComponentKind;
+  label: string;
+  body: string;
+  actionLabel?: string;
+};
+
+export type PlanPreviewVariant = {
+  id: "A" | "B" | "C";
+  title: string;
+  tradeoff: string;
+  placement: PlanPreviewPlacement;
+  summary: string;
+  route?: string;
+  viewState?: string;
+  targetRegion?: string;
+  highlights?: ProposalHighlight[];
+  visualPatchBundle?: VisualPatchBundle;
+  components: PlanPreviewComponent[];
+};
+
+export type PlanPreviewSpec = {
+  version: 1;
+  summary: string;
+  variants: PlanPreviewVariant[];
+  createdAt: number;
+  updatedAt: number;
+};
+
+export type PlanPreviewAreaMark = {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+  viewportWidth: number;
+  viewportHeight: number;
+  route?: string;
+  note: string;
+  createdAt: number;
+};
+
+export type PlanPreviewCleanupStatus =
+  | "idle"
+  | "clean"
+  | "selected"
+  | "reset"
+  | "failed"
+  | "unavailable";
+
+export type PlanPreviewSessionState = {
+  previewUrl: string;
+  route: string;
+  viewport: "desktop" | "mobile";
+  interactionState: string;
+  cleanupStatus: PlanPreviewCleanupStatus;
+  updatedAt: number;
+};
+
 export type LocalChatDraft = {
   id: string;
   projectId: string;
   projectPath: string;
   text: string;
   attachments: ComposerAttachment[];
+  contexts: ComposerContextReference[];
   createdAt: number;
-  updatedAt: number;
-};
-
-export type CanvasItemState = "current" | "proposed" | "deleted";
-
-export type CanvasItem = {
-  id: string;
-  kind: "container" | "text";
-  title: string;
-  body: string;
-  x: number;
-  y: number;
-  width: number;
-  height: number;
-  state: CanvasItemState;
-  locked: boolean;
-};
-
-export type ProjectCanvas = {
-  projectId: string;
-  items: CanvasItem[];
   updatedAt: number;
 };
 

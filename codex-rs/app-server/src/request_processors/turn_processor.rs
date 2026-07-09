@@ -356,11 +356,13 @@ impl TurnRequestProcessor {
             .collect();
         let turn_has_input = !mapped_items.is_empty();
 
+        let planning_only = params.planning_only;
         let has_any_overrides = params.cwd.is_some()
             || params.approval_policy.is_some()
             || params.approvals_reviewer.is_some()
             || params.sandbox_policy.is_some()
             || params.permissions.is_some()
+            || planning_only
             || params.model.is_some()
             || params.service_tier.is_some()
             || params.effort.is_some()
@@ -368,19 +370,45 @@ impl TurnRequestProcessor {
             || collaboration_mode.is_some()
             || params.personality.is_some();
 
-        if params.sandbox_policy.is_some() && params.permissions.is_some() {
+        if !planning_only && params.sandbox_policy.is_some() && params.permissions.is_some() {
             return Err(invalid_request(
                 "`permissions` cannot be combined with `sandboxPolicy`",
             ));
         }
 
         let cwd = params.cwd;
-        let approval_policy = params.approval_policy.map(AskForApproval::to_core);
+        let planning_only_artifact_root = if planning_only {
+            let planning_cwd = match cwd.as_ref() {
+                Some(cwd) => cwd.clone(),
+                None => thread.config_snapshot().await.cwd.to_path_buf(),
+            };
+            Some(prepare_planning_only_artifact_root(&planning_cwd).await?)
+        } else {
+            None
+        };
+        let approval_policy = if planning_only {
+            Some(codex_protocol::protocol::AskForApproval::Never)
+        } else {
+            params.approval_policy.map(AskForApproval::to_core)
+        };
         let approvals_reviewer = params
             .approvals_reviewer
             .map(codex_app_server_protocol::ApprovalsReviewer::to_core);
-        let sandbox_policy = params.sandbox_policy.map(|p| p.to_core());
-        let (permission_profile, active_permission_profile) =
+        let sandbox_policy = if planning_only {
+            None
+        } else {
+            params.sandbox_policy.map(|p| p.to_core())
+        };
+        let (permission_profile, active_permission_profile) = if planning_only {
+            (
+                Some(planning_only_permission_profile(
+                    planning_only_artifact_root,
+                )),
+                Some(ActivePermissionProfile::new(
+                    PLANNING_ONLY_PERMISSION_PROFILE_ID,
+                )),
+            )
+        } else {
             if let Some(permissions) = params.permissions {
                 let snapshot = thread.config_snapshot().await;
                 let mut overrides = ConfigOverrides {
@@ -418,12 +446,18 @@ impl TurnRequestProcessor {
                 )
             } else {
                 (None, None)
-            };
+            }
+        };
         let model = params.model;
         let effort = params.effort.map(Some);
         let summary = params.summary;
         let service_tier = params.service_tier;
         let personality = params.personality;
+        let windows_sandbox_level = if planning_only {
+            Some(WindowsSandboxLevel::RestrictedToken)
+        } else {
+            None
+        };
 
         // If any overrides are provided, validate them synchronously so the
         // request can fail before accepting user input. The actual update is
@@ -437,7 +471,7 @@ impl TurnRequestProcessor {
                     sandbox_policy: sandbox_policy.clone(),
                     permission_profile: permission_profile.clone(),
                     active_permission_profile: active_permission_profile.clone(),
-                    windows_sandbox_level: None,
+                    windows_sandbox_level,
                     model: model.clone(),
                     effort,
                     summary,
@@ -462,7 +496,7 @@ impl TurnRequestProcessor {
                 sandbox_policy,
                 permission_profile,
                 active_permission_profile,
-                windows_sandbox_level: None,
+                windows_sandbox_level,
                 model,
                 effort,
                 summary,
@@ -1120,3 +1154,51 @@ fn xcode_26_4_mcp_elicitations_auto_deny(
     client_name == Some("Xcode")
         && client_version.is_some_and(|version| version.starts_with("26.4"))
 }
+
+const PLANNING_ONLY_PERMISSION_PROFILE_ID: &str = ":planning-only";
+
+async fn prepare_planning_only_artifact_root(
+    cwd: &Path,
+) -> Result<AbsolutePathBuf, JSONRPCErrorError> {
+    let artifact_root = cwd.join(".codex").join("mockups");
+    tokio::fs::create_dir_all(&artifact_root)
+        .await
+        .map_err(|err| {
+            internal_error(format!(
+                "failed to prepare planning-only artifact directory: {err}"
+            ))
+        })?;
+    AbsolutePathBuf::from_absolute_path(&artifact_root).map_err(|err| {
+        invalid_request(format!(
+            "planningOnly requires an absolute cwd for artifact writes: {err}"
+        ))
+    })
+}
+
+fn planning_only_permission_profile(artifact_root: Option<AbsolutePathBuf>) -> PermissionProfile {
+    let mut entries = vec![FileSystemSandboxEntry {
+        path: FileSystemPath::Special {
+            value: FileSystemSpecialPath::Root,
+        },
+        access: FileSystemAccessMode::Read,
+    }];
+    if let Some(artifact_root) = artifact_root {
+        entries.push(FileSystemSandboxEntry {
+            path: FileSystemPath::Path {
+                path: artifact_root,
+            },
+            access: FileSystemAccessMode::Write,
+        });
+    }
+    PermissionProfile::Managed {
+        file_system: ManagedFileSystemPermissions::Restricted {
+            entries,
+            glob_scan_max_depth: None,
+        },
+        network: NetworkSandboxPolicy::Restricted,
+    }
+}
+
+#[cfg(test)]
+#[path = "turn_processor_tests.rs"]
+mod turn_processor_tests;

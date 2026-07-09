@@ -2,12 +2,10 @@ import {
   ArrowUp,
   Check,
   ChevronDown,
-  ChevronLeft,
-  ChevronRight,
   FileText,
-  FolderPlus,
   Image as ImageIcon,
   ListChecks,
+  MousePointer2,
   Paperclip,
   Plus,
   RefreshCw,
@@ -17,6 +15,7 @@ import {
 } from "lucide-react";
 import {
   useEffect,
+  useLayoutEffect,
   useRef,
   useState,
   type CSSProperties,
@@ -25,36 +24,30 @@ import {
 } from "react";
 import { attachmentStatusLabel } from "../attachments";
 import { contextDetails } from "../contextMeter";
+import {
+  desktopInvoke,
+  desktopPathForFile,
+} from "../desktopBridge";
 import { permissionPresets } from "../localState";
+import {
+  composerContextPreviewImage,
+  composerContextVisualLabel,
+  composerContextVisualTitle,
+} from "../previewContextImages";
 import type {
   ComposerAttachment,
+  ComposerContextReference,
   Model,
   PendingApproval,
   ProjectSettings,
   SandboxMode,
   ThreadTokenUsage,
 } from "../types";
-
-type TauriWindow = Window & {
-  __TAURI__?: {
-    core?: {
-      invoke?: <T>(command: string, args?: Record<string, unknown>) => Promise<T>;
-      convertFileSrc?: (path: string, protocol?: string) => string;
-    };
-    webview?: {
-      getCurrentWebview?: () => {
-        onDragDropEvent?: (
-          handler: (event: {
-            payload:
-              | { type: "over"; position?: { x: number; y: number } }
-              | { type: "drop"; paths: string[]; position?: { x: number; y: number } }
-              | { type: "cancel" | "leave" };
-          }) => void,
-        ) => Promise<() => void>;
-      };
-    };
-  };
-};
+import {
+  ImagePreviewLightbox,
+  usePreviewImageSource,
+  type PreviewImageItem,
+} from "./ImagePreviewLightbox";
 
 const effortOptions: Array<{
   value: ProjectSettings["effort"];
@@ -66,13 +59,14 @@ const effortOptions: Array<{
   { value: "xhigh", label: "Extra High" },
 ];
 
-const imagePreviewCache = new Map<string, string>();
+const COMPOSER_MAX_ROWS = 7;
 
 export function Composer(props: {
   attachments: ComposerAttachment[];
   canSend: boolean;
   canRetry: boolean;
   contextUsage: ThreadTokenUsage | null;
+  contexts: ComposerContextReference[];
   currentSettings: ProjectSettings;
   modelDisplay: {
     label: string;
@@ -83,7 +77,9 @@ export function Composer(props: {
   onAddAttachmentPaths: (paths: string[]) => void;
   onAttachmentError: (message: string) => void;
   onCancel: () => void;
+  onShowApprovals: () => void;
   onRemoveAttachment: (id: string) => void;
+  onRemoveContext: (context: ComposerContextReference) => void;
   onRetry: () => void;
   onSend: (event?: FormEvent) => void;
   onSettingsChange: (patch: Partial<ProjectSettings>) => void;
@@ -100,6 +96,7 @@ export function Composer(props: {
   const [dragActive, setDragActive] = useState(false);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const formRef = useRef<HTMLFormElement>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const addAttachmentPathsRef = useRef(props.onAddAttachmentPaths);
   const selectedModel = props.models.find(
@@ -108,6 +105,20 @@ export function Composer(props: {
   const imageAttachments = props.attachments.filter(
     (attachment) => attachment.kind === "image",
   );
+  const attachmentPreviewImages: PreviewImageItem[] = imageAttachments.map(
+    (attachment) => ({
+      id: attachmentPreviewImageId(attachment.id),
+      title: attachment.name,
+      alt: attachment.name,
+      path: attachment.path,
+    }),
+  );
+  const contextPreviewImages = props.contexts.map(composerContextPreviewImage);
+  const previewImages = [...attachmentPreviewImages, ...contextPreviewImages];
+
+  useLayoutEffect(() => {
+    resizeComposerTextarea(textareaRef.current);
+  }, [props.text]);
 
   useEffect(() => {
     addAttachmentPathsRef.current = props.onAddAttachmentPaths;
@@ -125,33 +136,12 @@ export function Composer(props: {
 
   useEffect(() => {
     if (previewIndex === null) return;
-    if (imageAttachments.length === 0) {
+    if (previewImages.length === 0) {
       setPreviewIndex(null);
-    } else if (previewIndex >= imageAttachments.length) {
-      setPreviewIndex(imageAttachments.length - 1);
+    } else if (previewIndex >= previewImages.length) {
+      setPreviewIndex(previewImages.length - 1);
     }
-  }, [imageAttachments.length, previewIndex]);
-
-  useEffect(() => {
-    if (previewIndex === null || imageAttachments.length === 0) return;
-
-    function handlePreviewKeys(event: KeyboardEvent) {
-      if (event.key === "Escape") {
-        setPreviewIndex(null);
-        return;
-      }
-      if (event.key !== "ArrowRight" && event.key !== "ArrowLeft") return;
-      event.preventDefault();
-      setPreviewIndex((current) => {
-        if (current === null) return current;
-        const direction = event.key === "ArrowRight" ? 1 : -1;
-        return (current + direction + imageAttachments.length) % imageAttachments.length;
-      });
-    }
-
-    window.addEventListener("keydown", handlePreviewKeys);
-    return () => window.removeEventListener("keydown", handlePreviewKeys);
-  }, [imageAttachments.length, previewIndex]);
+  }, [previewImages.length, previewIndex]);
 
   useEffect(() => {
     function togglePlanMode(event: KeyboardEvent) {
@@ -164,46 +154,12 @@ export function Composer(props: {
     return () => window.removeEventListener("keydown", togglePlanMode);
   }, [props.currentSettings.planMode, props.onSettingsChange]);
 
-  useEffect(() => {
-    const webview = (window as TauriWindow).__TAURI__?.webview?.getCurrentWebview?.();
-    if (!webview?.onDragDropEvent) return;
-    let disposed = false;
-    let unlisten: (() => void) | null = null;
-    void webview
-      .onDragDropEvent((event) => {
-        if (event.payload.type === "over") {
-          setDragActive(true);
-        } else if (event.payload.type === "drop") {
-          setDragActive(false);
-          if (event.payload.paths.length > 0) {
-            addAttachmentPathsRef.current(event.payload.paths);
-          }
-        } else {
-          setDragActive(false);
-        }
-      })
-      .then((cleanup) => {
-        if (disposed) {
-          cleanup();
-        } else {
-          unlisten = cleanup;
-        }
-      })
-      .catch(() => {
-        setDragActive(false);
-      });
-    return () => {
-      disposed = true;
-      unlisten?.();
-    };
-  }, []);
-
   async function openFilePicker() {
     setPlusOpen(false);
-    const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
-    if (invoke) {
+    const selectedPaths = desktopInvoke<string[]>("pick_files");
+    if (selectedPaths) {
       try {
-        const paths = await invoke<string[]>("pick_files");
+        const paths = await selectedPaths;
         if (paths.length > 0) props.onAddAttachmentPaths(paths);
         return;
       } catch {
@@ -217,7 +173,7 @@ export function Composer(props: {
   function handleBrowserFiles(files: FileList | null) {
     if (!files || files.length === 0) return;
     const paths = Array.from(files)
-      .map((file) => (file as File & { path?: string }).path ?? "")
+      .map((file) => desktopPathForFile(file))
       .filter(Boolean);
     if (paths.length === 0) {
       props.onAttachmentError("Could not read those file paths.");
@@ -242,6 +198,10 @@ export function Composer(props: {
     setPlusOpen(false);
     setPermissionsOpen(false);
     setModelOpen(false);
+  }
+
+  function handleTextChange(value: string) {
+    props.onTextChange(value);
   }
 
   return (
@@ -277,15 +237,17 @@ export function Composer(props: {
       {props.attachments.length > 0 && (
         <div className="attachment-strip" aria-label="Added files">
           {props.attachments.map((attachment) => {
-            const imageIndex = imageAttachments.findIndex(
-              (image) => image.id === attachment.id,
+            const previewImageIndex = previewImages.findIndex(
+              (image) => image.id === attachmentPreviewImageId(attachment.id),
             );
             return (
               <AttachmentCard
                 key={attachment.id}
                 attachment={attachment}
                 onPreview={
-                  imageIndex === -1 ? undefined : () => setPreviewIndex(imageIndex)
+                  previewImageIndex === -1
+                    ? undefined
+                    : () => setPreviewIndex(previewImageIndex)
                 }
                 onRemove={() => props.onRemoveAttachment(attachment.id)}
               />
@@ -295,15 +257,39 @@ export function Composer(props: {
       )}
 
       {props.pendingApprovals.length > 0 && (
-        <div className="approval-banner">
+        <button
+          className="approval-banner"
+          onClick={props.onShowApprovals}
+          type="button"
+        >
           <Shield size={16} />
           {props.pendingApprovals.length} approval waiting
+        </button>
+      )}
+
+      {props.contexts.length > 0 && (
+        <div className="composer-context-strip" aria-label="Added context">
+          {props.contexts.map((context) => {
+            const previewImageIndex = previewImages.findIndex(
+              (image) => image.id === `context:${context.id}`,
+            );
+            return (
+              <ComposerContextChip
+                key={composerContextKey(context)}
+                context={context}
+                onPreview={() => setPreviewIndex(previewImageIndex)}
+                onRemove={() => props.onRemoveContext(context)}
+                previewDisabled={previewImageIndex === -1}
+              />
+            );
+          })}
         </div>
       )}
 
       <textarea
+        ref={textareaRef}
         value={props.text}
-        onChange={(event) => props.onTextChange(event.target.value)}
+        onChange={(event) => handleTextChange(event.target.value)}
         onFocus={closeComposerMenus}
         onPointerDown={closeComposerMenus}
         onKeyDown={(event) => {
@@ -522,9 +508,9 @@ export function Composer(props: {
         <div className="composer-status error-line">{props.sendError}</div>
       )}
 
-      {previewIndex !== null && imageAttachments[previewIndex] && (
-        <ImageLightbox
-          attachments={imageAttachments}
+      {previewIndex !== null && previewImages[previewIndex] && (
+        <ImagePreviewLightbox
+          images={previewImages}
           index={previewIndex}
           onClose={() => setPreviewIndex(null)}
           onSelect={setPreviewIndex}
@@ -534,14 +520,106 @@ export function Composer(props: {
   );
 }
 
+function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
+  if (!textarea || typeof window === "undefined") return;
+  const styles = window.getComputedStyle(textarea);
+  const lineHeight = Number.parseFloat(styles.lineHeight) || 24;
+  const minHeight = Number.parseFloat(styles.minHeight) || lineHeight * 3;
+  const borderHeight =
+    (Number.parseFloat(styles.borderTopWidth) || 0) +
+    (Number.parseFloat(styles.borderBottomWidth) || 0);
+  const paddingHeight =
+    (Number.parseFloat(styles.paddingTop) || 0) +
+    (Number.parseFloat(styles.paddingBottom) || 0);
+  const maxHeight = lineHeight * COMPOSER_MAX_ROWS + borderHeight + paddingHeight;
+  textarea.style.height = "auto";
+  if (textarea.value.trim().length === 0) {
+    textarea.style.height = `${Math.ceil(minHeight)}px`;
+    textarea.style.overflowY = "hidden";
+    return;
+  }
+  const nextHeight = Math.max(minHeight, Math.min(textarea.scrollHeight, maxHeight));
+  textarea.style.height = `${Math.ceil(nextHeight)}px`;
+  textarea.style.overflowY = textarea.scrollHeight > maxHeight ? "auto" : "hidden";
+}
+
+function composerContextKey(context: ComposerContextReference) {
+  return context.id;
+}
+
+function attachmentPreviewImageId(attachmentId: string) {
+  return `attachment:${attachmentId}`;
+}
+
+function composerContextChipTitle(context: ComposerContextReference) {
+  return composerContextVisualTitle(context);
+}
+
+function composerContextChipLabel(context: ComposerContextReference) {
+  return context.surface === "draft" ? "Draft" : "";
+}
+
+function composerContextMentionLabel(context: ComposerContextReference) {
+  return composerContextVisualLabel(context);
+}
+
+function ComposerContextChip(props: {
+  context: ComposerContextReference;
+  onPreview: () => void;
+  onRemove: () => void;
+  previewDisabled: boolean;
+}) {
+  const image = composerContextPreviewImage(props.context);
+  const previewUrl = usePreviewImageSource(image);
+  const label = composerContextMentionLabel(props.context);
+  const detail = composerContextChipLabel(props.context);
+  return (
+    <div className="composer-context-chip visual" title={composerContextChipTitle(props.context)}>
+      <button
+        type="button"
+        className="composer-context-preview"
+        onClick={props.onPreview}
+        disabled={props.previewDisabled}
+        aria-label={`Preview ${label}`}
+      >
+        <span className="composer-context-thumb" aria-hidden="true">
+          {previewUrl ? (
+            <img src={previewUrl} alt="" />
+          ) : (
+            <MousePointer2 size={18} />
+          )}
+        </span>
+        <span>{label}</span>
+        <small hidden={!detail}>{detail}</small>
+      </button>
+      <button
+        type="button"
+        className="composer-context-remove"
+        onClick={props.onRemove}
+        aria-label={`Remove ${label}`}
+        title="Remove"
+      >
+        <X size={13} />
+      </button>
+    </div>
+  );
+}
+
 function AttachmentCard(props: {
   attachment: ComposerAttachment;
   onPreview?: () => void;
   onRemove: () => void;
 }) {
   const status = attachmentStatusLabel(props.attachment);
-  const previewUrl = useImagePreview(
-    props.attachment.kind === "image" ? props.attachment.path : null,
+  const previewUrl = usePreviewImageSource(
+    props.attachment.kind === "image"
+      ? {
+          id: attachmentPreviewImageId(props.attachment.id),
+          title: props.attachment.name,
+          alt: props.attachment.name,
+          path: props.attachment.path,
+        }
+      : null,
   );
   return (
     <div
@@ -586,75 +664,6 @@ function AttachmentCard(props: {
   );
 }
 
-function ImageLightbox(props: {
-  attachments: ComposerAttachment[];
-  index: number;
-  onClose: () => void;
-  onSelect: (index: number) => void;
-}) {
-  const attachment = props.attachments[props.index];
-  const previewUrl = useImagePreview(attachment.path);
-  const multiple = props.attachments.length > 1;
-
-  function move(direction: -1 | 1) {
-    props.onSelect(
-      (props.index + direction + props.attachments.length) %
-        props.attachments.length,
-    );
-  }
-
-  return (
-    <div
-      className="image-lightbox"
-      role="dialog"
-      aria-modal="true"
-      aria-label="Image preview"
-      onMouseDown={(event) => {
-        if (event.target === event.currentTarget) props.onClose();
-      }}
-    >
-      <button
-        type="button"
-        className="image-lightbox-close"
-        onClick={props.onClose}
-        aria-label="Close preview"
-      >
-        <X size={21} />
-      </button>
-      {multiple && (
-        <button
-          type="button"
-          className="image-lightbox-nav previous"
-          onClick={() => move(-1)}
-          aria-label="Previous image"
-        >
-          <ChevronLeft size={24} />
-        </button>
-      )}
-      <div className="image-lightbox-stage">
-        {previewUrl ? (
-          <img src={previewUrl} alt="" />
-        ) : (
-          <div className="image-lightbox-empty">
-            <ImageIcon size={28} />
-            <span>Preview unavailable</span>
-          </div>
-        )}
-      </div>
-      {multiple && (
-        <button
-          type="button"
-          className="image-lightbox-nav next"
-          onClick={() => move(1)}
-          aria-label="Next image"
-        >
-          <ChevronRight size={24} />
-        </button>
-      )}
-    </div>
-  );
-}
-
 function ContextMeter(props: { usage: ThreadTokenUsage | null }) {
   const details = contextDetails(props.usage);
   return (
@@ -675,48 +684,6 @@ function ContextMeter(props: { usage: ThreadTokenUsage | null }) {
       </span>
     </button>
   );
-}
-
-function useImagePreview(path: string | null) {
-  const [previewUrl, setPreviewUrl] = useState<string | null>(() =>
-    path ? (imagePreviewCache.get(path) ?? null) : null,
-  );
-
-  useEffect(() => {
-    if (!path) {
-      setPreviewUrl(null);
-      return;
-    }
-
-    const cached = imagePreviewCache.get(path);
-    if (cached) {
-      setPreviewUrl(cached);
-      return;
-    }
-
-    let cancelled = false;
-    const fallbackUrl = imagePreviewUrl(path);
-    const invoke = (window as TauriWindow).__TAURI__?.core?.invoke;
-    if (!invoke) {
-      setPreviewUrl(fallbackUrl);
-      return;
-    }
-
-    invoke<string>("read_image_data_url", { path })
-      .then((dataUrl) => {
-        imagePreviewCache.set(path, dataUrl);
-        if (!cancelled) setPreviewUrl(dataUrl);
-      })
-      .catch(() => {
-        if (!cancelled) setPreviewUrl(fallbackUrl);
-      });
-
-    return () => {
-      cancelled = true;
-    };
-  }, [path]);
-
-  return previewUrl;
 }
 
 function permissionLabel(id: SandboxMode) {
@@ -752,24 +719,4 @@ function shortModelLabel(label: string) {
     .replace(/^GPT-/i, "")
     .replace(/^gpt-/i, "")
     .replace(/^Codex /i, "");
-}
-
-function imagePreviewUrl(path: string) {
-  if (!path) return null;
-  const nativePath = nativeFilePath(path);
-  const convertFileSrc = (window as TauriWindow).__TAURI__?.core?.convertFileSrc;
-  if (convertFileSrc) return convertFileSrc(nativePath);
-  if (/^[A-Za-z]:[\\/]/.test(nativePath)) {
-    return encodeURI(`file:///${nativePath.replace(/\\/g, "/")}`);
-  }
-  if (nativePath.startsWith("/")) return encodeURI(`file://${nativePath}`);
-  return null;
-}
-
-function nativeFilePath(path: string) {
-  const wslMatch = path.match(/^\/mnt\/([A-Za-z])\/(.+)$/);
-  if (wslMatch) {
-    return `${wslMatch[1].toUpperCase()}:\\${wslMatch[2].replace(/\//g, "\\")}`;
-  }
-  return path;
 }

@@ -1,8 +1,12 @@
-import { type Dispatch, type SetStateAction, useCallback } from "react";
+import { type Dispatch, type SetStateAction, useCallback, useRef } from "react";
 import type { JsonRpcMessage, ServerRequest } from "../appServerClient";
 import {
   appendDelta,
+  appendPlanDelta,
+  appendReasoningSummaryDelta,
+  appendReasoningTextDelta,
   ensureTurn,
+  ensureReasoningSummaryPart,
   replaceTurn,
   updateTurnItems,
   upsertItem,
@@ -17,6 +21,8 @@ import type {
 } from "../types";
 
 type SetState<T> = Dispatch<SetStateAction<T>>;
+type AgentMessageItem = Extract<ThreadItem, { type: "agentMessage" }>;
+type AgentMessageBuffer = Record<string, Record<string, AgentMessageItem>>;
 
 export function useAppServerEvents(args: {
   activeProjectPath: string | null;
@@ -27,10 +33,29 @@ export function useAppServerEvents(args: {
   onThreadNameUpdated: (threadId: string, name: string | null) => void;
   onTokenUsageUpdated: (threadId: string, tokenUsage: ThreadTokenUsage) => void;
   onTurnCompleted: (threadId: string, turn: Turn) => void;
+  onAgentMessageUpdated?: (event: {
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    text: string;
+  }) => void;
+  onCommandExecutionStarted?: (event: {
+    threadId: string;
+    turnId: string;
+    command: string;
+  }) => void;
+  onFileChangePatchUpdated?: (event: {
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    changes: Extract<ThreadItem, { type: "fileChange" }>["changes"];
+  }) => void;
   setInspector: SetState<InspectorSelection>;
   setPendingApprovals: SetState<PendingApproval[]>;
   setRunningTurnId: SetState<string | null>;
 }) {
+  const streamedAgentMessagesRef = useRef<AgentMessageBuffer>({});
+
   const handleNotification = useCallback(
     (message: JsonRpcMessage) => {
       if (!message.method) return;
@@ -49,7 +74,11 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "turn/completed" && threadId && params?.turn) {
-        const turn = params.turn as Turn;
+        const turn = mergeBufferedAgentMessagesForTurn(
+          params.turn as Turn,
+          streamedAgentMessagesRef.current[turnId || (params.turn as Turn).id],
+        );
+        delete streamedAgentMessagesRef.current[turn.id];
         args.setRunningTurnId((current) =>
           current === turn.id ? null : current,
         );
@@ -63,6 +92,24 @@ export function useAppServerEvents(args: {
         return;
       }
 
+      if (message.method === "error" && threadId && turnId && params?.error) {
+        delete streamedAgentMessagesRef.current[turnId];
+        const error = params.error as Turn["error"];
+        args.patchThread(threadId, (thread) => ({
+          ...thread,
+          turns: thread.turns.map((turn) =>
+            turn.id === turnId
+              ? {
+                  ...turn,
+                  status: "failed",
+                  error,
+                }
+              : turn,
+          ),
+        }));
+        return;
+      }
+
       if (
         (message.method === "item/started" ||
           message.method === "item/completed") &&
@@ -71,6 +118,33 @@ export function useAppServerEvents(args: {
         params?.item
       ) {
         const item = params.item as ThreadItem;
+        if (
+          message.method === "item/started" &&
+          item.type === "commandExecution"
+        ) {
+          args.onCommandExecutionStarted?.({
+            threadId,
+            turnId,
+            command: item.command,
+          });
+        }
+        rememberAgentMessage(streamedAgentMessagesRef.current, turnId, item);
+        if (item.type === "agentMessage") {
+          args.onAgentMessageUpdated?.({
+            threadId,
+            turnId,
+            itemId: item.id,
+            text: item.text,
+          });
+        }
+        if (item.type === "fileChange") {
+          args.onFileChangePatchUpdated?.({
+            threadId,
+            turnId,
+            itemId: item.id,
+            changes: item.changes,
+          });
+        }
         args.patchThread(threadId, (thread) => ({
           ...thread,
           turns: updateTurnItems(thread.turns, turnId, (items) =>
@@ -81,7 +155,64 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "item/agentMessage/delta" && threadId && turnId) {
+        const agentMessage = rememberAgentMessageDelta(
+          streamedAgentMessagesRef.current,
+          turnId,
+          params,
+        );
+        if (agentMessage) {
+          args.onAgentMessageUpdated?.({
+            threadId,
+            turnId,
+            itemId: agentMessage.id,
+            text: agentMessage.text,
+          });
+        }
         appendItemDelta(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (message.method === "item/plan/delta" && threadId && turnId) {
+        appendPlanItemDelta(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/summaryTextDelta" &&
+        threadId &&
+        turnId
+      ) {
+        appendReasoningItemDelta(
+          args.patchThread,
+          threadId,
+          turnId,
+          params,
+          "summary",
+        );
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/summaryPartAdded" &&
+        threadId &&
+        turnId
+      ) {
+        ensureReasoningPart(args.patchThread, threadId, turnId, params);
+        return;
+      }
+
+      if (
+        message.method === "item/reasoning/textDelta" &&
+        threadId &&
+        turnId
+      ) {
+        appendReasoningItemDelta(
+          args.patchThread,
+          threadId,
+          turnId,
+          params,
+          "content",
+        );
         return;
       }
 
@@ -104,6 +235,12 @@ export function useAppServerEvents(args: {
           ThreadItem,
           { type: "fileChange" }
         >["changes"];
+        args.onFileChangePatchUpdated?.({
+          threadId,
+          turnId,
+          itemId,
+          changes,
+        });
         args.patchThread(threadId, (thread) => ({
           ...thread,
           turns: updateTurnItems(thread.turns, turnId, (items) =>
@@ -152,6 +289,9 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "thread/compacted" && threadId) {
+        args.patchThread(threadId, (thread) =>
+          insertOptimisticCompactionItem(thread, turnId),
+        );
         void args.syncThread(threadId);
       }
     },
@@ -175,6 +315,101 @@ export function useAppServerEvents(args: {
   return { handleNotification, handleServerRequest };
 }
 
+function rememberAgentMessage(
+  buffer: AgentMessageBuffer,
+  turnId: string,
+  item: ThreadItem,
+) {
+  if (item.type !== "agentMessage") return;
+  const turnMessages = (buffer[turnId] ??= {});
+  const existing = turnMessages[item.id];
+  turnMessages[item.id] =
+    !existing || item.text.length >= existing.text.length ? item : existing;
+}
+
+function rememberAgentMessageDelta(
+  buffer: AgentMessageBuffer,
+  turnId: string,
+  params?: Record<string, unknown>,
+): AgentMessageItem | null {
+  const itemId = params?.itemId as string | undefined;
+  if (!itemId) return null;
+  const delta = (params?.delta ?? "") as string;
+  const turnMessages = (buffer[turnId] ??= {});
+  const existing =
+    turnMessages[itemId] ??
+    ({
+      type: "agentMessage",
+      id: itemId,
+      phase: null,
+      text: "",
+    } as AgentMessageItem);
+  turnMessages[itemId] = {
+    ...existing,
+    text: `${existing.text}${delta}`,
+  };
+  return turnMessages[itemId];
+}
+
+export function mergeBufferedAgentMessagesForTurn(
+  turn: Turn,
+  buffered?: Record<string, AgentMessageItem>,
+): Turn {
+  if (!buffered || Object.keys(buffered).length === 0) return turn;
+  const incomingIds = new Set(turn.items.map((item) => item.id));
+  const items = [
+    ...turn.items.map((item) => {
+      if (item.type !== "agentMessage") return item;
+      const bufferedItem = buffered[item.id];
+      return bufferedItem && bufferedItem.text.length > item.text.length
+        ? { ...item, text: bufferedItem.text }
+        : item;
+    }),
+    ...Object.values(buffered).filter((item) => !incomingIds.has(item.id)),
+  ];
+  return { ...turn, items };
+}
+
+function insertOptimisticCompactionItem(
+  thread: Thread,
+  requestedTurnId?: string,
+): Thread {
+  const turnIndex = targetCompactionTurnIndex(thread, requestedTurnId);
+  if (turnIndex === -1) return thread;
+  const turn = thread.turns[turnIndex];
+  if (turn.items.some((item) => item.type === "contextCompaction")) {
+    return thread;
+  }
+  const item: Extract<ThreadItem, { type: "contextCompaction" }> = {
+    type: "contextCompaction",
+    id: `optimistic-compaction:${turn.id}`,
+  };
+  return {
+    ...thread,
+    turns: thread.turns.map((candidate, index) =>
+      index === turnIndex
+        ? {
+            ...candidate,
+            items: [...candidate.items, item],
+          }
+        : candidate,
+    ),
+  };
+}
+
+function targetCompactionTurnIndex(thread: Thread, requestedTurnId?: string) {
+  if (requestedTurnId) {
+    const requestedIndex = thread.turns.findIndex(
+      (turn) => turn.id === requestedTurnId,
+    );
+    if (requestedIndex !== -1) return requestedIndex;
+  }
+  for (let index = thread.turns.length - 1; index >= 0; index -= 1) {
+    if (thread.turns[index].status === "inProgress") return index;
+  }
+  return thread.turns.length - 1;
+}
+
 function appendItemDelta(
   patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
   threadId: string,
@@ -187,6 +422,61 @@ function appendItemDelta(
     ...thread,
     turns: updateTurnItems(thread.turns, turnId, (items) =>
       appendDelta(items, itemId, delta),
+    ),
+  }));
+}
+
+function appendPlanItemDelta(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params?: Record<string, unknown>,
+) {
+  const itemId = params?.itemId as string;
+  const delta = (params?.delta ?? "") as string;
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      appendPlanDelta(items, itemId, delta),
+    ),
+  }));
+}
+
+function appendReasoningItemDelta(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params: Record<string, unknown> | undefined,
+  field: "summary" | "content",
+) {
+  const itemId = params?.itemId as string;
+  const delta = (params?.delta ?? "") as string;
+  const index =
+    field === "summary"
+      ? Number(params?.summaryIndex ?? 0)
+      : Number(params?.contentIndex ?? 0);
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      field === "summary"
+        ? appendReasoningSummaryDelta(items, itemId, index, delta)
+        : appendReasoningTextDelta(items, itemId, index, delta),
+    ),
+  }));
+}
+
+function ensureReasoningPart(
+  patchThread: (threadId: string, updater: (thread: Thread) => Thread) => void,
+  threadId: string,
+  turnId: string,
+  params?: Record<string, unknown>,
+) {
+  const itemId = params?.itemId as string;
+  const summaryIndex = Number(params?.summaryIndex ?? 0);
+  patchThread(threadId, (thread) => ({
+    ...thread,
+    turns: updateTurnItems(thread.turns, turnId, (items) =>
+      ensureReasoningSummaryPart(items, itemId, summaryIndex),
     ),
   }));
 }

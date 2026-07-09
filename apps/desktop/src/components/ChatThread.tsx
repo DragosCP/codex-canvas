@@ -1,32 +1,101 @@
 import {
+  Check,
   ChevronDown,
   FileText,
   FolderOpen,
+  Image as ImageIcon,
+  PanelRightOpen,
   PencilLine,
   RefreshCw,
   TerminalSquare,
+  X,
 } from "lucide-react";
-import { useEffect, useRef } from "react";
-import { commandStatusText, itemLabel } from "../itemUtils";
+import { useEffect, useRef, useState } from "react";
+import {
+  commandStatusText,
+  extractCodexContextUserRequest,
+  friendlyMockupPromptTitle,
+  itemLabel,
+} from "../itemUtils";
+import {
+  previewArtifactDisplayName,
+  previewArtifactKindFromText,
+} from "../mockupArtifacts";
+import { composerContextPreviewImage } from "../previewContextImages";
 import type {
+  ComposerAttachment,
+  ComposerContextReference,
   InspectorSelection,
   LocalChatDraft,
+  PlanProposal,
   Project,
   Thread,
   ThreadItem,
   Turn,
 } from "../types";
-import { lineCount } from "../utils/format";
+import { stripPlanPreviewBlocks } from "../planPreview";
+import {
+  projectRelativeDisplayPath,
+  proposalWorkspaceDisplayPath,
+} from "../proposalWorkspaceDisplay";
+import {
+  compactCommand,
+  diffLineCounts,
+  formatFileProgressDelta,
+  formatShortLineDelta,
+  liveProgressDetail,
+  liveProgressHeadline,
+  mergeTurnFileChanges,
+  summarizeTurnProgress,
+  WORKSPACE_PROGRESS_POLL_MS,
+  type TurnProgressSummary,
+  type WorkspaceProgressSnapshot,
+} from "../turnProgress";
+import {
+  parseVisualDecisionStrip,
+  stripVisualDecisionBlocks,
+} from "../visualDecision";
 import { RichText } from "./RichText";
+import {
+  ImagePreviewLightbox,
+  usePreviewImageSource,
+  type PreviewImageItem,
+} from "./ImagePreviewLightbox";
+
+type UserMessageContentPart = Extract<
+  ThreadItem,
+  { type: "userMessage" }
+>["content"][number];
+
+type PendingComposerSend = {
+  projectId: string;
+  prompt: string;
+  attachments: ComposerAttachment[];
+  contexts: ComposerContextReference[];
+  createdAt: number;
+};
 
 export function ChatThread(props: {
   activeProject: Project | null;
   activeDraft: LocalChatDraft | null;
   activeThread: Thread | null;
+  activeWorkspaceProgress: WorkspaceProgressSnapshot | null;
+  onAcceptPlanProposal: (proposal: PlanProposal) => void;
+  onDeclinePlanProposal: (proposal: PlanProposal) => void;
+  onModifyPlanProposal: (proposal: PlanProposal, feedback?: string) => void;
+  onPlanProposalFeedbackChange: (turnId: string, value: string) => void;
+  onShowPlanUiImpact: (proposal: PlanProposal) => void;
   onSelect: (selection: InspectorSelection) => void;
+  planProposalFeedbackDrafts?: Record<string, string>;
+  planProposals?: Record<string, PlanProposal>;
+  pendingComposerSend?: PendingComposerSend | null;
+  sentComposerContextsByTurnId?: Record<string, ComposerContextReference[]>;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
   const stickToBottomRef = useRef(true);
+  const planProposalFeedbackDrafts = props.planProposalFeedbackDrafts ?? {};
+  const planProposals = props.planProposals ?? {};
+  const sentComposerContextsByTurnId = props.sentComposerContextsByTurnId ?? {};
 
   useEffect(() => {
     const scroller = scrollerRef.current;
@@ -50,91 +119,191 @@ export function ChatThread(props: {
     );
   }
 
+  const pendingComposerSend =
+    props.pendingComposerSend?.projectId === props.activeProject.id
+      ? props.pendingComposerSend
+      : null;
+
   if (!props.activeThread) {
     return (
       <div className="turn-list" ref={scrollerRef} onScroll={handleScroll}>
-        <div className="empty-chat">
-          {props.activeDraft ? (
-            <>
-              <h2>New chat</h2>
-              <p>Write the first message, then Codex will create the chat.</p>
-            </>
-          ) : (
-            <>
-              <h2>Ready in {props.activeProject.name}</h2>
-              <p>Start a chat or send a prompt from the composer.</p>
-            </>
-          )}
-        </div>
+        {pendingComposerSend ? (
+          <article className="turn-card inProgress">
+            <UserMessageView
+              activeProject={props.activeProject}
+              contexts={pendingComposerSend.contexts}
+              item={pendingComposerSendItem(pendingComposerSend)}
+            />
+            <p className="turn-quiet-status">Starting chat...</p>
+          </article>
+        ) : (
+          <div className="empty-chat">
+            {props.activeDraft ? (
+              <>
+                <h2>New chat</h2>
+                <p>Write the first message, then Codex will create the chat.</p>
+              </>
+            ) : (
+              <>
+                <h2>Ready in {props.activeProject.name}</h2>
+                <p>Start a chat or send a prompt from the composer.</p>
+              </>
+            )}
+          </div>
+        )}
       </div>
     );
   }
 
   const activeProject = props.activeProject;
+  const activeThread = props.activeThread;
 
   return (
     <div className="turn-list" ref={scrollerRef} onScroll={handleScroll}>
-      {props.activeThread.turns.length === 0 && (
+      {activeThread.turns.length === 0 && pendingComposerSend && (
+        <article className="turn-card inProgress">
+          <UserMessageView
+            activeProject={activeProject}
+            contexts={pendingComposerSend.contexts}
+            item={pendingComposerSendItem(pendingComposerSend)}
+          />
+          <p className="turn-quiet-status">Starting chat...</p>
+        </article>
+      )}
+      {activeThread.turns.length === 0 && !pendingComposerSend && (
         <div className="empty-chat">
           <h2>New chat</h2>
           <p>Ask Codex to inspect, plan, run commands, or edit this project.</p>
         </div>
       )}
-      {props.activeThread.turns.map((turn) => (
+      {activeThread.turns.map((turn) => (
         <TurnView
           activeProject={activeProject}
           key={turn.id}
+          onAcceptPlanProposal={props.onAcceptPlanProposal}
+          onDeclinePlanProposal={props.onDeclinePlanProposal}
+          onModifyPlanProposal={props.onModifyPlanProposal}
+          onPlanProposalFeedbackChange={props.onPlanProposalFeedbackChange}
+          onShowPlanUiImpact={props.onShowPlanUiImpact}
           onSelect={props.onSelect}
+          planProposalFeedbackDraft={planProposalFeedbackDrafts[turn.id]}
+          planProposal={planProposals[turn.id] ?? null}
+          sentComposerContexts={sentComposerContextsByTurnId[turn.id] ?? []}
           turn={turn}
+          workspaceProgress={
+            props.activeWorkspaceProgress?.turnId === turn.id
+              ? props.activeWorkspaceProgress
+              : null
+          }
         />
       ))}
+      {activeThread.turns.length > 0 && pendingComposerSend && (
+        <article className="turn-card inProgress">
+          <UserMessageView
+            activeProject={activeProject}
+            contexts={pendingComposerSend.contexts}
+            item={pendingComposerSendItem(pendingComposerSend)}
+          />
+          <p className="turn-quiet-status">Starting chat...</p>
+        </article>
+      )}
     </div>
   );
+}
+
+function pendingComposerSendItem(
+  pending: PendingComposerSend,
+): Extract<ThreadItem, { type: "userMessage" }> {
+  return {
+    type: "userMessage",
+    id: `pending-send:${pending.projectId}:${pending.createdAt}`,
+    content: [
+      {
+        type: "text",
+        text: pending.prompt,
+        text_elements: [],
+      },
+      ...pending.attachments
+        .filter((attachment) => attachment.kind === "image")
+        .map((attachment) => ({
+          type: "localImage" as const,
+          path: attachment.path,
+        })),
+    ],
+  };
 }
 
 function TurnView(props: {
   activeProject: Project;
   turn: Turn;
+  onAcceptPlanProposal: (proposal: PlanProposal) => void;
+  onDeclinePlanProposal: (proposal: PlanProposal) => void;
+  onModifyPlanProposal: (proposal: PlanProposal, feedback?: string) => void;
+  onPlanProposalFeedbackChange: (turnId: string, value: string) => void;
+  onShowPlanUiImpact: (proposal: PlanProposal) => void;
   onSelect: (selection: InspectorSelection) => void;
+  planProposalFeedbackDraft?: string;
+  planProposal: PlanProposal | null;
+  sentComposerContexts: ComposerContextReference[];
+  workspaceProgress: WorkspaceProgressSnapshot | null;
 }) {
   const userItems = props.turn.items.filter(
     (item): item is Extract<ThreadItem, { type: "userMessage" }> =>
       item.type === "userMessage",
   );
-  const finalItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
-      item.type === "agentMessage" &&
-      (item.phase === "final_answer" || item.phase === null),
+  const visibleUserItems = dedupeUserMessageItems(userItems, props.activeProject);
+  const finalItems = dedupeAgentMessageItems(
+    props.turn.items.filter(
+      (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
+        item.type === "agentMessage" &&
+        (item.phase === "final_answer" || item.phase === null),
+    ),
+    props.activeProject,
   );
-  const activityItems = props.turn.items.filter(isActivityItem);
-  const compactionItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "contextCompaction" }> =>
-      item.type === "contextCompaction",
+  const hasVisualDecision = finalItems.some((item) =>
+    Boolean(parseVisualDecisionStrip(item.text)),
   );
-  const fileChangeItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "fileChange" }> =>
-      item.type === "fileChange",
+  const isQuietCanvasQuestionTurn = isCanvasQuestionDecisionTurn(props.turn);
+  const activityItems = props.turn.items.filter((item) =>
+    isActivityItem(item, props.turn.status),
   );
+  const hasCompaction = props.turn.items.some(
+    (item) => item.type === "contextCompaction",
+  );
+  const mergedFileChangeItem =
+    props.turn.status === "inProgress" ? null : mergeTurnFileChanges(props.turn);
 
   return (
     <article className={`turn-card ${props.turn.status}`}>
-      {userItems.map((item) => (
-        <UserMessageView key={item.id} item={item} />
+      {visibleUserItems.map((item) => (
+        <UserMessageView
+          activeProject={props.activeProject}
+          contexts={props.sentComposerContexts}
+          key={item.id}
+          item={item}
+        />
       ))}
       {props.turn.error && (
-        <div className="error-line">{props.turn.error.message}</div>
+        <div className="error-line">{turnErrorMessage(props.turn.error)}</div>
       )}
-      {activityItems.length > 0 && (
-        <TurnActivity
-          activeProject={props.activeProject}
-          durationMs={props.turn.durationMs}
-          items={activityItems}
-          status={props.turn.status}
-        />
-      )}
-      {compactionItems.map((item) => (
-        <ContextCompactionDivider key={item.id} />
-      ))}
+      {isQuietCanvasQuestionTurn &&
+        props.turn.status === "inProgress" && (
+          <p className="turn-quiet-status">Preparing choices...</p>
+        )}
+      {!isQuietCanvasQuestionTurn &&
+        (activityItems.length > 0 || props.turn.status === "inProgress") && (
+          <TurnActivity
+            activeProject={props.activeProject}
+            durationMs={props.turn.durationMs}
+            items={activityItems}
+            status={props.turn.status}
+            startedAt={props.turn.startedAt}
+            turn={props.turn}
+            turnId={props.turn.id}
+            workspaceProgress={props.workspaceProgress}
+          />
+        )}
+      {hasCompaction && <ContextCompactionDivider />}
       {finalItems.map((item) => (
         <AssistantMessageView
           activeProject={props.activeProject}
@@ -142,17 +311,96 @@ function TurnView(props: {
           item={item}
         />
       ))}
-      {fileChangeItems.map((item) => (
+      {props.planProposal &&
+        finalItems.length > 0 &&
+        !hasVisualDecision &&
+        shouldShowPlanProposalReview(props.planProposal, props.turn.status) && (
+          <PlanProposalReview
+            proposal={props.planProposal}
+            onAccept={props.onAcceptPlanProposal}
+            onDecline={props.onDeclinePlanProposal}
+            onModify={props.onModifyPlanProposal}
+            feedbackDraft={props.planProposalFeedbackDraft ?? ""}
+            onFeedbackChange={(value) =>
+              props.onPlanProposalFeedbackChange(
+                props.planProposal?.turnId ?? "",
+                value,
+              )
+            }
+          />
+        )}
+      {mergedFileChangeItem && (
         <FileChangeView
           activeProject={props.activeProject}
-          key={item.id}
-          item={item}
+          key={mergedFileChangeItem.id}
+          item={mergedFileChangeItem}
           onSelect={props.onSelect}
         />
-      ))}
+      )}
       {props.turn.items.length === 0 && <p className="muted">No output yet</p>}
     </article>
   );
+}
+
+function isCanvasQuestionDecisionTurn(turn: Turn) {
+  return turn.items.some(
+    (item) =>
+      item.type === "userMessage" &&
+      item.content.some(
+        (part) =>
+          part.type === "text" &&
+          Boolean(extractCanvasQuestionRequest(part.text)),
+      ),
+  );
+}
+
+function dedupeUserMessageItems(
+  items: Array<Extract<ThreadItem, { type: "userMessage" }>>,
+  activeProject: Project,
+) {
+  const seen = new Set<string>();
+  const result: Array<Extract<ThreadItem, { type: "userMessage" }>> = [];
+  for (const item of items) {
+    const signature = userMessageDisplaySignature(item, activeProject);
+    if (seen.has(signature)) continue;
+    seen.add(signature);
+    result.push(item);
+  }
+  return result;
+}
+
+function dedupeAgentMessageItems(
+  items: Array<Extract<ThreadItem, { type: "agentMessage" }>>,
+  activeProject: Project,
+) {
+  const seen = new Set<string>();
+  const result: Array<Extract<ThreadItem, { type: "agentMessage" }>> = [];
+  for (const item of items) {
+    const signature = normalizeActivityText(
+      friendlyText(item.text, activeProject),
+    );
+    if (signature && seen.has(signature)) continue;
+    if (signature) seen.add(signature);
+    result.push(item);
+  }
+  return result;
+}
+
+function userMessageDisplaySignature(
+  item: Extract<ThreadItem, { type: "userMessage" }>,
+  activeProject: Project,
+) {
+  return item.content
+    .map((part) => {
+      if (part.type === "text") {
+        const display = friendlyUserDisplay(part.text, activeProject);
+        return `text:${display.actionLabel ?? ""}:${display.text.trim()}`;
+      }
+      if ("path" in part) return `path:${part.path}`;
+      if ("url" in part) return `url:${part.url}`;
+      return JSON.stringify(part);
+    })
+    .join("|");
 }
 
 function ContextCompactionDivider() {
@@ -176,24 +424,121 @@ type ActivityItem =
   | Extract<ThreadItem, { type: "reasoning" }>;
 
 function UserMessageView(props: {
+  activeProject: Project;
+  contexts: ComposerContextReference[];
   item: Extract<ThreadItem, { type: "userMessage" }>;
 }) {
+  const imageParts = props.item.content.filter(isUserMessageImagePart);
+  const previewImages: PreviewImageItem[] = [
+    ...imageParts.map((part, index) => userMessageImagePreviewItem(part, index)),
+    ...props.contexts.map(composerContextPreviewImage),
+  ];
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const visibleParts = props.item.content.filter(
+    (part) => !isUserMessageImagePart(part),
+  );
   return (
-    <div className="message user-message">
-      {props.item.content.map((part, index) =>
-        part.type === "text" ? (
-          <RichText key={index} text={part.text} />
-        ) : (
-          <p className="attachment-note" key={index}>
-            {attachmentLabel(part)}
-          </p>
-        ),
+    <div className="user-message-group">
+      {previewImages.length > 0 && (
+        <div className="user-message-image-strip" aria-label="Attached visuals">
+          {previewImages.map((image, index) => (
+            <UserMessageImage
+              image={image}
+              key={`${image.id}:${index}`}
+              onPreview={() => setPreviewIndex(index)}
+            />
+          ))}
+        </div>
+      )}
+      {visibleParts.length > 0 && (
+        <div className="message user-message">
+          {visibleParts.map((part, index) => {
+            if (part.type === "text") {
+              const display = friendlyUserDisplay(part.text, props.activeProject);
+              return (
+                <div className="user-message-plain" key={index}>
+                  {display.actionLabel && (
+                    <span className="user-message-action">
+                      {display.actionLabel}
+                    </span>
+                  )}
+                  {display.text && <p>{display.text}</p>}
+                </div>
+              );
+            }
+            return (
+              <p className="attachment-note" key={index}>
+                {attachmentLabel(part)}
+              </p>
+            );
+          })}
+        </div>
+      )}
+      {previewIndex !== null && previewImages[previewIndex] && (
+        <ImagePreviewLightbox
+          images={previewImages}
+          index={previewIndex}
+          onClose={() => setPreviewIndex(null)}
+          onSelect={setPreviewIndex}
+        />
       )}
     </div>
   );
 }
 
-function attachmentLabel(part: Extract<ThreadItem, { type: "userMessage" }>["content"][number]) {
+function UserMessageImage(props: {
+  image: PreviewImageItem;
+  onPreview: () => void;
+}) {
+  const previewUrl = usePreviewImageSource(props.image);
+  return (
+    <button
+      type="button"
+      className="user-message-image-thumb"
+      title={props.image.title}
+      onClick={props.onPreview}
+      aria-label={`Preview ${props.image.title}`}
+    >
+      {previewUrl ? (
+        <img src={previewUrl} alt={props.image.alt ?? props.image.title} />
+      ) : (
+        <span>
+          <ImageIcon size={22} />
+          <small>{props.image.title}</small>
+        </span>
+      )}
+    </button>
+  );
+}
+
+function isUserMessageImagePart(
+  part: UserMessageContentPart,
+): part is Extract<UserMessageContentPart, { type: "image" | "localImage" }> {
+  return part.type === "image" || part.type === "localImage";
+}
+
+function userMessageImagePreviewItem(
+  part: Extract<UserMessageContentPart, { type: "image" | "localImage" }>,
+  index: number,
+) : PreviewImageItem {
+  if (part.type === "localImage") {
+    const title = basename(part.path);
+    return {
+      id: `message-local-image:${part.path}:${index}`,
+      title,
+      alt: title,
+      path: part.path,
+    };
+  }
+  return {
+    id: `message-image:${part.url}:${index}`,
+    title: "Attached image",
+    alt: "Attached image",
+    src: part.url,
+  };
+}
+
+function attachmentLabel(part: UserMessageContentPart) {
   if ("path" in part) return `Added ${basename(part.path)}`;
   if ("url" in part) return "Added image";
   return "Added file";
@@ -203,12 +548,190 @@ function AssistantMessageView(props: {
   activeProject: Project;
   item: Extract<ThreadItem, { type: "agentMessage" }>;
 }) {
-  const text = friendlyText(props.item.text, props.activeProject);
+  const visibleText = friendlyText(props.item.text, props.activeProject).trim();
   return (
     <div className="message assistant-message">
-      {text ? <RichText text={text} /> : <span className="muted">Streaming...</span>}
+      {visibleText ? (
+        <RichText text={visibleText} />
+      ) : (
+        <span className="muted">Streaming...</span>
+      )}
     </div>
   );
+}
+
+function PlanProposalReview(props: {
+  proposal: PlanProposal;
+  feedbackDraft: string;
+  onAccept: (proposal: PlanProposal) => void;
+  onDecline: (proposal: PlanProposal) => void;
+  onFeedbackChange: (value: string) => void;
+  onModify: (proposal: PlanProposal, feedback?: string) => void;
+}) {
+  const pending = props.proposal.status === "pending";
+  const title = planProposalTitle(props.proposal);
+  const [decision, setDecision] = useState<"accept" | "revise">("accept");
+  const feedbackText = props.feedbackDraft.trim();
+  const hasAttachedPreviewContext = Boolean(props.proposal.previewAreaMark);
+  useEffect(() => {
+    if (props.feedbackDraft.trim()) setDecision("revise");
+  }, [props.feedbackDraft]);
+  useEffect(() => {
+    if (props.proposal.previewAreaMark) setDecision("revise");
+  }, [props.proposal.previewAreaMark]);
+  const acceptLabel = planAcceptLabel(props.proposal);
+  function submitDecision() {
+    if (decision === "accept") {
+      props.onAccept(props.proposal);
+      return;
+    }
+    if (!feedbackText && !hasAttachedPreviewContext) return;
+    props.onModify(props.proposal, feedbackText);
+  }
+  return (
+    <div className={`plan-proposal-review ${props.proposal.status}`}>
+      <div className="plan-proposal-copy">
+        <strong>{title}</strong>
+        <span>{planReviewText(props.proposal)}</span>
+      </div>
+      {pending ? (
+        <div
+          className="plan-decision"
+          aria-label="Implement this plan?"
+          onKeyDown={(event) => {
+            if (event.key === "Escape") {
+              event.preventDefault();
+              props.onDecline(props.proposal);
+            }
+            if ((event.ctrlKey || event.metaKey) && event.key === "Enter") {
+              event.preventDefault();
+              submitDecision();
+            }
+          }}
+        >
+          <strong>Implement this plan?</strong>
+          <div className="plan-decision-options">
+            <button
+              className={decision === "accept" ? "selected" : ""}
+              data-testid="plan-decision-accept-option"
+              type="button"
+              onClick={() => setDecision("accept")}
+            >
+              <span>1.</span>
+              <strong>{acceptLabel}</strong>
+            </button>
+            <label
+              className={`plan-decision-feedback ${
+                decision === "revise" ? "selected" : ""
+              }`}
+            >
+              <span>2.</span>
+              <textarea
+                data-testid="plan-decision-feedback"
+                onChange={(event) => {
+                  setDecision("revise");
+                  props.onFeedbackChange(event.target.value);
+                }}
+                onFocus={() => setDecision("revise")}
+                placeholder="No, and tell Codex what to do differently"
+                rows={props.feedbackDraft ? 3 : 1}
+                value={props.feedbackDraft}
+              />
+              {hasAttachedPreviewContext && (
+                <small className="plan-decision-chip">
+                  {props.proposal.previewAreaMark
+                    ? "Includes preview mark"
+                    : "Visual reference selected"}
+                </small>
+              )}
+            </label>
+          </div>
+          <div className="plan-decision-actions">
+            <button
+              data-testid="plan-decline"
+              type="button"
+              onClick={() => props.onDecline(props.proposal)}
+            >
+              <span>Dismiss</span>
+              <kbd>Esc</kbd>
+            </button>
+            <button
+              className="plan-proposal-accept"
+              data-testid="plan-accept"
+              disabled={
+                decision === "revise" &&
+                !feedbackText &&
+                !hasAttachedPreviewContext
+              }
+              type="button"
+              onClick={submitDecision}
+            >
+              <span>Submit</span>
+              <Check size={14} />
+            </button>
+          </div>
+        </div>
+      ) : null}
+    </div>
+  );
+}
+
+export function shouldShowPlanProposalReview(
+  proposal: PlanProposal,
+  turnStatus?: Turn["status"],
+) {
+  if (turnStatus === "inProgress") return false;
+  if (proposal.proposalKind === "live_proposal") return false;
+  if (isNoPlanProposalRequest(proposal.prompt)) return false;
+  if (isReadOnlyPlanningNoteRequest(proposal.prompt)) return false;
+  return proposal.status === "pending" || proposal.status === "accepted" || proposal.status === "declined";
+}
+
+function planAcceptLabel(proposal: PlanProposal) {
+  if (proposal.proposalKind === "safer_alternative") {
+    return "Yes, implement safer plan";
+  }
+  return "Yes, implement this plan";
+}
+
+function planProposalTitle(proposal: PlanProposal) {
+  return proposal.proposalKind === "safer_alternative" ? "Safer plan" : "Plan";
+}
+
+function planReviewText(proposal: PlanProposal) {
+  return "Plan ready.";
+}
+
+function isNoPlanProposalRequest(prompt: string) {
+  const text = prompt.toLowerCase();
+  return (
+    /\bno\s+(?:plan\s+)?proposal\b/.test(text) ||
+    /\bwithout\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(text) ||
+    /\bdo\s+not\s+(?:create|show|return|make)\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(
+      text,
+    ) ||
+    /\bdon't\s+(?:create|show|return|make)\s+(?:a\s+)?(?:plan\s+)?proposal\b/.test(
+      text,
+    )
+  );
+}
+
+function isReadOnlyPlanningNoteRequest(prompt: string) {
+  const text = prompt
+    .toLowerCase()
+    .replace(/\bplan\s+mode\s+only\b/g, "")
+    .replace(/\bplan\s+only\b/g, "");
+  const asksForSummary =
+    /\b(read|inspect|explain|summari[sz]e|tell\s+me\s+what|what\s+(?:this|the)\s+.*does)\b/.test(
+      text,
+    );
+  if (!asksForSummary) return false;
+  if (/\bdo\s+not\s+edit\s+files\b/.test(text)) return true;
+  const asksForChange =
+    /\b(add|build|create|implement|change|move|update|wire|design|propose|proposal|feature|route|page|button|panel|menu|workflow)\b/.test(
+      text,
+    );
+  return !asksForChange;
 }
 
 function FileChangeView(props: {
@@ -253,16 +776,68 @@ function TurnActivity(props: {
   activeProject: Project;
   durationMs: number | null;
   items: ActivityItem[];
+  startedAt: number | null;
   status: Turn["status"];
+  turn: Turn;
+  turnId: string;
+  workspaceProgress: WorkspaceProgressSnapshot | null;
 }) {
+  const [open, setOpen] = useState(props.status === "inProgress");
+  const [progressTick, setProgressTick] = useState(0);
+
+  useEffect(() => {
+    if (props.status === "inProgress") {
+      setOpen(true);
+      setProgressTick(0);
+    }
+  }, [props.status, props.turnId]);
+
+  useEffect(() => {
+    if (props.status !== "inProgress") return;
+    const timer = window.setInterval(
+      () => setProgressTick((value) => value + 1),
+      WORKSPACE_PROGRESS_POLL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [props.status, props.turnId]);
+
+  const elapsedMs =
+    props.status === "inProgress" && props.startedAt
+      ? Math.max(0, Date.now() - props.startedAt * 1000)
+      : props.durationMs;
+  const progress = summarizeTurnProgress(
+    props.turn,
+    props.activeProject,
+    props.workspaceProgress,
+  );
+
   return (
-    <details className="turn-activity">
+    <details
+      className={`turn-activity ${props.status}`}
+      open={open}
+      onToggle={(event) => setOpen(event.currentTarget.open)}
+    >
       <summary>
-        <span>{activitySummaryLabel(props.durationMs, props.status)}</span>
+        <span>
+          {activitySummaryLabel(props.durationMs, props.status, elapsedMs)}
+        </span>
         <ChevronDown className="details-chevron" size={14} />
       </summary>
       <div className="turn-activity-body">
-        {activityNodes(props.items, props.activeProject)}
+        {props.status === "inProgress" && progress.fileCount === 0 && (
+          <LiveTurnProgress
+            elapsedMs={elapsedMs}
+            progress={progress}
+            tick={progressTick}
+          />
+        )}
+        {props.status === "inProgress" && progress.fileCount > 0 && (
+          <TurnProgressInline progress={progress} status={props.status} />
+        )}
+        {activityNodes(
+          props.items.filter((item) => item.type !== "fileChange"),
+          props.activeProject,
+        )}
       </div>
     </details>
   );
@@ -271,6 +846,7 @@ function TurnActivity(props: {
 function activityNodes(items: ActivityItem[], activeProject: Project) {
   const nodes = [];
   let commandGroup: Extract<ThreadItem, { type: "commandExecution" }>[] = [];
+  const seenText = new Set<string>();
   for (const item of items) {
     if (item.type === "commandExecution") {
       commandGroup.push(item);
@@ -285,12 +861,13 @@ function activityNodes(items: ActivityItem[], activeProject: Project) {
       );
       commandGroup = [];
     }
+    const signature = activityItemTextSignature(item, activeProject);
+    if (signature) {
+      if (seenText.has(signature)) continue;
+      seenText.add(signature);
+    }
     nodes.push(
-      <ActivityLine
-        activeProject={activeProject}
-        key={item.id}
-        item={item}
-      />,
+      <ActivityLine activeProject={activeProject} key={item.id} item={item} />,
     );
   }
   if (commandGroup.length > 0) {
@@ -304,9 +881,224 @@ function activityNodes(items: ActivityItem[], activeProject: Project) {
   return nodes;
 }
 
+function LiveTurnProgress(props: {
+  elapsedMs: number | null;
+  progress: TurnProgressSummary;
+  tick: number;
+}) {
+  const elapsed =
+    props.elapsedMs != null
+      ? formatDuration(Math.max(props.elapsedMs, props.tick * WORKSPACE_PROGRESS_POLL_MS))
+      : formatDuration(props.tick * WORKSPACE_PROGRESS_POLL_MS);
+  const headline = liveProgressHeadline(props.progress);
+  const detail = liveProgressDetail(props.progress, elapsed, props.elapsedMs);
+
+  return (
+    <div
+      className="live-turn-progress"
+      data-progress-tick={props.tick}
+      data-testid="live-turn-progress"
+    >
+      <div className="live-turn-progress-mark" aria-hidden="true">
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+        <span />
+      </div>
+      <div className="live-turn-progress-copy">
+        <strong>{headline}</strong>
+        <small
+          key={`${props.progress.additions}:${props.progress.deletions}:${props.tick}`}
+        >
+          {detail}
+        </small>
+      </div>
+      {props.progress.fileCount === 0 && (
+        <LiveTurnProgressTimeline
+          elapsedMs={props.elapsedMs}
+          progress={props.progress}
+          tick={props.tick}
+        />
+      )}
+      {props.progress.files.length > 0 && (
+        <div className="live-turn-progress-files" aria-label="Live file progress">
+          {props.progress.files.slice(0, 3).map((file) => (
+            <span
+              className="live-turn-progress-file-chip"
+              key={`${file.path}:${file.additions}:${file.deletions}`}
+            >
+              <span>{file.label}</span>
+              <strong>{formatFileProgressDelta(file)}</strong>
+            </span>
+          ))}
+          {props.progress.extraFileCount > 0 && (
+            <span className="live-turn-progress-file-chip muted">
+              +{props.progress.extraFileCount} more
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function LiveTurnProgressTimeline(props: {
+  elapsedMs: number | null;
+  progress: TurnProgressSummary;
+  tick: number;
+}) {
+  const elapsedMs =
+    props.elapsedMs ?? props.tick * WORKSPACE_PROGRESS_POLL_MS;
+  const entries = liveProgressTimelineEntries(props.progress, elapsedMs);
+  if (entries.length === 0) return null;
+  return (
+    <div
+      className="live-turn-progress-timeline"
+      aria-label="Observable progress"
+    >
+      {entries.map((entry) => (
+        <div className="live-turn-progress-step" key={entry.key}>
+          <span>{entry.time}</span>
+          <strong>{entry.label}</strong>
+          <small>{entry.detail}</small>
+        </div>
+      ))}
+    </div>
+  );
+}
+
+function liveProgressTimelineEntries(
+  progress: TurnProgressSummary,
+  elapsedMs: number,
+) {
+  const elapsedSeconds = Math.floor(Math.max(0, elapsedMs) / 1000);
+  const latestBucket = Math.floor(elapsedSeconds / 10) * 10;
+  if (latestBucket < 10) return [];
+  const buckets: number[] = [];
+  for (
+    let bucket = Math.max(10, latestBucket - 70);
+    bucket <= latestBucket;
+    bucket += 10
+  ) {
+    buckets.push(bucket);
+  }
+  return buckets.map((bucket) => ({
+    key: `observable-${bucket}`,
+    time: formatDuration(bucket * 1000),
+    ...liveProgressTimelineCopy(progress, bucket),
+  }));
+}
+
+function liveProgressTimelineCopy(
+  progress: TurnProgressSummary,
+  elapsedSeconds: number,
+) {
+  if (progress.activeCommandCount > 0) {
+    return {
+      label: "Command running",
+      detail: progress.latestCommand
+        ? compactCommand(progress.latestCommand)
+        : "Waiting for command output",
+    };
+  }
+  if (progress.commandCount > 0) {
+    return {
+      label:
+        elapsedSeconds >= 50
+          ? "No file writes observed yet"
+          : "Watching workspace",
+      detail: `${progress.commandCount} command${
+        progress.commandCount === 1 ? "" : "s"
+      } observed`,
+    };
+  }
+  return {
+    label: elapsedSeconds >= 30 ? "Still working" : "Waiting",
+    detail: "No command or file writes observed yet",
+  };
+}
+
+function TurnProgressInline(props: {
+  progress: TurnProgressSummary;
+  status: Turn["status"];
+}) {
+  const active = props.status === "inProgress";
+  const firstFile = props.progress.files[0];
+  if (props.progress.fileCount === 1 && firstFile) {
+    return (
+      <p className={`activity-edit-line live ${active ? "editing" : "edited"}`}>
+        <PencilLine size={14} />
+        <span>
+          {active ? "Editing" : "Edited"} {firstFile.label}
+        </span>
+        <small>{formatShortLineDelta(firstFile.additions, firstFile.deletions)}</small>
+      </p>
+    );
+  }
+
+  return (
+    <details className="turn-progress-detail" open={active}>
+      <summary>
+        <PencilLine size={14} />
+        <span>{turnProgressDetailSummary(props.progress, active)}</span>
+        <small>
+          {formatShortLineDelta(
+            props.progress.additions,
+            props.progress.deletions,
+          )}
+        </small>
+        <ChevronDown className="details-chevron" size={14} />
+      </summary>
+      <div className="turn-progress-detail-list">
+        {props.progress.files.slice(0, 6).map((file) => (
+          <div className="turn-progress-detail-row" key={file.path}>
+            <span>
+              {active ? "Editing" : "Edited"} {file.label}
+            </span>
+            <small>{formatShortLineDelta(file.additions, file.deletions)}</small>
+          </div>
+        ))}
+        {props.progress.extraFileCount > 0 && (
+          <div className="turn-progress-detail-row muted">
+            <span>{props.progress.extraFileCount} more files changed</span>
+          </div>
+        )}
+        {props.progress.commands.slice(-4).map((command) => (
+          <div className="turn-progress-detail-row command" key={command.id}>
+            <span>Ran {compactCommand(command.command)}</span>
+            <small>{command.durationMs == null ? command.status : formatDuration(command.durationMs)}</small>
+          </div>
+        ))}
+      </div>
+    </details>
+  );
+}
+
+function turnProgressDetailSummary(
+  progress: TurnProgressSummary,
+  active: boolean,
+) {
+  const verb = active ? "Editing" : "Edited";
+  const fileLabel = `${progress.fileCount} file${
+    progress.fileCount === 1 ? "" : "s"
+  }`;
+  const commandLabel =
+    progress.commandCount > 0
+      ? `, ran ${progress.commandCount} command${
+          progress.commandCount === 1 ? "" : "s"
+        }`
+      : "";
+  return `${verb} ${fileLabel}${commandLabel}`;
+}
+
 function ActivityLine(props: {
   activeProject: Project;
-  item: Exclude<ActivityItem, Extract<ThreadItem, { type: "commandExecution" }>>;
+  item: Exclude<
+    ActivityItem,
+    Extract<ThreadItem, { type: "commandExecution" }>
+  >;
 }) {
   const item = props.item;
   if (item.type === "agentMessage") {
@@ -328,12 +1120,12 @@ function ActivityLine(props: {
     );
   }
   if (item.type === "plan") {
-    return <RichText text={item.text} />;
+    return <RichText text={friendlyText(item.text, props.activeProject)} />;
   }
   if (item.type === "reasoning") {
-    return item.summary.concat(item.content).map((line, index) => (
-      <RichText key={index} text={line} />
-    ));
+    return uniqueActivityLines(item.summary.concat(item.content)).map(
+      (line, index) => <RichText key={index} text={line} />,
+    );
   }
   return <p>{itemLabel(item)}</p>;
 }
@@ -353,7 +1145,10 @@ function CommandActivity(props: {
       </summary>
       <div className="command-activity-list">
         {props.commands.map((command) => (
-          <div key={command.id} className={`command-activity-line ${command.status}`}>
+          <div
+            key={command.id}
+            className={`command-activity-line ${command.status}`}
+          >
             <span>Ran {compactCommand(command.command)}</span>
             {command.status !== "completed" && (
               <small>{commandStatusText(command)}</small>
@@ -365,11 +1160,52 @@ function CommandActivity(props: {
   );
 }
 
-function isActivityItem(item: ThreadItem): item is ActivityItem {
+function activityItemTextSignature(
+  item: Exclude<
+    ActivityItem,
+    Extract<ThreadItem, { type: "commandExecution" }>
+  >,
+  activeProject: Project,
+) {
+  if (item.type === "fileChange") return "";
+  if (item.type === "agentMessage") {
+    return normalizeActivityText(friendlyText(item.text, activeProject));
+  }
+  if (item.type === "plan") {
+    return normalizeActivityText(friendlyText(item.text, activeProject));
+  }
+  if (item.type === "reasoning") {
+    return normalizeActivityText(
+      uniqueActivityLines(item.summary.concat(item.content)).join("\n"),
+    );
+  }
+  return "";
+}
+
+function uniqueActivityLines(lines: string[]) {
+  const seen = new Set<string>();
+  const unique: string[] = [];
+  for (const line of lines) {
+    const signature = normalizeActivityText(line);
+    if (!signature || seen.has(signature)) continue;
+    seen.add(signature);
+    unique.push(line);
+  }
+  return unique;
+}
+
+function normalizeActivityText(text: string) {
+  return text.replace(/\s+/g, " ").trim();
+}
+
+function isActivityItem(
+  item: ThreadItem,
+  turnStatus: Turn["status"],
+): item is ActivityItem {
   if (item.type === "agentMessage") return item.phase === "commentary";
+  if (item.type === "fileChange") return turnStatus === "inProgress";
   return (
     item.type === "commandExecution" ||
-    item.type === "fileChange" ||
     item.type === "plan" ||
     item.type === "reasoning"
   );
@@ -387,15 +1223,13 @@ function EmptyState() {
   );
 }
 
-function compactCommand(command: string) {
-  return command.length > 96 ? `${command.slice(0, 93)}...` : command;
-}
-
 function basename(path: string) {
   return path.split(/[\\/]/).filter(Boolean).pop() ?? path;
 }
 
-function splitVisibleChanges(item: Extract<ThreadItem, { type: "fileChange" }>) {
+function splitVisibleChanges(
+  item: Extract<ThreadItem, { type: "fileChange" }>,
+) {
   return [item.changes.slice(0, 3), item.changes.slice(3)] as const;
 }
 
@@ -446,20 +1280,6 @@ function FileChangeRows(props: {
   );
 }
 
-function diffLineCounts(diff: string) {
-  let additions = 0;
-  let deletions = 0;
-  for (const line of diff.split("\n")) {
-    if (line.startsWith("+++") || line.startsWith("---")) continue;
-    if (line.startsWith("+")) additions += 1;
-    if (line.startsWith("-")) deletions += 1;
-  }
-  if (additions === 0 && deletions === 0) {
-    return { additions: Math.max(0, lineCount(diff)), deletions: 0 };
-  }
-  return { additions, deletions };
-}
-
 function isMarkdownPath(path: string) {
   return /\.(md|mdx|markdown)$/i.test(path);
 }
@@ -470,6 +1290,10 @@ function documentPath(path: string, activeProject: Project) {
 }
 
 function friendlyPath(path: string, activeProject: Project) {
+  const proposalPath = proposalWorkspaceDisplayPath(path);
+  if (proposalPath) return proposalPath;
+  const relativePath = projectRelativeDisplayPath(path, activeProject.path);
+  if (relativePath) return relativePath;
   return friendlyText(path, activeProject).replace(/^\.\//, "");
 }
 
@@ -477,10 +1301,241 @@ function friendlyText(text: string, activeProject: Project) {
   if (!text) return text;
   const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
   const escapedProjectPath = escapeRegExp(projectPath);
-  return stripInternalEvidenceSurface(text).replace(
-    new RegExp(escapedProjectPath, "g"),
-    ".",
+  return sanitizeInternalCanvasText(
+    stripInternalEvidenceSurface(
+      stripPlanPreviewBlocks(stripVisualDecisionBlocks(trimInternalContextTail(text))),
+    ).replace(new RegExp(escapedProjectPath, "g"), "."),
   );
+}
+
+function sanitizeInternalCanvasText(text: string) {
+  return text
+    .replace(/\bprepared A, B, and C folders\b/gi, "Options A, B, and C")
+    .replace(/\bprepared option folders\b/gi, "proposal options")
+    .replace(/\boption folders\b/gi, "proposal options")
+    .replace(/\bproposal metadata\b/gi, "proposal details")
+    .replace(/\bprepared folders\b/gi, "proposal options")
+    .replace(/\bworkspace paths?\b/gi, "proposal details")
+    .replace(/\btemp paths?\b/gi, "proposal details");
+}
+
+type FriendlyUserDisplay = {
+  actionLabel?: string;
+  text: string;
+};
+
+function friendlyUserDisplay(
+  text: string,
+  activeProject: Project,
+): FriendlyUserDisplay {
+  return mapUserDisplayText(text, activeProject);
+}
+
+function mapUserDisplayText(
+  text: string,
+  activeProject: Project,
+): FriendlyUserDisplay {
+  let visible = text.trim();
+  const userRequestMarker = "\n\nUser request:\n";
+  if (visible.startsWith("Plan Mode:") && visible.includes(userRequestMarker)) {
+    visible = visible.slice(
+      visible.indexOf(userRequestMarker) + userRequestMarker.length,
+    );
+  }
+  const canvasQuestionRequest = extractCanvasQuestionRequest(visible);
+  if (canvasQuestionRequest) {
+    return { text: friendlyText(canvasQuestionRequest, activeProject) };
+  }
+  const liveOverlayProposalRequest = extractLiveOverlayProposalRequest(visible);
+  if (liveOverlayProposalRequest) {
+    return { text: friendlyText(liveOverlayProposalRequest, activeProject) };
+  }
+  const codeProposalRequest = extractCodeProposalWorkspaceRequest(visible);
+  if (codeProposalRequest) {
+    return { text: friendlyText(codeProposalRequest, activeProject) };
+  }
+  const codexContextRequest = extractCodexContextUserRequest(visible);
+  if (codexContextRequest != null) {
+    return { text: friendlyText(codexContextRequest, activeProject) };
+  }
+  const mockupReviewRequest = extractSavedMockupReviewRequest(visible);
+  if (mockupReviewRequest) {
+    return { text: friendlyText(mockupReviewRequest, activeProject) };
+  }
+  const visualDecisionRequest = extractVisualDecisionSelectionRequest(visible);
+  if (visualDecisionRequest) {
+    return { text: friendlyText(visualDecisionRequest, activeProject) };
+  }
+  const buildSelectedRequest = extractBuildSelectedMockupRequest(visible);
+  if (buildSelectedRequest) {
+    return { text: friendlyText(buildSelectedRequest, activeProject) };
+  }
+  const mockupTitle = friendlyMockupPromptTitle(visible);
+  if (mockupTitle) {
+    const original = extractOriginalMockupRequest(visible);
+    const requestedChange = extractRequestedMockupChange(visible);
+    return {
+      actionLabel: mockupActionLabel(mockupTitle),
+      text: friendlyText(requestedChange || original, activeProject),
+    };
+  }
+  for (const marker of [
+    "\n\nProject context explicitly attached by the user:\n",
+    "\n\nFiles to inspect if needed:\n",
+  ]) {
+    const index = visible.indexOf(marker);
+    if (index !== -1) visible = visible.slice(0, index);
+  }
+  return { text: friendlyText(visible.trim(), activeProject) };
+}
+
+function mockupActionLabel(title: string) {
+  const create = title.match(
+    /^Create\s+(\d+)\s*(.*?)\b(mockups|wireframes|previews)\b first$/i,
+  );
+  if (create) {
+    const depth = create[2].trim();
+    const artifactKind = previewArtifactKindFromText(create[3], "mockup");
+    return `${previewArtifactDisplayName(
+      artifactKind,
+      1,
+      "title",
+    )} first: ${create[1]} ${depth ? `${depth} ` : ""}${previewArtifactDisplayName(
+      artifactKind,
+      2,
+      "lower",
+    )}`;
+  }
+  return title;
+}
+
+function extractCanvasQuestionRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Canvas Question Context]",
+  );
+}
+
+function extractLiveOverlayProposalRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Live Overlay Proposal Context]",
+  );
+}
+
+function extractCodeProposalWorkspaceRequest(text: string) {
+  return extractOriginalRequestForSentinel(
+    text,
+    "[Codex Code Proposal Workspace Context]",
+  );
+}
+
+function extractSavedMockupReviewRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  const sentinel = "[Codex Saved Mockup Review Context]";
+  const sentinelIndex = visible.indexOf(sentinel);
+  if (sentinelIndex === -1) {
+    return "";
+  }
+  const payload = visible.slice(sentinelIndex);
+  const marker = "\n\nUser request:\n";
+  const markerIndex = payload.indexOf(marker);
+  if (markerIndex === -1) {
+    return `Review saved ${previewArtifactDisplayName(
+      previewArtifactKindFromText(payload, "mockup"),
+      2,
+      "lower",
+    )}.`;
+  }
+  return trimInternalContextTail(
+    payload.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function extractVisualDecisionSelectionRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Visual Decision Selection]")) {
+    return "";
+  }
+  const marker = "\n\nUser-visible composer text:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "Use selected Draft action.";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function extractBuildSelectedMockupRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith("[Codex Build Selected Mockup]")) {
+    return "";
+  }
+  const marker = "\n\nUser-visible request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function unwrapPlanModeUserRequest(text: string) {
+  const visible = text.trimStart();
+  const marker = "\n\nUser request:\n";
+  if (!visible.startsWith("Plan Mode:") || !visible.includes(marker)) {
+    return visible;
+  }
+  return visible.slice(visible.indexOf(marker) + marker.length);
+}
+
+function extractOriginalRequestForSentinel(text: string, sentinel: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith(sentinel)) return "";
+  const marker = "\n\nOriginal user request:\n";
+  const markerIndex = visible.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return trimInternalContextTail(
+    visible.slice(markerIndex + marker.length),
+  ).trim();
+}
+
+function trimInternalContextTail(text: string) {
+  const endMarkers = [
+    "Project context explicitly attached by the user:\n",
+    "\n\nProject context explicitly attached by the user:\n",
+    "Files to inspect if needed:\n",
+    "\n\nFiles to inspect if needed:\n",
+    "Supporting selected mockup context:\n",
+    "\n\nSupporting selected mockup context:\n",
+    "Build rules:\n",
+    "\n\nBuild rules:\n",
+    "Selected preview context:\n",
+    "\n\nSelected preview context:\n",
+  ];
+  const end = endMarkers
+    .map((marker) => text.indexOf(marker))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  return end == null ? text : text.slice(0, end);
+}
+
+function extractOriginalMockupRequest(text: string) {
+  const marker = "Original user request:\n";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex === -1) return "";
+  const afterMarker = text.slice(markerIndex + marker.length);
+  const endMarkers = ["\n\nRules:", "\n\nBuild rules:", "\n\nSelected mockup:"];
+  const end = endMarkers
+    .map((candidate) => afterMarker.indexOf(candidate))
+    .filter((index) => index >= 0)
+    .sort((left, right) => left - right)[0];
+  return (end == null ? afterMarker : afterMarker.slice(0, end)).trim();
+}
+
+function extractRequestedMockupChange(text: string) {
+  const marker = "Requested change:\n";
+  const markerIndex = text.indexOf(marker);
+  if (markerIndex === -1) return "";
+  return text.slice(markerIndex + marker.length).trim();
 }
 
 function stripInternalEvidenceSurface(text: string) {
@@ -497,9 +1552,34 @@ function escapeRegExp(value: string) {
   return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }
 
-function activitySummaryLabel(durationMs: number | null, status: Turn["status"]) {
-  if (durationMs && status !== "inProgress") return `Worked for ${formatDuration(durationMs)}`;
-  if (status === "inProgress") return "Thought process";
+function turnErrorMessage(error: { message: string }) {
+  try {
+    const parsed = JSON.parse(error.message) as {
+      error?: { message?: unknown };
+      message?: unknown;
+    };
+    const parsedMessage = parsed.error?.message ?? parsed.message;
+    if (typeof parsedMessage === "string" && parsedMessage.trim()) {
+      return parsedMessage;
+    }
+  } catch {
+    // Fall back to the raw backend message below.
+  }
+  return error.message;
+}
+
+function activitySummaryLabel(
+  durationMs: number | null,
+  status: Turn["status"],
+  elapsedMs?: number | null,
+) {
+  if (durationMs && status !== "inProgress")
+    return `Worked for ${formatDuration(durationMs)}`;
+  if (status === "inProgress") {
+    return elapsedMs != null
+      ? `Working for ${formatDuration(elapsedMs)}`
+      : "Working";
+  }
   if (status === "failed") return "Thought process";
   if (status === "interrupted") return "Thought process";
   return "Thought process";

@@ -1,60 +1,134 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex Local Desktop
 
----
+Codex Local Desktop is an experimental desktop workbench for builders who use coding agents to make apps. It keeps the familiar Codex-style chat and local project workflow, then adds a visual app preview and Draft UI direction: preview the user experience of a new feature inside the real app before committing to backend, database, API, or infrastructure changes.
 
-## Quickstart
+This project is not an official OpenAI product. It is a product fork/workspace built around the open-source Codex runtime and an Electron desktop shell.
 
-### Installing and running Codex CLI
+## Download
 
-Install globally with your preferred package manager:
+Windows prerelease installer:
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+[Download Codex Local 0.1.0 for Windows](https://github.com/agent4cat-cpu/codex-clone/releases/download/v0.1.0/Codex.Local-0.1.0-win-x64.exe)
+
+Release page:
+
+[Codex Local 0.1.0](https://github.com/agent4cat-cpu/codex-clone/releases/tag/v0.1.0)
+
+The current installer is unsigned, so Windows may show a SmartScreen warning. Until the repository is public, only GitHub users with access to this repository can download the release asset.
+
+## Why This Exists
+
+Agentic coding is powerful, but feature planning can become too abstract. A builder may spend a long conversation explaining product behavior, edge cases, screens, and workflow details, then accept a long plan that is hard to fully evaluate. If the agent builds the wrong UX first, fixing it later can create messy backend routes, temporary debug logic, duplicated flows, and hard-to-remove code.
+
+Codex Local is exploring a different workflow: make the next feature visible before making it real.
+
+The product direction is Draft UI mode:
+
+- ask for a feature;
+- let the agent create the UI and workflow first;
+- preview it inside the real local app context;
+- refine the user experience while it is still cheap to change;
+- approve or discard the draft;
+- only then convert it into real implementation work.
+
+## What It Does Today
+
+- Opens local project folders in a desktop app.
+- Keeps chats scoped to projects and threads.
+- Streams Codex progress, commands, approvals, and file changes.
+- Shows changed-file summaries and review entry points.
+- Starts or connects to a local app preview.
+- Lets the user mark areas in Live/Draft previews as visual context.
+- Creates Draft workspaces for reviewable UI/workflow changes before source changes are promoted.
+- Packages as an unsigned Windows Electron installer.
+
+## How It Is Different From Plain Codex
+
+Plain Codex is centered on the agent conversation, terminal work, approvals, and source edits.
+
+Codex Local keeps that foundation, but aims to add a builder-facing canvas around it:
+
+- **Live preview**: see the running app while talking to the agent.
+- **Draft preview**: explore the next feature as a temporary UI/workflow before real implementation.
+- **Visual context**: mark parts of the app so the agent and builder refer to the same screen areas.
+- **Draft-to-build path**: use the approved draft as a bridge into real source changes.
+- **Future tagging direction**: create a shared project vocabulary for screens, panels, buttons, and flows so prompts and plans use the builder's language.
+
+## Draft UI Mode
+
+Draft UI mode is the main product idea.
+
+In Draft UI mode, the agent should create the visible experience of a feature without immediately committing to production backend work. It can use fake data, local state, temporary UI, fixture objects, and structured draft notes. The goal is not to fake production. The goal is to let the builder feel the workflow before the app pays the cost of real implementation.
+
+Draft UI mode should help avoid:
+
+- long plans that are hard to read;
+- UX mistakes discovered only after backend work is done;
+- repeated back-and-forth implementation churn;
+- temporary backend routes and debug panels that become permanent;
+- hard-to-discard work when the first implementation direction is wrong.
+
+## Status
+
+This is an early prerelease. The desktop shell, local project workflow, Live preview, visual marking, Draft workspace path, and Windows packaging are in place. The broader Draft UI product direction is still being shaped and hardened.
+
+Not done yet:
+
+- signed installer;
+- automatic updates;
+- polished product icon;
+- public release workflow;
+- complete Draft UI contract for every app type;
+- the future tagging/vocabulary system.
+
+## Build From Source
+
+Requirements:
+
+- Windows for the current packaged desktop path;
+- Node.js 22 or newer;
+- pnpm 10.33 or newer;
+- Rust/Cargo for building the native Codex sidecar;
+- `rg.exe` on `PATH` when staging the Windows sidecar.
+
+Install dependencies:
+
+```powershell
+pnpm install
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+Run the desktop app in development mode:
+
+```powershell
+npm --prefix apps/desktop run electron:dev
 ```
 
-Then simply run `codex` to get started.
+Build the desktop renderer:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```powershell
+npm --prefix apps/desktop run build
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+Create an unpacked desktop app using the already staged sidecar:
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```powershell
+npm --prefix apps/desktop run electron:pack
+```
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Create an unsigned Windows installer from already staged sidecar binaries:
 
-</details>
+```powershell
+npm --prefix apps/desktop run electron:dist:staged
+```
 
-### Using Codex with your ChatGPT plan
+Run the full sidecar stage and installer build:
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+```powershell
+npm --prefix apps/desktop run electron:dist
+```
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+The full sidecar stage can be slow because it rebuilds Rust release binaries.
 
-## Docs
-
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+## License
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).
