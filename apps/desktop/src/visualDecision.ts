@@ -5,10 +5,7 @@ export type VisualDecisionOption = {
   prompt: string;
   canvasAction?:
     | "build_directly"
-    | "show_preview"
-    | "show_options"
-    | "add_option"
-    | "replace_option"
+    | "show_draft"
     | "start_fresh";
 };
 
@@ -90,14 +87,10 @@ function normalizeOption(
 function normalizeCanvasAction(
   value: unknown,
 ): VisualDecisionOption["canvasAction"] {
-  return value === "build_directly" ||
-    value === "show_preview" ||
-    value === "show_options" ||
-    value === "add_option" ||
-    value === "replace_option" ||
-    value === "start_fresh"
-    ? value
-    : undefined;
+  if (value === "build_directly" || value === "show_draft" || value === "start_fresh") {
+    return value;
+  }
+  return undefined;
 }
 
 function cleanText(value: unknown, maxLength: number) {
@@ -153,7 +146,7 @@ function looksLikeDecisionJson(value: string) {
     normalized.includes('"options"') &&
     normalized.includes('"prompt"') &&
     normalized.includes('"label"') &&
-    /\b(build-direct|quick-preview|preview-directions|wireframe|mockup|runnable proposal|proposal workspace|candidate app|show quick preview|show 2-3 directions|show wireframes|show mockups|build directly)\b/i.test(
+    /\b(build-direct|build now|build directly|show draft|revise draft|new draft|try draft|draft first|preview first)\b/i.test(
       value,
     )
   );

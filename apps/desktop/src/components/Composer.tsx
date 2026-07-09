@@ -29,7 +29,6 @@ import {
   desktopPathForFile,
 } from "../desktopBridge";
 import { permissionPresets } from "../localState";
-import { previewArtifactDisplayName } from "../mockupArtifacts";
 import {
   composerContextPreviewImage,
   composerContextVisualLabel,
@@ -545,7 +544,6 @@ function resizeComposerTextarea(textarea: HTMLTextAreaElement | null) {
 }
 
 function composerContextKey(context: ComposerContextReference) {
-  if (context.type === "appPreview") return context.id;
   return context.id;
 }
 
@@ -558,17 +556,7 @@ function composerContextChipTitle(context: ComposerContextReference) {
 }
 
 function composerContextChipLabel(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return "";
-  }
-  if (context.type === "mockupPreview") {
-    return `${context.projectName} - ${previewArtifactDisplayName(
-      context.artifactKind,
-      1,
-      "title",
-    )} ${context.mockupLabel}`;
-  }
-  return "";
+  return context.surface === "draft" ? "Draft" : "";
 }
 
 function composerContextMentionLabel(context: ComposerContextReference) {

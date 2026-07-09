@@ -3,6 +3,7 @@ import crypto from "node:crypto";
 import { createRequire } from "node:module";
 import {
   existsSync,
+  lstatSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
@@ -19,11 +20,18 @@ const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), ".."
 const {
   applyDraftWorkspace,
   diffDraftWorkspace,
+  listDraftWorkspaces,
   prepareDraftWorkspace,
   updateDraftBrief,
   updateDraftLifecycle,
   _test,
 } = require(path.join(repoRoot, "apps/desktop/electron/draft-workspaces.cjs"));
+const {
+  _test: {
+    cleanupPreviewDependencyReuse,
+    ensurePreviewDependencyReuse,
+  },
+} = require(path.join(repoRoot, "apps/desktop/electron/proposal-workspaces.cjs"));
 
 const tempRoot = mkdtempSync(path.join(tmpdir(), "p33-draft-workspace-"));
 
@@ -37,6 +45,15 @@ try {
   );
   writeFileSync(path.join(projectPath, "app.js"), "console.log('live app');\n");
   writeFileSync(path.join(projectPath, "styles.css"), "body { font-family: system-ui; }\n");
+  writeFileSync(
+    path.join(projectPath, "package.json"),
+    JSON.stringify({ scripts: { dev: "vite" }, dependencies: { "live-only": "1.0.0" } }, null, 2),
+  );
+  mkdirSync(path.join(projectPath, "node_modules", "live-only"), { recursive: true });
+  writeFileSync(
+    path.join(projectPath, "node_modules", "live-only", "index.js"),
+    "export const source = 'live dependency';\n",
+  );
 
   const sourceBefore = await sourceSnapshot(projectPath);
   const prepared = await prepareDraftWorkspace({
@@ -66,6 +83,40 @@ try {
     path.resolve(prepared.workspacePath).toLowerCase(),
     path.resolve(projectPath).toLowerCase(),
   );
+  const copiedDependencyPath = path.join(
+    prepared.workspacePath,
+    "node_modules",
+    "live-only",
+    "index.js",
+  );
+  assert.equal(
+    existsSync(path.join(prepared.workspacePath, "node_modules")),
+    false,
+    "draft prepare should not copy dependency trees before preview",
+  );
+  const dependencyReusePath = path.join(
+    prepared.workspacePath,
+    ".codex-proposal",
+    "dependency-reuse.json",
+  );
+  assert.ok(existsSync(dependencyReusePath), "draft should record hidden dependency reuse metadata");
+  const dependencyReuse = JSON.parse(readFileSync(dependencyReusePath, "utf8"));
+  assert.equal(dependencyReuse.mode, "project-link-pending");
+  assert.match(dependencyReuse.fingerprint, /^[a-f0-9]{64}$/);
+  const linkedDependencies = await ensurePreviewDependencyReuse(prepared.workspacePath);
+  assert.equal(linkedDependencies.status, "ready");
+  assert.ok(
+    lstatSync(path.join(prepared.workspacePath, "node_modules")).isSymbolicLink(),
+    "preview setup should link dependencies instead of copying them",
+  );
+  assert.ok(existsSync(copiedDependencyPath), "linked draft dependencies should be readable");
+  const cleanedDependencies = await cleanupPreviewDependencyReuse(prepared.workspacePath);
+  assert.equal(cleanedDependencies.status, "removed");
+  assert.equal(
+    existsSync(path.join(prepared.workspacePath, "node_modules")),
+    false,
+    "preview dependency link should be removable after preview stops",
+  );
 
   const briefPath = path.join(
     projectPath,
@@ -93,11 +144,24 @@ try {
     path.join(prepared.workspacePath, "draft-feature.js"),
     "export const draftOnly = true;\n",
   );
+  mkdirSync(path.join(prepared.workspacePath, "logs"), { recursive: true });
+  writeFileSync(
+    path.join(prepared.workspacePath, "logs", "draft-vite-4104.out.log"),
+    "Vite preview started on http://127.0.0.1:4104/\n",
+  );
+  writeFileSync(
+    path.join(prepared.workspacePath, "logs", "draft-vite-4104.err.log"),
+    "Transient preview stderr should not be part of Build this.\n",
+  );
+  writeFileSync(
+    path.join(prepared.workspacePath, "logs", "draft-vite-4104.log"),
+    "Plain generated preview logs should not be part of Build this.\n",
+  );
 
   assert.deepEqual(
     await sourceSnapshot(projectPath),
     sourceBefore,
-    "Live implementation source should stay unchanged while the draft workspace changes",
+    "Live source and dependencies should stay unchanged while the draft workspace changes",
   );
 
   const diff = await diffDraftWorkspace({
@@ -109,6 +173,7 @@ try {
   assert.deepEqual(
     diff.changedFiles.map((change) => `${change.kind}:${change.path}`).sort(),
     ["created:draft-feature.js", "updated:index.html"],
+    "Generated Draft preview logs should not appear as reviewable or buildable source changes",
   );
 
   const originalRegistry = await _test.readDraftRegistry(cacheRoot);
@@ -117,6 +182,10 @@ try {
   assert.equal(record.status, "active");
   assert.equal(record.briefPath, briefPath);
   assert.ok(pathInside(record.workspacePath, record.rootPath));
+  const listed = await listDraftWorkspaces({ cacheRoot, projectPath });
+  assert.equal(listed.length, 1);
+  assert.equal(listed[0].draftId, prepared.draftId);
+  assert.equal(listed[0].threadId, "thread-1");
 
   const corruptedRegistry = structuredClone(originalRegistry);
   corruptedRegistry.drafts[prepared.draftId] = {

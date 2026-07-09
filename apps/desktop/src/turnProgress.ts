@@ -1,5 +1,9 @@
 import { useEffect, useState } from "react";
 import { desktopInvoke } from "./desktopBridge";
+import {
+  projectRelativeDisplayPath,
+  proposalWorkspaceDisplayPath,
+} from "./proposalWorkspaceDisplay";
 import type { Project, Thread, ThreadItem, Turn } from "./types";
 import { lineCount } from "./utils/format";
 
@@ -373,13 +377,12 @@ export function liveProgressDetail(
 
 export function progressPathLabel(path: string, activeProject: Project | null) {
   const normalized = path.replace(/\\/g, "/");
+  const workspacePath = proposalWorkspaceDisplayPath(path);
+  if (workspacePath) return workspacePath;
   if (!activeProject) return normalized.replace(/^\.\//, "");
-  const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
-  if (!projectPath) return normalized.replace(/^\.\//, "");
-  const escapedProjectPath = escapeRegExp(projectPath);
-  return normalized
-    .replace(new RegExp(escapedProjectPath, "g"), ".")
-    .replace(/^\.\//, "");
+  const relativePath = projectRelativeDisplayPath(path, activeProject.path);
+  if (relativePath) return relativePath;
+  return normalized.replace(/^\.\//, "");
 }
 
 function progressPathKey(path: string, activeProject: Project | null) {
@@ -404,8 +407,4 @@ function preferChangeKind(
   if (next.type === "add") return next;
   if (next.type === "delete") return next;
   return next;
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 }

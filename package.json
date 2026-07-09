@@ -1,7 +1,7 @@
 {
-  "name": "codex-monorepo",
+  "name": "codex-local-desktop-monorepo",
   "private": true,
-  "description": "Tools for repo-wide maintenance.",
+  "description": "Local desktop builder workbench built on the Codex runtime.",
   "scripts": {
     "format": "prettier --check *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
     "format:fix": "prettier --write *.json *.md docs/*.md .github/workflows/*.yml **/*.js",
@@ -425,9 +425,15 @@
     "type": "git",
     "url": "git+https://github.com/agent4cat-cpu/codex-clone.git"
   },
-  "keywords": [],
+  "keywords": [
+    "codex",
+    "desktop",
+    "electron",
+    "local-ai",
+    "developer-tools"
+  ],
   "author": "",
-  "license": "ISC",
+  "license": "Apache-2.0",
   "type": "commonjs",
   "bugs": {
     "url": "https://github.com/agent4cat-cpu/codex-clone/issues"

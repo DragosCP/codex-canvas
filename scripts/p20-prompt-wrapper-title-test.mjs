@@ -61,6 +61,35 @@ try {
         "Give me three runnable options to build as proposals A, B, and C.",
     },
     {
+      name: "Feature draft workspace",
+      input: [
+        "[Codex Feature Draft Context]",
+        "",
+        "Canvas operating prompt:",
+        "Hidden internal rules that should never appear in the chat transcript.",
+        "",
+        "Draft rules:",
+        "- Work only in the isolated Draft workspace.",
+        "",
+        "User request:",
+        "Expand response containers to show the full answer",
+      ].join("\n"),
+      expected: "Expand response containers to show the full answer",
+    },
+    {
+      name: "Generic Codex context wrapper",
+      input: [
+        "[Codex Existing App Visual Decision Context]",
+        "",
+        "Desktop state:",
+        "- Project already has app files: yes",
+        "",
+        "Original user request:",
+        "Show one compact preview for the dashboard filters",
+      ].join("\n"),
+      expected: "Show one compact preview for the dashboard filters",
+    },
+    {
       name: "Saved preview artifact creation",
       input: [
         "[Codex Saved Mockup Review Context]",
@@ -155,6 +184,10 @@ try {
     path.join(repoRoot, "apps/desktop/src/App.tsx"),
     "utf8",
   );
+  const appSendGuardsSource = readFileSync(
+    path.join(repoRoot, "apps/desktop/src/appSendGuards.ts"),
+    "utf8",
+  );
   assert.match(
     appSource,
     /draft\.settings\.planMode\s*\?\s*promptWithPlanModeContext\(userPrompt\)/,
@@ -164,6 +197,11 @@ try {
     appSource,
     /\.\.\.\(settings\.planMode\s*\?\s*\{\s*planningOnly:\s*true\s*\}\s*:\s*\{\}\)/,
     "Plan Mode turns must ask app-server for planning-only enforcement.",
+  );
+  assert.match(
+    appSendGuardsSource,
+    /item\.type\s*===\s*"userMessage"\s*\?\s*\{\s*\.\.\.item,\s*content\s*\}/,
+    "Visible user messages must use the clean user request even when the backend returns a raw prompt wrapper.",
   );
 
   console.log("P20 prompt wrapper visible-title check passed.");

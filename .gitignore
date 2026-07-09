@@ -19,6 +19,7 @@ codex-rs/target/
 apps/desktop/src-tauri/target/
 apps/desktop/src-tauri/resources/
 apps/desktop/electron/resources/
+apps/desktop/release/
 
 # ignore README for publishing
 codex-cli/README.md
@@ -78,6 +79,11 @@ coverage/
 # local verification artifacts
 .codex-screenshots/
 artifacts/
+
+# local agent/scratch workspaces
+.agents/
+.analyser/
+.lovable/
 
 # personal files
 personal/

@@ -33,6 +33,23 @@ export function useAppServerEvents(args: {
   onThreadNameUpdated: (threadId: string, name: string | null) => void;
   onTokenUsageUpdated: (threadId: string, tokenUsage: ThreadTokenUsage) => void;
   onTurnCompleted: (threadId: string, turn: Turn) => void;
+  onAgentMessageUpdated?: (event: {
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    text: string;
+  }) => void;
+  onCommandExecutionStarted?: (event: {
+    threadId: string;
+    turnId: string;
+    command: string;
+  }) => void;
+  onFileChangePatchUpdated?: (event: {
+    threadId: string;
+    turnId: string;
+    itemId: string;
+    changes: Extract<ThreadItem, { type: "fileChange" }>["changes"];
+  }) => void;
   setInspector: SetState<InspectorSelection>;
   setPendingApprovals: SetState<PendingApproval[]>;
   setRunningTurnId: SetState<string | null>;
@@ -101,7 +118,33 @@ export function useAppServerEvents(args: {
         params?.item
       ) {
         const item = params.item as ThreadItem;
+        if (
+          message.method === "item/started" &&
+          item.type === "commandExecution"
+        ) {
+          args.onCommandExecutionStarted?.({
+            threadId,
+            turnId,
+            command: item.command,
+          });
+        }
         rememberAgentMessage(streamedAgentMessagesRef.current, turnId, item);
+        if (item.type === "agentMessage") {
+          args.onAgentMessageUpdated?.({
+            threadId,
+            turnId,
+            itemId: item.id,
+            text: item.text,
+          });
+        }
+        if (item.type === "fileChange") {
+          args.onFileChangePatchUpdated?.({
+            threadId,
+            turnId,
+            itemId: item.id,
+            changes: item.changes,
+          });
+        }
         args.patchThread(threadId, (thread) => ({
           ...thread,
           turns: updateTurnItems(thread.turns, turnId, (items) =>
@@ -112,7 +155,19 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "item/agentMessage/delta" && threadId && turnId) {
-        rememberAgentMessageDelta(streamedAgentMessagesRef.current, turnId, params);
+        const agentMessage = rememberAgentMessageDelta(
+          streamedAgentMessagesRef.current,
+          turnId,
+          params,
+        );
+        if (agentMessage) {
+          args.onAgentMessageUpdated?.({
+            threadId,
+            turnId,
+            itemId: agentMessage.id,
+            text: agentMessage.text,
+          });
+        }
         appendItemDelta(args.patchThread, threadId, turnId, params);
         return;
       }
@@ -180,6 +235,12 @@ export function useAppServerEvents(args: {
           ThreadItem,
           { type: "fileChange" }
         >["changes"];
+        args.onFileChangePatchUpdated?.({
+          threadId,
+          turnId,
+          itemId,
+          changes,
+        });
         args.patchThread(threadId, (thread) => ({
           ...thread,
           turns: updateTurnItems(thread.turns, turnId, (items) =>
@@ -228,6 +289,9 @@ export function useAppServerEvents(args: {
       }
 
       if (message.method === "thread/compacted" && threadId) {
+        args.patchThread(threadId, (thread) =>
+          insertOptimisticCompactionItem(thread, turnId),
+        );
         void args.syncThread(threadId);
       }
     },
@@ -267,9 +331,9 @@ function rememberAgentMessageDelta(
   buffer: AgentMessageBuffer,
   turnId: string,
   params?: Record<string, unknown>,
-) {
+): AgentMessageItem | null {
   const itemId = params?.itemId as string | undefined;
-  if (!itemId) return;
+  if (!itemId) return null;
   const delta = (params?.delta ?? "") as string;
   const turnMessages = (buffer[turnId] ??= {});
   const existing =
@@ -284,6 +348,7 @@ function rememberAgentMessageDelta(
     ...existing,
     text: `${existing.text}${delta}`,
   };
+  return turnMessages[itemId];
 }
 
 export function mergeBufferedAgentMessagesForTurn(
@@ -303,6 +368,46 @@ export function mergeBufferedAgentMessagesForTurn(
     ...Object.values(buffered).filter((item) => !incomingIds.has(item.id)),
   ];
   return { ...turn, items };
+}
+
+function insertOptimisticCompactionItem(
+  thread: Thread,
+  requestedTurnId?: string,
+): Thread {
+  const turnIndex = targetCompactionTurnIndex(thread, requestedTurnId);
+  if (turnIndex === -1) return thread;
+  const turn = thread.turns[turnIndex];
+  if (turn.items.some((item) => item.type === "contextCompaction")) {
+    return thread;
+  }
+  const item: Extract<ThreadItem, { type: "contextCompaction" }> = {
+    type: "contextCompaction",
+    id: `optimistic-compaction:${turn.id}`,
+  };
+  return {
+    ...thread,
+    turns: thread.turns.map((candidate, index) =>
+      index === turnIndex
+        ? {
+            ...candidate,
+            items: [...candidate.items, item],
+          }
+        : candidate,
+    ),
+  };
+}
+
+function targetCompactionTurnIndex(thread: Thread, requestedTurnId?: string) {
+  if (requestedTurnId) {
+    const requestedIndex = thread.turns.findIndex(
+      (turn) => turn.id === requestedTurnId,
+    );
+    if (requestedIndex !== -1) return requestedIndex;
+  }
+  for (let index = thread.turns.length - 1; index >= 0; index -= 1) {
+    if (thread.turns[index].status === "inProgress") return index;
+  }
+  return thread.turns.length - 1;
 }
 
 function appendItemDelta(

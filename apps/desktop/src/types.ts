@@ -112,24 +112,9 @@ export type InspectorSelection =
       projectId: string;
     }
   | {
-      type: "mockupPreview";
-      projectId: string;
-      proposalSetId: string;
-    }
-  | {
       type: "draftPreview";
       projectId: string;
       draftId: string;
-    }
-  | {
-      type: "codeProposalPreview";
-      projectId: string;
-      proposalSetId: string;
-    }
-  | {
-      type: "planPreview";
-      projectId: string;
-      proposalTurnId: string;
     }
   | { type: "document"; path: string; title?: string }
   | { type: "command"; item: Extract<ThreadItem, { type: "commandExecution" }> }
@@ -252,9 +237,6 @@ export type FeatureDraft = {
 
 export type CanvasVisualReferenceMeta = {
   threadId?: string | null;
-  proposalTurnId?: string;
-  proposalOptionId?: "A" | "B" | "C";
-  canvasLane?: "A" | "B" | "C";
   canvasId?: string;
   sourceFile?: string;
   componentName?: string;
@@ -288,39 +270,19 @@ export type ComposerAppPreviewContext = {
   id: string;
   projectId: string;
   projectName: string;
+  surface: "live" | "draft";
+  draftId?: string;
+  threadId?: string | null;
+  route?: string;
   previewUrl: string;
   viewport: "desktop" | "mobile";
   markLabel?: string;
   markNumber?: number;
   areaMark: PlanPreviewAreaMark;
   thumbnailDataUrl?: string;
-  source?: "userMark" | "proposalHighlight";
-  highlightId?: string;
 } & CanvasVisualReferenceMeta;
 
-export type ComposerMockupPreviewContext = {
-  type: "mockupPreview";
-  id: string;
-  projectId: string;
-  projectName: string;
-  proposalSetId: string;
-  artifactKind: PreviewArtifactKind;
-  mockupId: string;
-  mockupLabel: string;
-  mockupTitle: string;
-  markLabel: string;
-  markNumber: number;
-  filePath: string;
-  viewport: "desktop" | "mobile";
-  areaMark: PlanPreviewAreaMark;
-  thumbnailDataUrl?: string;
-  source?: "userMark" | "proposalHighlight";
-  highlightId?: string;
-};
-
-export type ComposerContextReference =
-  | ComposerAppPreviewContext
-  | ComposerMockupPreviewContext;
+export type ComposerContextReference = ComposerAppPreviewContext;
 
 export type PlanProposalStatus =
   | "pending"

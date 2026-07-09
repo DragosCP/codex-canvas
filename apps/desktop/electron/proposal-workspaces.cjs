@@ -6,12 +6,14 @@ const fsp = fs.promises;
 
 const META_DIR = ".codex-proposal";
 const BASELINE_FILE = "baseline.json";
+const DEPENDENCY_REUSE_FILE = "dependency-reuse.json";
 const SET_FILE = "proposal-set.json";
 const REGISTRY_FILE = "registry.json";
 const MAX_FILE_BYTES = 2 * 1024 * 1024;
 const MAX_OPTIONS_PER_SET = 3;
 const MAX_SETS_PER_PROJECT = 12;
 const MAX_SET_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const proposalRegistryWriteQueues = new Map();
 const IGNORED_DIRS = new Set([
   ".git",
   ".hg",
@@ -36,6 +38,17 @@ const IGNORED_FILES = new Set([
   "pnpm-lock.yaml",
   "yarn.lock",
 ]);
+const IGNORED_RELATIVE_FILE_PATTERNS = [
+  /^logs\/(?:draft|proposal|preview|vite)[^/]*(?:\.(?:out|err))?\.log$/i,
+];
+const DEPENDENCY_MANIFEST_FILES = [
+  "package.json",
+  "package-lock.json",
+  "pnpm-lock.yaml",
+  "yarn.lock",
+  "bun.lock",
+  "bun.lockb",
+];
 const BINARY_EXTENSIONS = new Set([
   ".7z",
   ".avif",
@@ -87,6 +100,9 @@ async function prepareProposalWorkspaces(args) {
   for (const optionId of optionIds) {
     const workspacePath = path.join(rootPath, optionId);
     await copyProject(projectPath, workspacePath);
+    if (args.reuseDependencies) {
+      await recordReusableDependencies(projectPath, workspacePath);
+    }
     await writeWorkspaceBaseline(workspacePath, {
       projectPath,
       proposalSetId,
@@ -350,6 +366,97 @@ async function copyProject(sourceRoot, targetRoot) {
   await copyDirectory(sourceRoot, targetRoot);
 }
 
+async function recordReusableDependencies(projectPath, workspacePath) {
+  const sourcePath = path.join(projectPath, "node_modules");
+  const targetPath = path.join(workspacePath, "node_modules");
+  if (!(await directoryExists(sourcePath)) || (await pathExists(targetPath))) {
+    return null;
+  }
+
+  const metadata = {
+    version: 1,
+    mode: "project-link-pending",
+    fingerprint: await dependencyFingerprint(projectPath),
+    recordedAt: Date.now(),
+  };
+  await writeJson(path.join(workspacePath, META_DIR, DEPENDENCY_REUSE_FILE), metadata);
+  return metadata;
+}
+
+async function ensurePreviewDependencyReuse(workspacePath) {
+  const workspaceRoot = path.resolve(String(workspacePath ?? ""));
+  const metadataPath = path.join(workspaceRoot, META_DIR, DEPENDENCY_REUSE_FILE);
+  const metadata = await readJsonIfExists(metadataPath);
+  if (!metadata || metadata.version !== 1) {
+    return { status: "skipped", reason: "No dependency reuse metadata." };
+  }
+  const targetPath = path.join(workspaceRoot, "node_modules");
+  if (await pathExists(targetPath)) {
+    return { status: "ready", mode: "existing" };
+  }
+
+  const baseline = await readWorkspaceBaseline(workspaceRoot);
+  const sourcePath = path.join(baseline.projectPath, "node_modules");
+  if (!(await directoryExists(sourcePath))) {
+    return { status: "skipped", reason: "Source dependencies are not installed." };
+  }
+  const currentFingerprint = await dependencyFingerprint(baseline.projectPath);
+  if (metadata.fingerprint && metadata.fingerprint !== currentFingerprint) {
+    return { status: "skipped", reason: "Dependency manifest changed." };
+  }
+
+  await fsp.symlink(sourcePath, targetPath, process.platform === "win32" ? "junction" : "dir");
+  const nextMetadata = {
+    ...metadata,
+    mode: "project-junction",
+    linkedAt: Date.now(),
+  };
+  await writeJson(metadataPath, nextMetadata);
+  return { status: "ready", mode: nextMetadata.mode };
+}
+
+async function cleanupPreviewDependencyReuse(workspacePath) {
+  const workspaceRoot = path.resolve(String(workspacePath ?? ""));
+  const metadataPath = path.join(workspaceRoot, META_DIR, DEPENDENCY_REUSE_FILE);
+  const metadata = await readJsonIfExists(metadataPath);
+  if (!metadata || metadata.version !== 1 || metadata.mode !== "project-junction") {
+    return { status: "skipped" };
+  }
+  const targetPath = path.join(workspaceRoot, "node_modules");
+  try {
+    const stat = await fsp.lstat(targetPath);
+    if (stat.isSymbolicLink()) {
+      await fsp.unlink(targetPath);
+    }
+  } catch (error) {
+    if (!error || error.code !== "ENOENT") throw error;
+  }
+  await writeJson(metadataPath, {
+    ...metadata,
+    mode: "project-link-pending",
+    cleanedAt: Date.now(),
+  });
+  return { status: "removed" };
+}
+
+async function dependencyFingerprint(projectPath) {
+  const hash = crypto.createHash("sha256");
+  hash.update("codex-draft-dependencies-v1\n");
+  for (const fileName of DEPENDENCY_MANIFEST_FILES) {
+    const filePath = path.join(projectPath, fileName);
+    try {
+      const stat = await fsp.stat(filePath);
+      if (!stat.isFile() || stat.size > MAX_FILE_BYTES) continue;
+      hash.update(`${fileName}\0${stat.size}\0`);
+      hash.update(await fsp.readFile(filePath));
+      hash.update("\0");
+    } catch (error) {
+      if (!error || error.code !== "ENOENT") throw error;
+    }
+  }
+  return hash.digest("hex");
+}
+
 async function copyDirectory(sourceDir, targetDir) {
   let entries = [];
   try {
@@ -371,14 +478,36 @@ async function copyDirectory(sourceDir, targetDir) {
   }
 }
 
+async function directoryExists(dirPath) {
+  try {
+    const stat = await fsp.stat(dirPath);
+    return stat.isDirectory();
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
+async function pathExists(filePath) {
+  try {
+    await fsp.lstat(filePath);
+    return true;
+  } catch (error) {
+    if (error && error.code === "ENOENT") return false;
+    throw error;
+  }
+}
+
 async function snapshotFiles(rootPath) {
   const files = new Map();
   if (!fs.existsSync(rootPath)) return files;
   await walk(rootPath, async (filePath, relativePath) => {
+    const normalizedRelativePath = normalizeRelativePath(relativePath);
+    if (shouldIgnoreRelativeFile(normalizedRelativePath)) return;
     const stat = await fsp.stat(filePath);
     if (!stat.isFile() || stat.size > MAX_FILE_BYTES) return;
     if (BINARY_EXTENSIONS.has(path.extname(filePath).toLowerCase())) return;
-    files.set(normalizeRelativePath(relativePath), {
+    files.set(normalizedRelativePath, {
       hash: await fileHash(filePath),
       size: stat.size,
     });
@@ -409,6 +538,12 @@ async function walk(rootPath, visit, dirPath = rootPath) {
 function shouldIgnoreEntry(name, isDirectory) {
   if (isDirectory) return IGNORED_DIRS.has(name);
   return IGNORED_FILES.has(name);
+}
+
+function shouldIgnoreRelativeFile(relativePath) {
+  return IGNORED_RELATIVE_FILE_PATTERNS.some((pattern) =>
+    pattern.test(normalizeRelativePath(relativePath)),
+  );
 }
 
 async function fileHashIfExists(filePath) {
@@ -523,9 +658,13 @@ async function writeProposalRegistry(cacheRoot, registry) {
 }
 
 async function upsertRegistrySet(cacheRoot, setRecord) {
-  const registry = await readProposalRegistry(cacheRoot);
-  registry.sets[setRecord.registryId] = normalizeRegistrySet(setRecord);
-  await writeProposalRegistry(cacheRoot, registry);
+  return withProposalRegistryWriteQueue(cacheRoot, async () => {
+    const registry = await readProposalRegistry(cacheRoot);
+    const normalized = normalizeRegistrySet(setRecord);
+    registry.sets[normalized.registryId] = normalized;
+    await writeProposalRegistry(cacheRoot, registry);
+    return normalized;
+  });
 }
 
 function normalizeRegistrySet(setRecord) {
@@ -592,39 +731,54 @@ async function assertRegisteredWorkspace(workspacePath, options = {}) {
 }
 
 async function cleanupProposalRegistry(cacheRoot, options = {}) {
-  const registry = await readProposalRegistry(cacheRoot);
-  const now = Date.now();
-  const setsByProject = new Map();
-  for (const [registryId, rawSet] of Object.entries(registry.sets)) {
-    const set = normalizeRegistrySet(rawSet);
-    if (!fs.existsSync(set.rootPath)) {
-      delete registry.sets[registryId];
-      continue;
+  return withProposalRegistryWriteQueue(cacheRoot, async () => {
+    const registry = await readProposalRegistry(cacheRoot);
+    const now = Date.now();
+    const setsByProject = new Map();
+    for (const [registryId, rawSet] of Object.entries(registry.sets)) {
+      const set = normalizeRegistrySet(rawSet);
+      if (!fs.existsSync(set.rootPath)) {
+        delete registry.sets[registryId];
+        continue;
+      }
+      if (now - set.updatedAt > MAX_SET_AGE_MS) {
+        await fsp.rm(set.rootPath, { recursive: true, force: true });
+        delete registry.sets[registryId];
+        continue;
+      }
+      const projectKey = path.resolve(set.projectPath).toLowerCase();
+      const projectSets = setsByProject.get(projectKey) ?? [];
+      projectSets.push(set);
+      setsByProject.set(projectKey, projectSets);
+      registry.sets[registryId] = set;
     }
-    if (now - set.updatedAt > MAX_SET_AGE_MS) {
-      await fsp.rm(set.rootPath, { recursive: true, force: true });
-      delete registry.sets[registryId];
-      continue;
-    }
-    const projectKey = path.resolve(set.projectPath).toLowerCase();
-    const projectSets = setsByProject.get(projectKey) ?? [];
-    projectSets.push(set);
-    setsByProject.set(projectKey, projectSets);
-    registry.sets[registryId] = set;
-  }
 
-  const keepSetIds = new Set(Array.isArray(options.keepSetIds) ? options.keepSetIds.map(String) : []);
-  for (const projectSets of setsByProject.values()) {
-    projectSets.sort((left, right) => right.updatedAt - left.updatedAt);
-    for (const staleSet of projectSets.slice(MAX_SETS_PER_PROJECT)) {
-      if (keepSetIds.has(staleSet.proposalSetId) || keepSetIds.has(staleSet.registryId)) continue;
-      await fsp.rm(staleSet.rootPath, { recursive: true, force: true });
-      delete registry.sets[staleSet.registryId];
+    const keepSetIds = new Set(Array.isArray(options.keepSetIds) ? options.keepSetIds.map(String) : []);
+    for (const projectSets of setsByProject.values()) {
+      projectSets.sort((left, right) => right.updatedAt - left.updatedAt);
+      for (const staleSet of projectSets.slice(MAX_SETS_PER_PROJECT)) {
+        if (keepSetIds.has(staleSet.proposalSetId) || keepSetIds.has(staleSet.registryId)) continue;
+        await fsp.rm(staleSet.rootPath, { recursive: true, force: true });
+        delete registry.sets[staleSet.registryId];
+      }
     }
-  }
 
-  await writeProposalRegistry(cacheRoot, registry);
-  return registry;
+    await writeProposalRegistry(cacheRoot, registry);
+    return registry;
+  });
+}
+
+function withProposalRegistryWriteQueue(cacheRoot, task) {
+  const key = path.resolve(String(cacheRoot ?? ""));
+  const previous = proposalRegistryWriteQueues.get(key) || Promise.resolve();
+  const run = previous.catch(() => null).then(task);
+  const tail = run.catch(() => null);
+  proposalRegistryWriteQueues.set(key, tail);
+  return run.finally(() => {
+    if (proposalRegistryWriteQueues.get(key) === tail) {
+      proposalRegistryWriteQueues.delete(key);
+    }
+  });
 }
 
 function pathInsideOrEqual(candidate, parentDir) {
@@ -640,10 +794,14 @@ function samePath(left, right) {
 module.exports = {
   addProposalWorkspaceOption,
   applyProposalWorkspace,
+  cleanupPreviewDependencyReuse,
   cleanupProposalRegistry,
   diffProposalWorkspace,
+  ensurePreviewDependencyReuse,
   prepareProposalWorkspaces,
   _test: {
+    cleanupPreviewDependencyReuse,
+    ensurePreviewDependencyReuse,
     readProposalRegistry,
     registrySetId,
     snapshotFiles,

@@ -1,22 +1,16 @@
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { build } from "esbuild";
 
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const tempDir = mkdtempSync(path.join(tmpdir(), "p27-canvas-test-"));
+const tempDir = mkdtempSync(path.join(tmpdir(), "p34-canvas-test-"));
 const canvasOutfile = path.join(tempDir, "canvasActions.mjs");
-const proposalModelOutfile = path.join(tempDir, "canvasProposalModel.mjs");
 const visualDecisionOutfile = path.join(tempDir, "visualDecision.mjs");
-const chatThreadOutfile = path.join(tempDir, "ChatThread.mjs");
-const codeProposalPreviewOutfile = path.join(tempDir, "CodeProposalPreview.mjs");
 const appOutfile = path.join(tempDir, "App.mjs");
-const proposalWorkspaceDisplayOutfile = path.join(
-  tempDir,
-  "proposalWorkspaceDisplay.mjs",
-);
+const localStateOutfile = path.join(tempDir, "localState.mjs");
 
 await build({
   entryPoints: [path.join(repoRoot, "apps/desktop/src/canvasActions.ts")],
@@ -28,35 +22,8 @@ await build({
 });
 
 await build({
-  entryPoints: [path.join(repoRoot, "apps/desktop/src/canvasProposalModel.ts")],
-  outfile: proposalModelOutfile,
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  logLevel: "silent",
-});
-
-await build({
   entryPoints: [path.join(repoRoot, "apps/desktop/src/visualDecision.ts")],
   outfile: visualDecisionOutfile,
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  logLevel: "silent",
-});
-
-await build({
-  entryPoints: [path.join(repoRoot, "apps/desktop/src/components/ChatThread.tsx")],
-  outfile: chatThreadOutfile,
-  bundle: true,
-  format: "esm",
-  platform: "node",
-  logLevel: "silent",
-});
-
-await build({
-  entryPoints: [path.join(repoRoot, "apps/desktop/src/components/CodeProposalPreview.tsx")],
-  outfile: codeProposalPreviewOutfile,
   bundle: true,
   format: "esm",
   platform: "node",
@@ -76,326 +43,108 @@ await build({
 });
 
 await build({
-  entryPoints: [path.join(repoRoot, "apps/desktop/src/proposalWorkspaceDisplay.ts")],
-  outfile: proposalWorkspaceDisplayOutfile,
+  entryPoints: [path.join(repoRoot, "apps/desktop/src/localState.ts")],
+  outfile: localStateOutfile,
   bundle: true,
   format: "esm",
   platform: "node",
+  define: {
+    "import.meta.env": "{}",
+  },
   logLevel: "silent",
 });
 
 try {
-  const {
-    CANVAS_OPERATING_PROMPT,
-    resolveCanvasAction,
-  } = await import(pathToFileURL(canvasOutfile).href);
-  const {
-    buildStrategyForProposalBacking,
-    isCanvasProposalDisplayLane,
-    proposalBackingForPreviewArtifactKind,
-  } = await import(pathToFileURL(proposalModelOutfile).href);
+  const { CANVAS_OPERATING_PROMPT, resolveCanvasAction } = await import(
+    pathToFileURL(canvasOutfile).href
+  );
   const { parseVisualDecisionStrip } = await import(
     pathToFileURL(visualDecisionOutfile).href
   );
-  const { shouldShowPlanProposalReview } = await import(
-    pathToFileURL(chatThreadOutfile).href
-  );
   const {
-    shouldRecoverAppliedCodeProposalFromThread,
     visualDecisionOptionCreatesCodeProposal,
+    visualDecisionOptionCreatesFeatureDraft,
     visualDecisionOptionCreatesLiveOverlay,
     visualDecisionOptionCreatesMockups,
   } = await import(pathToFileURL(appOutfile).href);
-  const {
-    codeProposalPreviewKey,
-    codeProposalPreviewProposal,
-    initialCodeProposalTab,
-  } = await import(pathToFileURL(codeProposalPreviewOutfile).href);
-  const { projectRelativeDisplayPath, proposalWorkspaceDisplayPath } = await import(
-    pathToFileURL(proposalWorkspaceDisplayOutfile).href
-  );
 
-  const proposalPreviewSet = {
-    proposalSetId: "proposal-a",
-    projectId: "project-1",
-    threadId: "thread-1",
-    turnId: "proposal-turn",
-    selectedOptionId: "A",
-    status: "ready",
-    rootPath: "C:/tmp/proposals/proposal-a",
-    options: [
-      {
-        id: "A",
-        status: "ready",
-        title: "Option A",
-        summary: "",
-        workspacePath: "C:/tmp/proposals/proposal-a/A",
-        previewOwnerId: "code-proposal:proposal-a:A",
-        changedFiles: [],
-      },
-    ],
-  };
-  const proposalGenerationTurn = {
-    id: "proposal-turn",
-    status: "completed",
-    items: [
-      {
-        type: "userMessage",
-        content: [
-          {
-            type: "text",
-            text: "Proposal A: Create one runnable mobile-first task board proposal for review.",
-          },
-        ],
-      },
-      {
-        type: "agentMessage",
-        phase: "final_answer",
-        text: "I’ll build only Proposal A as a runnable candidate. Option A is ready.",
-      },
-      {
-        type: "fileChange",
-        changes: [{ kind: "created", path: "Option A/index.html" }],
-      },
-    ],
-  };
-  const liveBuildTurn = {
-    id: "build-turn",
-    status: "completed",
-    items: [
-      {
-        type: "userMessage",
-        content: [
-          {
-            type: "text",
-            text: "Build selected Option A into Live.",
-          },
-        ],
-      },
-      {
-        type: "agentMessage",
-        phase: "final_answer",
-        text: "Applied Option A into Live.",
-      },
-      {
-        type: "fileChange",
-        changes: [{ kind: "created", path: "index.html" }],
-      },
-    ],
-  };
-  assert.equal(
-    shouldRecoverAppliedCodeProposalFromThread(proposalPreviewSet, {
-      turns: [proposalGenerationTurn],
-    }),
-    false,
-  );
-  assert.equal(
-    shouldRecoverAppliedCodeProposalFromThread(proposalPreviewSet, {
-      turns: [proposalGenerationTurn, liveBuildTurn],
-    }),
-    true,
-  );
+  assert.match(CANVAS_OPERATING_PROMPT, /Draft Canvas/);
+  assert.match(CANVAS_OPERATING_PROMPT, /Do not expose lettered proposal lanes/);
+  assert.doesNotMatch(CANVAS_OPERATING_PROMPT, /Use A\/B\/C only when/);
+  assert.doesNotMatch(CANVAS_OPERATING_PROMPT, /Proposal Canvas/);
+  assert.doesNotMatch(CANVAS_OPERATING_PROMPT, /Build selected/);
 
-  assert.match(CANVAS_OPERATING_PROMPT, /If the user says Canvas, treat it as @Canvas/);
-  assert.match(CANVAS_OPERATING_PROMPT, /Prefer one proposal for one visual change/);
-  assert.match(CANVAS_OPERATING_PROMPT, /Use A\/B\/C only when/);
-  assert.match(CANVAS_OPERATING_PROMPT, /Do not recreate the entire proposal/);
-  assert.match(CANVAS_OPERATING_PROMPT, /do not silently apply/i);
-  assert.match(CANVAS_OPERATING_PROMPT, /Live becomes the source of truth/);
-  assert.match(CANVAS_OPERATING_PROMPT, /comparison history, not active proposal routing/);
-  assert.match(CANVAS_OPERATING_PROMPT, /Never expose hidden Canvas payloads/);
-
-  const live = { exists: true, running: true, previewUrl: "http://127.0.0.1:5173" };
+  const live = {
+    exists: true,
+    running: true,
+    previewUrl: "http://127.0.0.1:5173",
+  };
   const emptyLive = { exists: false, running: false };
-  const activeAB = {
-    id: "proposal-1",
+  const legacyProposal = {
+    id: "old-proposal",
     backing: "code_backed_workspace",
     buildStrategy: "promote_code_workspace",
     lifecycle: "active",
     proposalLifecycle: "shown",
     selectedOptionId: "A",
     options: [
-      { id: "A", title: "Search-first" },
-      { id: "B", title: "Category-first" },
-    ],
-  };
-  const activeABC = {
-    ...activeAB,
-    selectedOptionId: "B",
-    options: [
-      { id: "A", title: "Header action" },
-      { id: "B", title: "Menu action" },
-      { id: "C", title: "Bottom action" },
+      { id: "A", title: "Old option" },
+      { id: "B", title: "Other old option" },
     ],
   };
 
   const fixtures = [
     {
-      name: "marked proposal tweak revises selected proposal",
+      name: "existing app preview creates Draft natively",
       input: {
-        message: "Show me the categories rather than search",
+        message: "Show me how quick add could work before building it",
+        live,
+        selectedSurface: "Live",
+      },
+      expected: { action: "CREATE_DRAFT", wantsOptions: false },
+    },
+    {
+      name: "explicit alternatives create Draft directions, not proposal lanes",
+      input: {
+        message: "Show me three directions for the settings workflow",
+        live,
+        selectedSurface: "Live",
+      },
+      expected: { action: "CREATE_DRAFT", wantsOptions: false },
+    },
+    {
+      name: "legacy selected proposal follow-up routes into Draft",
+      input: {
+        message: "Make this denser",
         live,
         selectedSurface: "A",
-        activeProposalSet: activeAB,
-        marks: [{ id: "mark-1", source: "user_mark", surface: "A" }],
+        activeProposalSet: legacyProposal,
       },
-      expected: { action: "REVISE_PROPOSAL", targetOptionId: "A" },
+      expected: { action: "CREATE_DRAFT", wantsOptions: false },
     },
     {
-      name: "post-build history does not block fresh Live proposal",
+      name: "legacy build wording routes to direct Live",
       input: {
-        message: "Please propose me a Settings button",
-        live,
-        selectedSurface: "Live",
-        historicalProposalSets: [{ ...activeABC, lifecycle: "accepted" }],
-      },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        baseSurface: "Live",
-        wantsOptions: false,
-        backingPreference: "live_dom_patch",
-      },
-    },
-    {
-      name: "live placement guidance asks before creating a proposal",
-      input: {
-        message: "Show me roughly where I can put a Settings button for the user.",
-        live,
-        selectedSurface: "Live",
-        historicalProposalSets: [{ ...activeABC, lifecycle: "accepted" }],
-      },
-      expected: {
-        action: "ASK_USER",
-        baseSurface: "Live",
-        wantsOptions: false,
-        backingPreference: "live_dom_patch",
-      },
-      assert(result) {
-        assert.match(result.question.reason, /direct implementation|preview/i);
-      },
-    },
-    {
-      name: "explicit one-preview placement request creates proposal A",
-      input: {
-        message: "Show me one preview for a Settings button placement.",
-        live,
-        selectedSurface: "Live",
-      },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        baseSurface: "Live",
-        wantsOptions: false,
-        backingPreference: "live_dom_patch",
-      },
-    },
-    {
-      name: "build option is an agent-owned build-selected action",
-      input: {
-        message: "Build on Option A",
+        message: "Build this old direction",
         live,
         selectedSurface: "A",
-        activeProposalSet: activeABC,
+        activeProposalSet: legacyProposal,
       },
-      expected: { action: "BUILD_SELECTED", targetOptionId: "A" },
+      expected: { action: "BUILD_LIVE_DIRECTLY", wantsOptions: false },
     },
     {
-      name: "full A/B/C plus another preview asks instead of blocking",
+      name: "blank project still asks before preview work",
       input: {
-        message: "Add another preview for the settings button",
-        live,
-        selectedSurface: "B",
-        activeProposalSet: activeABC,
-      },
-      expected: { action: "ASK_USER" },
-      assert(result) {
-        assert.match(result.question.title, /Which proposal slot/);
-        assert.match(result.question.reason, /A, B, and C/);
-      },
-    },
-    {
-      name: "empty-project local A/B/C uses Canvas proposal workspaces",
-      input: {
-        message: "Create local A/B/C layouts for a launch tracker app",
+        message: "Show me a few dashboard directions",
         live: emptyLive,
         selectedSurface: "Live",
       },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        wantsOptions: true,
-        backingPreference: "code_backed_workspace",
-      },
+      expected: { action: "ASK_USER", wantsOptions: false },
     },
     {
-      name: "live project three runnable options uses code-backed proposal workspaces",
+      name: "nonvisual backend request bypasses Canvas",
       input: {
-        message:
-          "Give me three runnable options to build as proposals A, B, and C. Do not change Live yet.",
-        live,
-        selectedSurface: "Live",
-      },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        wantsOptions: true,
-        backingPreference: "code_backed_workspace",
-      },
-    },
-    {
-      name: "live project explicit proposal workspaces stays isolated",
-      input: {
-        message:
-          "Please do the same request as three runnable proposal workspaces now: create options A, B, and C from the current Live task board. Do not change Live yet.",
-        live,
-        selectedSurface: "Live",
-      },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        wantsOptions: true,
-        backingPreference: "code_backed_workspace",
-      },
-    },
-    {
-      name: "empty-project ambiguous UI asks a visible Canvas question",
-      input: {
-        message: "I need a simple dashboard for volunteer shifts",
-        live: emptyLive,
-        selectedSurface: "Live",
-      },
-      expected: { action: "ASK_USER" },
-      assert(result) {
-        assert.match(result.question.reason, /no Live app/i);
-      },
-    },
-    {
-      name: "@Canvas anywhere is Canvas intent",
-      input: {
-        message: "Could you use @Canvas and show one preview for this header?",
-        live,
-        selectedSurface: "Live",
-      },
-      expected: {
-        action: "CREATE_PROPOSAL",
-        wantsOptions: false,
-        backingPreference: "live_dom_patch",
-      },
-    },
-    {
-      name: "put it in C adds or refreshes C beside A/B",
-      input: {
-        message: "Put it in C based on B",
-        live,
-        selectedSurface: "B",
-        activeProposalSet: activeAB,
-      },
-      expected: {
-        action: "ADD_OPTION",
-        targetOptionId: "C",
-        sourceOptionId: "B",
-      },
-    },
-    {
-      name: "backend-only prompt bypasses Canvas",
-      input: {
-        message: "Add a parser unit test for the API response",
+        message: "Add a SQLite migration for todos",
         live,
         selectedSurface: "Live",
       },
@@ -405,466 +154,137 @@ try {
 
   for (const fixture of fixtures) {
     const result = resolveCanvasAction(fixture.input);
-    for (const [key, value] of Object.entries(fixture.expected)) {
+    assert.equal(result.action, fixture.expected.action, fixture.name);
+    if ("wantsOptions" in fixture.expected) {
+      assert.equal(result.wantsOptions, fixture.expected.wantsOptions, fixture.name);
+    }
+    if ("canvasRelevant" in fixture.expected) {
       assert.equal(
-        result[key],
-        value,
-        `${fixture.name}: expected ${key}=${value}, got ${result[key]}`,
+        result.canvasRelevant,
+        fixture.expected.canvasRelevant,
+        fixture.name,
       );
     }
-    fixture.assert?.(result);
   }
 
-  const noLiveQuestionResolution = resolveCanvasAction({
-    message: "Build me a mobile-first glassmorphism to-do app",
-    live: emptyLive,
-    selectedSurface: "Live",
-  });
-  assert.equal(noLiveQuestionResolution.action, "ASK_USER");
-  assert.equal(noLiveQuestionResolution.backingPreference, "code_backed_workspace");
-  assert.match(noLiveQuestionResolution.question.reason, /no Live app/i);
-
-  const liveQuestionResolution = resolveCanvasAction({
-    message: "Where should the settings button go?",
-    live,
-    selectedSurface: "Live",
-  });
-  assert.equal(liveQuestionResolution.action, "ASK_USER");
-  assert.equal(liveQuestionResolution.backingPreference, "live_dom_patch");
-  assert.match(liveQuestionResolution.question.reason, /current app visually/i);
-
-  assert.equal(isCanvasProposalDisplayLane("A"), true);
-  assert.equal(isCanvasProposalDisplayLane("live_dom_patch"), false);
-  assert.equal(proposalBackingForPreviewArtifactKind("wireframe"), "wireframe_artifact");
-  assert.equal(proposalBackingForPreviewArtifactKind("mockup"), "mockup_artifact");
-  assert.equal(proposalBackingForPreviewArtifactKind("preview"), "mockup_artifact");
-  assert.equal(
-    buildStrategyForProposalBacking("live_dom_patch"),
-    "convert_dom_patch_to_code",
-  );
-  assert.equal(
-    buildStrategyForProposalBacking("code_backed_workspace"),
-    "promote_code_workspace",
-  );
-
-  const sameDisplayLaneDifferentBackings = [
+  const decision = parseVisualDecisionStrip(`Pick one.
+\`\`\`codex-decision-strip
+{
+  "title": "How should I handle this change?",
+  "summary": "I can update Live now or show a Draft first.",
+  "options": [
     {
-      backing: "live_dom_patch",
-      buildStrategy: "convert_dom_patch_to_code",
+      "id": "show",
+      "label": "Show Draft",
+      "description": "Legacy wording from old state.",
+      "prompt": "Show three alternatives.",
+      "canvasAction": "show_draft"
     },
     {
-      backing: "mockup_artifact",
-      buildStrategy: "implement_from_mockup",
+      "id": "build",
+      "label": "Build now",
+      "description": "Change the live app directly.",
+      "prompt": "Build it now.",
+      "canvasAction": "build_directly"
     },
     {
-      backing: "code_backed_workspace",
-      buildStrategy: "promote_code_workspace",
-    },
-  ];
-  for (const candidate of sameDisplayLaneDifferentBackings) {
-    const result = resolveCanvasAction({
-      message: "Build selected",
-      live,
-      selectedSurface: "A",
-      activeProposalSet: {
-        id: `${candidate.backing}:proposal`,
-        backing: candidate.backing,
-        buildStrategy: candidate.buildStrategy,
-        lifecycle: "active",
-        proposalLifecycle: "shown",
-        selectedOptionId: "A",
-        options: [{ id: "A", title: "Shared display lane" }],
-      },
-    });
-    assert.equal(result.action, "BUILD_SELECTED");
-    assert.equal(result.targetOptionId, "A");
-    assert.equal(result.targetSurface, "A");
-    assert.equal(result.backingPreference, candidate.backing);
-    assert.equal(result.buildStrategy, candidate.buildStrategy);
-    assert.notEqual(result.backingPreference, result.targetSurface);
-  }
+      "id": "replace",
+      "label": "Replace old direction",
+      "description": "Legacy proposal action.",
+      "prompt": "Replace the old direction.",
+      "canvasAction": "legacy_unknown_action"
+    }
+  ]
+}
+\`\`\``);
+  assert.equal(decision?.options[0].canvasAction, "show_draft");
+  assert.equal(decision?.options[1].canvasAction, "build_directly");
+  assert.equal(decision?.options[2].canvasAction, undefined);
 
-  const pendingLiveProposal = {
-    id: "live-proposal:turn-1",
-    projectId: "project-1",
-    threadId: "thread-1",
-    turnId: "turn-1",
-    prompt: "Create one temporary live proposal",
-    contexts: [],
-    previewSpec: {
-      title: "Settings button proposal",
-      summary: "Review the proposed settings placement.",
-      variants: [{ id: "A", label: "A", summary: "Top bar" }],
-    },
-    previewSelectedVariantId: "A",
-    previewAreaMark: null,
-    previewSession: null,
-    proposalKind: "live_proposal",
-    status: "pending",
-    createdAt: Date.now(),
-    updatedAt: Date.now(),
-  };
   assert.equal(
-    shouldShowPlanProposalReview(pendingLiveProposal, "inProgress"),
-    false,
-  );
-  assert.equal(
-    shouldShowPlanProposalReview(pendingLiveProposal, "completed"),
-    false,
-  );
-  assert.equal(
-    shouldShowPlanProposalReview(
-      { ...pendingLiveProposal, previewSpec: null },
-      "completed",
-    ),
-    false,
-  );
-
-  const agentAuthoredPreviewChoice = {
-    id: "preview",
-    label: "Preview",
-    description:
-      "Show one suggested Settings button location on the current app without editing files.",
-    prompt:
-      "Show one suggested Settings button location on the current app without editing files.",
-    canvasAction: "show_preview",
-  };
-  assert.equal(
-    visualDecisionOptionCreatesLiveOverlay(agentAuthoredPreviewChoice),
-    true,
-  );
-  assert.equal(
-    visualDecisionOptionCreatesMockups(agentAuthoredPreviewChoice),
-    false,
-  );
-  assert.equal(
-    visualDecisionOptionCreatesCodeProposal({
-      ...agentAuthoredPreviewChoice,
-      prompt:
-        "Create one runnable proposal workspace before implementation for this settings page.",
+    visualDecisionOptionCreatesFeatureDraft({
+      id: "draft",
+      label: "Show Draft",
+      description: "Try it first.",
+      prompt: "Create a Draft for this change.",
+      canvasAction: "show_draft",
     }),
     true,
   );
-  assert.equal(
-    visualDecisionOptionCreatesLiveOverlay({
-      ...agentAuthoredPreviewChoice,
-      prompt: "Create a quick wireframe preview for this settings placement.",
-    }),
-    false,
-  );
-
-  const codeProposalProject = {
-    id: "project-1",
-    path: "C:\\Users\\drago\\Desktop\\test26",
-    name: "test26",
-    pinned: false,
-    hidden: false,
-    archived: false,
-    order: 0,
-    lastActiveThreadId: "thread-1",
-    settings: {
-      sandbox: "danger-full-access",
-      approvalPolicy: "never",
-      model: null,
-      effort: "medium",
-      serviceTier: null,
-      planMode: false,
+  for (const option of [
+    {
+      id: "code",
+      label: "Runnable proposal",
+      description: "Old proposal wording.",
+      prompt: "Create candidate apps.",
     },
-  };
-  const codeProposalSet = {
-    proposalSetId: "proposal-1",
-    projectId: "project-1",
-    threadId: "thread-1",
-    turnId: "turn-1",
-    proposalBacking: "code_backed_workspace",
-    buildStrategy: "promote_code_workspace",
-    rootPath: "C:\\proposal",
-    originalPrompt: "Show 2-3",
-    selectedOptionId: "A",
-    status: "ready",
-    createdAt: 1000,
-    updatedAt: 2000,
-    options: [
+    {
+      id: "mockups",
+      label: "Show mockups",
+      description: "Old mockup wording.",
+      prompt: "Show wireframes.",
+    },
+  ]) {
+    assert.equal(visualDecisionOptionCreatesCodeProposal(option), false);
+    assert.equal(visualDecisionOptionCreatesLiveOverlay(option), false);
+    assert.equal(visualDecisionOptionCreatesMockups(option), false);
+  }
+
+  const stateJson = JSON.stringify({
+    version: 1,
+    projects: [
       {
-        id: "A",
-        title: "Option A",
-        summary: "3 updated",
-        workspacePath: "C:\\proposal\\A",
-        status: "ready",
-        changedFiles: [
-          {
-            kind: "updated",
-            path: "index.html",
-            hash: "abc",
-            size: 123,
-          },
-        ],
+        id: "project-1",
+        path: "C:/tmp/app",
+        name: "Todo",
+        pinned: false,
+        hidden: false,
+        archived: false,
+        order: 0,
+        lastActiveThreadId: "thread-1",
+        settings: {},
       },
     ],
+    activeProjectId: "project-1",
+    activeThreadId: "thread-1",
+    featureDrafts: {
+      draft_1: {
+        draftId: "draft_1",
+        projectId: "project-1",
+        rootPath: "C:/draft-root",
+        workspacePath: "C:/draft-root/workspace",
+        name: "Quick add",
+      },
+    },
+    codeProposalSets: {
+      old: {
+        projectId: "project-1",
+        rootPath: "C:/old-proposal",
+        options: [{ id: "A", workspacePath: "C:/old-proposal/A" }],
+      },
+    },
+    codeProposalActiveSetIdsByThreadId: { "thread-1": "old" },
+    codeProposalCompareSetIdsByThreadId: { "thread-1": "old" },
+    mockupActiveProposalSetIdsByThreadId: { "thread-1": "mockup-old" },
+    mockupHistoryProposalSetIds: { "mockup-old": true },
+  });
+  globalThis.localStorage = {
+    getItem(key) {
+      return key === "codex.desktop.v1" ? stateJson : null;
+    },
+    setItem() {},
+    removeItem() {},
   };
-  const codeProposalOption = codeProposalSet.options[0];
-  const codeProposalPreview = codeProposalPreviewProposal(
-    codeProposalProject,
-    codeProposalSet,
-    codeProposalOption,
-  );
-  assert.equal(codeProposalPreview.previewSpec.variants[0].id, "A");
-  assert.equal(
-    codeProposalPreview.previewSpec.variants[0].highlights[0].label,
-    "Proposed change",
-  );
-  assert.equal(
-    codeProposalPreviewProposal(codeProposalProject, {
-      ...codeProposalSet,
-      originalPrompt: "Propose where user settings should live",
-    }, codeProposalOption).previewSpec.variants[0].highlights[0].label,
-    "Settings",
-  );
-  assert.match(codeProposalPreviewKey(codeProposalSet, codeProposalOption), /abc/);
-  assert.equal(initialCodeProposalTab(codeProposalSet, true), "A");
-  assert.equal(
-    initialCodeProposalTab({ ...codeProposalSet, status: "applied" }, true),
-    "live",
-  );
-  assert.equal(
-    initialCodeProposalTab({ ...codeProposalSet, status: "applied" }, false),
-    "A",
-  );
-  assert.equal(
-    codeProposalPreviewProposal(codeProposalProject, codeProposalSet, {
-      ...codeProposalOption,
-      changedFiles: [],
-    }),
-    null,
-  );
-  assert.equal(
-    proposalWorkspaceDisplayPath(
-      "C:\\Users\\drago\\AppData\\Roaming\\Codex Local\\proposal-workspaces\\exampleX\\set-1\\A\\index.html",
-    ),
-    "Option A",
-  );
-  assert.equal(
-    proposalWorkspaceDisplayPath(
-      "C:\\Users\\drago\\AppData\\Roaming\\Codex Local\\proposal-workspaces\\exampleX\\set-1\\B\\styles.css",
-    ),
-    "Option B / styles.css",
-  );
-  assert.equal(
-    proposalWorkspaceDisplayPath("C:\\Users\\drago\\Desktop\\exampleX\\index.html"),
-    null,
-  );
-  assert.equal(
-    projectRelativeDisplayPath(
-      "C:\\Users\\drago\\Desktop\\exampleX\\index.html",
-      "C:\\Users\\drago\\Desktop\\exampleX",
-    ),
-    "index.html",
-  );
-  assert.equal(
-    projectRelativeDisplayPath(
-      "C:\\Users\\drago\\Desktop\\elsewhere\\index.html",
-      "C:\\Users\\drago\\Desktop\\exampleX",
-    ),
-    null,
-  );
+  const { loadDesktopState } = await import(pathToFileURL(localStateOutfile).href);
+  const state = loadDesktopState();
+  assert.deepEqual(state.codeProposalSets, {});
+  assert.deepEqual(state.codeProposalActiveSetIdsByThreadId, {});
+  assert.deepEqual(state.codeProposalCompareSetIdsByThreadId, {});
+  assert.deepEqual(state.mockupActiveProposalSetIdsByThreadId, {});
+  assert.deepEqual(state.mockupHistoryProposalSetIds, {});
+  assert.ok(state.featureDrafts.draft_1);
 
-  const parsedDecision = parseVisualDecisionStrip(
-    [
-      "Choose.",
-      "```codex-decision-strip",
-      JSON.stringify({
-        title: "Which proposal slot should change?",
-        summary: "Canvas can compare A, B, and C.",
-        options: [
-          {
-            id: "replace-a",
-            label: "Replace A",
-            description: "Use A for the new direction.",
-            prompt: "Replace Option A in the current Canvas proposal set.",
-            canvasAction: "replace_option",
-          },
-        ],
-      }),
-      "```",
-    ].join("\n"),
-  );
-  assert.equal(parsedDecision?.options[0].canvasAction, "replace_option");
-
-  const appSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/App.tsx"),
-    "utf8",
-  );
-  assert.match(appSource, /resolveCanvasAction\(/);
-  assert.match(appSource, /canvasResolution\?\.action === "CREATE_PROPOSAL"/);
-  assert.match(appSource, /canvasQuestionPrompt\(/);
-  assert.match(appSource, /CANVAS_OPERATING_PROMPT/);
-  assert.match(appSource, /archiveCanvasProposalsForThread/);
-  assert.match(appSource, /codeProposalHistoryOnComplete\?: boolean/);
-  assert.match(appSource, /codeProposalHistoryOnComplete = true/);
-  assert.match(appSource, /codeProposalCompareSetIdsByThreadId/);
-  assert.match(appSource, /codeProposalSetIsActiveForRouting/);
-  assert.match(appSource, /shouldRecoverAppliedCodeProposalFromThread/);
-  assert.match(appSource, /markCodeProposalSetAsApplied/);
-  assert.match(appSource, /latestActiveLiveProposalForThread\(desktop, threadId\)/);
-  assert.match(appSource, /proposal\.status === "pending" &&\s*Boolean\(proposal\.previewSpec\)/s);
-  assert.doesNotMatch(appSource, /fallbackVisualDecisionForTurn/);
-  assert.doesNotMatch(appSource, /turnOriginalRequestForSentinel/);
-  assert.doesNotMatch(appSource, /EMPTY_PROJECT_VISUAL_PLANNING_SENTINEL/);
-  assert.doesNotMatch(appSource, /EXISTING_APP_VISUAL_DECISION_SENTINEL/);
-  assert.doesNotMatch(appSource, /EXISTING_APP_PREVIEW_FIRST_SENTINEL/);
-  assert.doesNotMatch(appSource, /\[Codex Existing App Preview First Context\]/);
-  assert.doesNotMatch(appSource, /emptyProjectVisualPlanningPrompt/);
-  assert.doesNotMatch(appSource, /existingAppVisualDecisionPrompt/);
-  assert.doesNotMatch(appSource, /existingAppPreviewFirstPrompt/);
-  assert.doesNotMatch(appSource, /shouldOfferEmptyProjectVisualPlanning/);
-  assert.doesNotMatch(appSource, /shouldOfferCurrentAppVisualDecision/);
-  assert.match(appSource, /author the questionnaire yourself/);
-  assert.match(appSource, /Do not copy fixed default wording/);
-  assert.match(appSource, /Allowed canvasAction values/);
-  assert.match(appSource, /build\\s\+\(\?:selected\|this\|that\|it\|\[abc\]/);
-  assert.match(appSource, /agentTextLooksLikeCodeProposalBuiltLive/);
-  assert.match(appSource, /live project now contains/);
-  assert.match(appSource, /candidateTurns/);
-  assert.match(appSource, /visualDecisionLooksProposalReplacement/);
-  assert.match(appSource, /hasActiveCanvasProposal/);
-  assert.match(appSource, /proposal\?\.status === "pending" && proposal\.previewSpec/);
-  assert.match(
-    appSource,
-    /preferredLivePreviewSelection\(\s*projectId,\s*proposal\?\.threadId/s,
-  );
-
-  const chatSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/ChatThread.tsx"),
-    "utf8",
-  );
-  const itemUtilsSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/itemUtils.ts"),
-    "utf8",
-  );
-  const projectSidebarSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/ProjectSidebar.tsx"),
-    "utf8",
-  );
-  assert.match(chatSource, /\[Codex Canvas Question Context\]/);
-  assert.match(chatSource, /sanitizeInternalCanvasText/);
-  assert.match(chatSource, /prepared option folders/);
-  assert.match(chatSource, /proposal\.proposalKind === "live_proposal"\) return false/);
-  assert.doesNotMatch(chatSource, /Build selected proposal/);
-  assert.doesNotMatch(chatSource, /Implement this \{proposalNoun\}/);
-  assert.doesNotMatch(chatSource, /\[Codex Existing App Preview First Context\]/);
-  assert.match(itemUtilsSource, /\[Codex Canvas Question Context\]/);
-  assert.doesNotMatch(itemUtilsSource, /\[Codex Existing App Preview First Context\]/);
-  assert.doesNotMatch(projectSidebarSource, /\[Codex Existing App Preview First Context\]/);
-
-  const livePreviewSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/LiveAppPreview.tsx"),
-    "utf8",
-  );
-  const mockupPreviewSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/MockupPreview.tsx"),
-    "utf8",
-  );
-  const codeProposalPreviewSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/CodeProposalPreview.tsx"),
-    "utf8",
-  );
-  const inspectorSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/components/Inspector.tsx"),
-    "utf8",
-  );
-  const stylesSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/styles.css"),
-    "utf8",
-  );
-  const mockupArtifactsSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/mockupArtifacts.ts"),
-    "utf8",
-  );
-  const composerContextsSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/composerContexts.ts"),
-    "utf8",
-  );
-  assert.match(livePreviewSource, /showDetectInline = stoppedPreview && liveLaneActive/);
-  assert.match(livePreviewSource, /showUseUrlInline = stoppedPreview && liveLaneActive/);
-  assert.match(livePreviewSource, /runningPreview && liveLaneActive && !overflowReloadAction/);
-  assert.match(livePreviewSource, /canMarkArea = runningPreview \|\| proposalLaneActive/);
-  assert.match(livePreviewSource, /const overflowMarkAction = proposalLaneActive\s*\?\s*false/s);
-  assert.match(livePreviewSource, /const overflowChangesAction = proposalLaneActive\s*\?\s*false/s);
-  assert.match(livePreviewSource, /showMarkInline = canMarkArea && !overflowMarkAction/);
-  assert.match(
-    livePreviewSource,
-    /const showChangesInline =\s*proposalLaneActive &&\s*selectedHighlights\.length > 0/s,
-  );
-  assert.match(
-    livePreviewSource,
-    /const showChangesInMenu =\s*proposalLaneActive &&\s*selectedHighlights\.length > 0/s,
-  );
-  assert.match(livePreviewSource, /Show changes/);
-  assert.match(livePreviewSource, /canvas-lane-row live/);
-  assert.match(livePreviewSource, /canvas-lane-row proposals/);
-  assert.match(livePreviewSource, /const liveTitle = "Live"/);
-  assert.match(livePreviewSource, /canvas-floating-viewport/);
-  assert.match(livePreviewSource, /canvas-lane-transfer-popover/);
-  assert.match(livePreviewSource, /laneTransferPrompt/);
-  assert.match(livePreviewSource, /total === 1 \? "A" : id/);
-  assert.doesNotMatch(livePreviewSource, /total === 1 \? "Preview"/);
-  assert.doesNotMatch(
-    livePreviewSource,
-    /selectedVariant && proposalVisible\s*\?\s*"Proposal"/,
-  );
-  assert.match(livePreviewSource, /compareTabOptions\?: PreviewToolbarSelectOption\[\]/);
-  assert.doesNotMatch(livePreviewSource, /compareTabs\?:/);
-  assert.doesNotMatch(livePreviewSource, /titleLabel\?:/);
-  assert.match(mockupPreviewSource, /canvas-lane-toolbar/);
-  assert.match(mockupPreviewSource, /canvas-lane-row live/);
-  assert.match(mockupPreviewSource, /canvas-lane-row proposals active/);
-  assert.match(mockupPreviewSource, /MockupLaneTabs/);
-  assert.doesNotMatch(mockupPreviewSource, /preview-compare-options/);
-  assert.doesNotMatch(stylesSource, /preview-compare-options/);
-  assert.match(appSource, /inspector\.type !== "mockupPreview"/);
-  assert.match(
-    appSource,
-    /latestActiveLiveProposalForThread\(desktop, desktop\.activeThreadId\)/,
-  );
-  assert.match(
-    appSource,
-    /const selectedMockupCanShowLive = Boolean\(\s*selectedMockupPreviewSet &&\s*!selectedMockupHistoryMode,\s*\)/s,
-  );
-  assert.match(inspectorSource, /proposalControls=\{\{[\s\S]*autoStart: true/);
-  assert.match(codeProposalPreviewSource, /buildLabel:[\s\S]*"Build selected"/);
-  assert.match(codeProposalPreviewSource, /key=\{previewKey\}/);
-  assert.match(codeProposalPreviewSource, /proposal=\{proposal\}/);
-  assert.match(codeProposalPreviewSource, /initialCodeProposalTab/);
-  assert.match(codeProposalPreviewSource, /const showLiveLane = Boolean\(project\)/);
-  assert.match(codeProposalPreviewSource, /\.\.\.\(showLiveLane/);
-  assert.match(codeProposalPreviewSource, /Build or run Live from a selected proposal/);
-  assert.match(codeProposalPreviewSource, /label: highlightLabel/);
-  assert.match(codeProposalPreviewSource, /onLaneTransfer/);
-  assert.match(appSource, /transferCodeProposalLane/);
-  assert.match(appSource, /onTransferCodeProposalLane/);
-  assert.match(appSource, /nextAppPreviewChangeNumber/);
-  assert.match(appSource, /`Change \$\{markNumber\}`/);
-  assert.match(appSource, /Do not mention prepared folders/);
-  assert.match(appSource, /isExplicitCodeBackedProposalRequest/);
-  assert.match(appSource, /The user explicitly requested runnable proposal workspaces/);
-  assert.match(chatSource, /proposalWorkspaceDisplayPath/);
-  assert.match(itemUtilsSource, /\[Codex Canvas Question Context\]/);
-  assert.match(composerContextsSource, /nextAppPreviewChangeNumber/);
-  assert.match(composerContextsSource, /mark\|change/i);
-  assert.match(mockupArtifactsSource, /return fallbackLabel/);
-  assert.match(livePreviewSource, /detectHighlightAreaInWebview/);
-  assert.doesNotMatch(codeProposalPreviewSource, /onApply/);
-
-  const localStateSource = readFileSync(
-    path.join(repoRoot, "apps/desktop/src/localState.ts"),
-    "utf8",
-  );
-  assert.match(localStateSource, /codeProposalCompareSetIdsByThreadId/);
-  assert.match(localStateSource, /rawContext\.source === "proposalHighlight"/);
-  assert.match(localStateSource, /normalizeVisualContextLabel/);
-  assert.match(localStateSource, /`Change \$\{number\}`/);
-
-  console.log("P27 Canvas action resolver check passed.");
+  console.log("p34 draft-only canvas resolver helpers passed");
 } finally {
-  rmSync(tempDir, { recursive: true, force: true });
+  rmSync(tempDir, { force: true, recursive: true });
 }

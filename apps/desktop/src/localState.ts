@@ -114,7 +114,7 @@ export function loadDesktopState(): DesktopState {
       activeThreadId: activeProject?.lastActiveThreadId ?? null,
       pinnedThreadIds: stringArray(parsed.pinnedThreadIds),
       expandedProjectIds: stringArray(parsed.expandedProjectIds),
-      planProposals: normalizePlanProposals(parsed.planProposals),
+      planProposals: {},
       sentComposerContextsByTurnId: normalizeSentComposerContextsByTurnId(
         parsed.sentComposerContextsByTurnId,
       ),
@@ -122,19 +122,11 @@ export function loadDesktopState(): DesktopState {
       featureDraftActiveIdsByThreadId: stringRecord(
         parsed.featureDraftActiveIdsByThreadId,
       ),
-      codeProposalSets: normalizeCodeProposalSets(parsed.codeProposalSets),
-      codeProposalActiveSetIdsByThreadId: stringRecord(
-        parsed.codeProposalActiveSetIdsByThreadId,
-      ),
-      codeProposalCompareSetIdsByThreadId: stringRecord(
-        parsed.codeProposalCompareSetIdsByThreadId,
-      ),
-      mockupActiveProposalSetIdsByThreadId: stringRecord(
-        parsed.mockupActiveProposalSetIdsByThreadId,
-      ),
-      mockupHistoryProposalSetIds: booleanRecord(
-        parsed.mockupHistoryProposalSetIds,
-      ),
+      codeProposalSets: {},
+      codeProposalActiveSetIdsByThreadId: {},
+      codeProposalCompareSetIdsByThreadId: {},
+      mockupActiveProposalSetIdsByThreadId: {},
+      mockupHistoryProposalSetIds: {},
       layout: {
         inspectorWidth:
           positiveNumber((rawLayout as DesktopState["layout"]).inspectorWidth) ||
@@ -529,11 +521,11 @@ function normalizeProposalHighlights(
       const areaMark = normalizePlanPreviewAreaMark(raw.areaMark ?? raw);
       if (!areaMark) return null;
       const label =
-        stringValue(raw.label) || `Change ${variantId}${index + 1}`;
+        normalizeVisualContextLabel(stringValue(raw.label), index + 1);
       return {
         id:
           stringValue(raw.id) ||
-          `${variantId.toLowerCase()}-change-${index + 1}`,
+          `${variantId.toLowerCase()}-mark-${index + 1}`,
         label,
         note: stringValue(raw.note) || label,
         areaMark,
@@ -599,12 +591,6 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
       const previewUrl = stringValue(rawContext.previewUrl);
       if (!areaMark || !previewUrl) continue;
       const markNumber = positiveNumber(rawContext.markNumber) || 1;
-      const source =
-        rawContext.source === "proposalHighlight"
-          ? "proposalHighlight"
-          : rawContext.source === "userMark"
-            ? "userMark"
-            : undefined;
       contexts.push({
         type: "appPreview",
         id:
@@ -612,33 +598,20 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
           `app-preview:${projectId}:${areaMark.createdAt}`,
         projectId,
         projectName,
+        surface: rawContext.surface === "draft" ? "draft" : "live",
+        draftId: stringValue(rawContext.draftId) || undefined,
+        threadId: stringValue(rawContext.threadId) || null,
+        route: stringValue(rawContext.route) || areaMark.route || undefined,
         previewUrl,
         viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
         markLabel: normalizeVisualContextLabel(
           stringValue(rawContext.markLabel),
-          source,
           markNumber,
         ),
         markNumber,
         areaMark,
         thumbnailDataUrl:
           normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
-        source,
-        highlightId: stringValue(rawContext.highlightId) || undefined,
-        threadId: stringValue(rawContext.threadId) || null,
-        proposalTurnId: stringValue(rawContext.proposalTurnId) || undefined,
-        proposalOptionId:
-          rawContext.proposalOptionId === "A" ||
-          rawContext.proposalOptionId === "B" ||
-          rawContext.proposalOptionId === "C"
-            ? rawContext.proposalOptionId
-            : undefined,
-        canvasLane:
-          rawContext.canvasLane === "A" ||
-          rawContext.canvasLane === "B" ||
-          rawContext.canvasLane === "C"
-            ? rawContext.canvasLane
-            : undefined,
         canvasId: stringValue(rawContext.canvasId) || undefined,
         sourceFile: stringValue(rawContext.sourceFile) || undefined,
         componentName: stringValue(rawContext.componentName) || undefined,
@@ -658,62 +631,15 @@ function normalizeComposerContexts(value: unknown): ComposerContextReference[] {
       });
       continue;
     }
-
-    if (rawContext.type === "mockupPreview") {
-      const areaMark = normalizePlanPreviewAreaMark(rawContext.areaMark);
-      const mockupId = stringValue(rawContext.mockupId);
-      const mockupLabel = stringValue(rawContext.mockupLabel);
-      const mockupTitle = stringValue(rawContext.mockupTitle);
-      const markNumber = positiveNumber(rawContext.markNumber) || 1;
-      const filePath = stringValue(rawContext.filePath);
-      const proposalSetId = stringValue(rawContext.proposalSetId);
-      const artifactKind = normalizeArtifactKind(rawContext.artifactKind);
-      if (!areaMark || !mockupId || !filePath) continue;
-      const source =
-        rawContext.source === "proposalHighlight"
-          ? "proposalHighlight"
-          : "userMark";
-      contexts.push({
-        type: "mockupPreview",
-        id:
-          stringValue(rawContext.id) ||
-          `mockup-preview:${projectId}:${mockupId}:${areaMark.createdAt}`,
-        projectId,
-        projectName,
-        proposalSetId: proposalSetId || `legacy:${projectId}:${mockupId}`,
-        artifactKind,
-        mockupId,
-        mockupLabel: mockupLabel || mockupId,
-        mockupTitle: mockupTitle || mockupLabel || mockupId,
-        markLabel: normalizeVisualContextLabel(
-          stringValue(rawContext.markLabel),
-          source,
-          markNumber,
-        ),
-        markNumber,
-        filePath,
-        viewport: rawContext.viewport === "mobile" ? "mobile" : "desktop",
-        areaMark,
-        thumbnailDataUrl:
-          normalizedThumbnailDataUrl(rawContext.thumbnailDataUrl) || undefined,
-        source,
-        highlightId: stringValue(rawContext.highlightId) || undefined,
-      });
-    }
   }
   return contexts;
 }
 
 function normalizeVisualContextLabel(
   label: string,
-  source: "userMark" | "proposalHighlight" | undefined,
   number: number,
 ) {
   const trimmed = label.trim();
-  if (source === "proposalHighlight") {
-    if (/^change\s+\d+$/i.test(trimmed)) return trimmed;
-    return `Change ${number}`;
-  }
   if (/^mark\s+\d+$/i.test(trimmed)) return trimmed;
   return `Mark ${number}`;
 }

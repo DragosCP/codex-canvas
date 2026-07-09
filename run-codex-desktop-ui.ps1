@@ -46,6 +46,19 @@ function Start-HiddenServer {
     Write-Host "Started $Name. Log: $LogFile"
 }
 
+function Convert-ToWslPath {
+    param([string]$Path)
+
+    $resolved = (Resolve-Path -LiteralPath $Path).Path
+    if ($resolved -match "^([A-Za-z]):\\(.*)$") {
+        $drive = $matches[1].ToLowerInvariant()
+        $rest = $matches[2] -replace "\\", "/"
+        return "/mnt/$drive/$rest"
+    }
+
+    return $resolved -replace "\\", "/"
+}
+
 function Test-CodexLocalWindow {
     $mainScript = (Join-Path $Root "apps\desktop\electron\main.cjs").ToLowerInvariant()
     $processes = Get-CimInstance Win32_Process -ErrorAction SilentlyContinue |
@@ -76,7 +89,7 @@ if ($Shell -eq "desktop") {
 
     if (-not (Test-Path $desktopBundle)) {
         Write-Host "Desktop renderer bundle not found: $desktopBundle"
-        Write-Host "Run: corepack pnpm --filter @openai/codex-desktop build"
+        Write-Host "Run: corepack pnpm --filter codex-local-desktop build"
         exit 1
     }
 
@@ -93,7 +106,7 @@ if ($Shell -eq "desktop") {
     $launchLog = Join-Path $CacheDir ("codex-local-electron-{0}.log" -f (Get-Date -Format "yyyyMMdd-HHmmss"))
     Start-HiddenServer `
         -Name "Codex Local Electron" `
-        -Command "corepack pnpm --filter @openai/codex-desktop electron:run" `
+        -Command "corepack pnpm --filter codex-local-desktop electron:run" `
         -LogFile $launchLog
 
     Write-Host "Codex Local Electron is starting. A native window should open shortly."
@@ -105,19 +118,32 @@ $BackendName = if ($Backend -eq "real") { "real WSL app-server" } else { "mock a
 $BackendScript = if ($Backend -eq "real") { "app-server:real" } else { "app-server:mock" }
 $BackendMode = if ($Backend -eq "real") { "real-wsl" } else { "mock-dev" }
 $BackendLabel = if ($Backend -eq "real") { "Real WSL app-server" } else { "Mock app-server dev backend" }
-$ProjectPathHint = if ($Backend -eq "real") { "/mnt/c/Users/drago/Desktop/harnesses/codex-main" } else { "/mnt/c/Users/drago/Desktop/harnesses/codex-main/.cache/p03-desktop-demo-workspace" }
+$ProjectPathHintOverride = $env:VITE_CODEX_PROJECT_PATH_HINT
+if ([string]::IsNullOrWhiteSpace($ProjectPathHintOverride)) {
+    $ProjectPathHintOverride = $env:CODEX_PROJECT_PATH_HINT
+}
+$DefaultProjectPathHint = if ($Backend -eq "real") {
+    Convert-ToWslPath -Path $Root
+} else {
+    Convert-ToWslPath -Path (Join-Path $CacheDir "p03-desktop-demo-workspace")
+}
+$ProjectPathHint = if ([string]::IsNullOrWhiteSpace($ProjectPathHintOverride)) {
+    $DefaultProjectPathHint
+} else {
+    $ProjectPathHintOverride
+}
 
 if (-not (Test-LocalPort -Port $BackendPort)) {
     Start-HiddenServer `
         -Name $BackendName `
-        -Command "corepack pnpm --filter @openai/codex-desktop $BackendScript" `
+        -Command "corepack pnpm --filter codex-local-desktop $BackendScript" `
         -LogFile (Join-Path $CacheDir "p03-$Backend-app-server.log")
 } else {
     Write-Host "$BackendName already running on 127.0.0.1:$BackendPort."
 }
 
 if (-not (Test-LocalPort -Port 4317)) {
-    $devCommand = "set `"VITE_CODEX_APP_SERVER_URL=ws://127.0.0.1:$BackendPort`" && set `"VITE_CODEX_BACKEND_LABEL=$BackendLabel`" && set `"VITE_CODEX_BACKEND_MODE=$BackendMode`" && set `"VITE_CODEX_PROJECT_PATH_HINT=$ProjectPathHint`" && corepack pnpm --filter @openai/codex-desktop dev"
+    $devCommand = "set `"VITE_CODEX_APP_SERVER_URL=ws://127.0.0.1:$BackendPort`" && set `"VITE_CODEX_BACKEND_LABEL=$BackendLabel`" && set `"VITE_CODEX_BACKEND_MODE=$BackendMode`" && set `"VITE_CODEX_PROJECT_PATH_HINT=$ProjectPathHint`" && corepack pnpm --filter codex-local-desktop dev"
     Start-HiddenServer `
         -Name "desktop UI" `
         -Command $devCommand `

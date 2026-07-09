@@ -7,16 +7,12 @@ import {
 
 export type CanvasAction =
   | "ASK_USER"
-  | "CREATE_PROPOSAL"
-  | "REVISE_PROPOSAL"
-  | "ADD_OPTION"
-  | "BUILD_SELECTED"
-  | "BUILD_LIVE_DIRECTLY"
-  | "ARCHIVE_PROPOSALS";
+  | "CREATE_DRAFT"
+  | "BUILD_LIVE_DIRECTLY";
 
-export type CanvasSurface = "Live" | "A" | "B" | "C";
+export type CanvasSurface = "Live" | "Draft";
 
-export type CanvasOptionId = "A" | "B" | "C";
+export type CanvasWorkflowSurface = CanvasSurface | "none";
 
 export type CanvasProposalLifecycle =
   | "active"
@@ -49,16 +45,20 @@ export type CanvasProposalState = {
 
 export type CanvasMarkState = {
   id: string;
-  source: "user_mark" | "agent_change_mark";
+  source: "user_mark";
   surface: CanvasSurface;
-  proposalSetId?: string;
-  optionId?: CanvasSurface;
 };
 
 export type CanvasActionResolverInput = {
   message: string;
   live: CanvasLiveState;
   selectedSurface: CanvasSurface;
+  workflowLedger?: {
+    authoritativeSurface: CanvasWorkflowSurface;
+    selectedSurface: CanvasWorkflowSurface;
+    activeWorkKind: string;
+    draftNeedsAttention?: boolean;
+  };
   activeProposalSet?: CanvasProposalState | null;
   historicalProposalSets?: CanvasProposalState[];
   marks?: CanvasMarkState[];
@@ -77,43 +77,36 @@ export type CanvasActionResolution = {
   reason: string;
   baseSurface: CanvasSurface;
   targetSurface?: CanvasSurface;
-  targetOptionId?: CanvasOptionId;
-  sourceOptionId?: CanvasOptionId;
   wantsOptions: boolean;
   backingPreference?: ProposalBacking;
   buildStrategy?: BuildSelectedStrategy;
   question?: CanvasQuestion;
 };
 
-const OPTION_IDS = ["A", "B", "C"] as const;
-
 export const CANVAS_OPERATING_PROMPT = `You have access to Canvas, a visual collaboration surface for UI, UX, workflow, layout, and placement work.
 
 Canvas has:
 - Live Canvas: the real current app preview, with user marks.
-- Proposal Canvas: one or more proposed visual states, shown as A, A/B, or A/B/C, with user marks and agent change marks.
+- Draft Canvas: one reviewable feature change in the real app context, source-safe until the user chooses Build this.
 - Agent Question Placeholder: a visible product question surface for asking the user what kind of visual path they want before implementation.
 
 Use Canvas when the request involves:
 - UI, UX, workflow, layout, styling, navigation, menus, panels, modals, empty states, onboarding, placement, screenshots, marks, previews, mockups, wireframes, or visual comparison;
-- words like Canvas, @Canvas, preview, show me, where should, layout, workflow, mockup, wireframe, option, A/B/C, put it there, move it, make it smaller, or change this area.
+- words like Canvas, @Canvas, preview, show me, where should, layout, workflow, mockup, wireframe, option, alternative, put it there, move it, make it smaller, or change this area.
 
 If the user says Canvas, treat it as @Canvas even if it appears anywhere in the message.
 
-Prefer one proposal for one visual change.
-Use A/B/C only when the user asks for alternatives or the options are meaningfully different UX directions.
+Prefer one Draft for one existing-app visual change.
+When the user asks for alternatives, express them as named Draft directions or ask which single Draft to create first. Do not expose lettered proposal lanes.
 
 If there is no Live app and the user has not clearly chosen a path, ask a visible Canvas question before implementing.
-If there is a Live app and the request is a small visual change, create a Proposal Canvas by reusing Live Canvas as much as possible.
-Do not recreate the entire proposal for a small change inside an existing proposal.
-Do not write proposal A/B/C folders directly into the user project unless the user's actual app intentionally requires those folders.
+If there is a Live app and the request is one feature or small visual change to see before implementation, create a Draft Canvas by reusing Live Canvas as much as possible.
+Use Draft Canvas for preview-before-build work, including explicit alternatives. A Draft may have a product-facing name, but it is not a lettered lane.
 
-If the user asks to change an existing proposal, modify only the relevant part.
-If the user says "put it in C" and A/B exists, add or update Option C beside A/B.
-If the user says "build it" or "build selected", send an implementation turn with selected Canvas context; do not silently apply.
-After a selected Proposal Canvas is built into Live, Live becomes the source of truth. Keep the just-built Proposal Canvas visible beside Live for that verification moment, but treat it as comparison history, not active proposal routing. New ambiguous visual requests after that start from Live unless the user explicitly asks to revisit the old proposal.
+If the user says "build it", send an implementation turn with selected Draft context when a Draft is active; otherwise build Live directly. Do not silently apply hidden state.
+If the user asks to test, check, verify, or debug a Canvas surface, say which surface was tested, which URL/server was used, what data scope was touched (Live, copied, fabricated, or unknown), and whether source or data changed.
 
-Every visual proposal must include:
+Every Draft must include:
 - intent;
 - user flow: what the user clicks and sees;
 - changed elements or changed areas;
@@ -133,12 +126,9 @@ export function resolveCanvasAction(
       ? input.activeProposalSet
       : null;
   const marks = input.marks ?? [];
-  const targetOptionId = requestedOptionId(message);
-  const sourceOptionId = sourceOptionIdFromText(message);
-  const selectedOptionId =
-    surfaceToOptionId(input.selectedSurface) ??
-    surfaceToOptionId(activeProposal?.selectedOptionId ?? null) ??
-    firstProposalOption(activeProposal);
+  const explicitDraftTarget = isExplicitDraftTarget(normalized);
+  const explicitLiveTarget = isExplicitLiveTarget(normalized);
+  const explicitProposalTarget = isExplicitProposalTarget(normalized);
   const canvasRelevant =
     hasCanvasMention(message) ||
     isVisualCanvasRequest(message) ||
@@ -168,85 +158,67 @@ export function resolveCanvasAction(
 
   if (isArchiveRequest(normalized)) {
     return {
-      action: "ARCHIVE_PROPOSALS",
+      action: "BUILD_LIVE_DIRECTLY",
       canvasRelevant: true,
-      reason: "The user asked to clear the current Canvas proposal context.",
+      reason: "The user asked to clear stale Canvas context; P35 keeps Live/Draft only.",
       baseSurface: input.live.exists ? "Live" : input.selectedSurface,
       wantsOptions: false,
     };
   }
 
-  const unsupported = unsupportedOptionLabel(message);
-  if (unsupported) {
-    return askUserResolution(
-      input,
-      `Canvas supports active comparison options A, B, and C; option ${unsupported} is outside that set.`,
-      replacementQuestion(input, message, activeProposal),
-    );
+  if (
+    explicitDraftTarget &&
+    !isBuildSelectedRequest(normalized) &&
+    !explicitProposalTarget &&
+    !/\b(?:mockup|mockups|wireframe|wireframes)\b/.test(normalized)
+  ) {
+    return {
+      action: "CREATE_DRAFT",
+      canvasRelevant: true,
+      reason:
+        "The user explicitly targeted Draft, so stale proposal context must not capture this turn.",
+      baseSurface: "Live",
+      targetSurface: "Live",
+      wantsOptions: false,
+    };
   }
 
   if (activeProposal) {
-    if (isBuildSelectedRequest(normalized)) {
-      const target = targetOptionId ?? selectedOptionId;
+    if (explicitLiveTarget || isBuildSelectedRequest(normalized)) {
       return {
-        action: "BUILD_SELECTED",
+        action: "BUILD_LIVE_DIRECTLY",
         canvasRelevant: true,
-        reason: "The user is committing to the selected Canvas proposal.",
-        baseSurface: activeProposal.selectedOptionId ?? input.selectedSurface,
-        targetSurface: target ?? activeProposal.selectedOptionId ?? input.selectedSurface,
-        targetOptionId: target ?? undefined,
+        reason:
+          "Legacy proposal context is present, but P34 routes commits and explicit Live work to Live instead of proposal lanes.",
+        baseSurface: "Live",
         wantsOptions: false,
-        backingPreference: activeProposal.backing,
-        buildStrategy: activeProposal.buildStrategy,
-      };
-    }
-
-    const addOrReplace = isAddOrReplaceOptionRequest(normalized);
-    if (addOrReplace || targetOptionId) {
-      const target =
-        targetOptionId ??
-        nextMissingOption(activeProposal) ??
-        selectedOptionId ??
-        firstProposalOption(activeProposal);
-      if (!target || (isFullProposal(activeProposal) && !targetOptionId)) {
-        return askUserResolution(
-          input,
-          "The active Canvas proposal already has A, B, and C.",
-          replacementQuestion(input, message, activeProposal),
-        );
-      }
-      return {
-        action: "ADD_OPTION",
-        canvasRelevant: true,
-        reason: `The user wants Option ${target} added, refreshed, or replaced inside the current proposal set.`,
-        baseSurface: activeProposal.selectedOptionId ?? input.selectedSurface,
-        targetSurface: target,
-        targetOptionId: target,
-        sourceOptionId: sourceOptionId ?? selectedOptionId ?? undefined,
-        wantsOptions: true,
-        backingPreference: activeProposal.backing,
-        buildStrategy: activeProposal.buildStrategy,
       };
     }
 
     if (
-      isProposalRevisionRequest(normalized) ||
-      input.selectedSurface !== "Live" ||
-      marks.length > 0
+      isVerificationRequest(normalized) &&
+      input.workflowLedger?.authoritativeSurface === "Live" &&
+      !explicitProposalTarget
     ) {
-      const target = targetOptionId ?? selectedOptionId;
       return {
-        action: "REVISE_PROPOSAL",
+        action: "BUILD_LIVE_DIRECTLY",
         canvasRelevant: true,
-        reason: "The user is changing the active Canvas proposal, not Live.",
-        baseSurface: activeProposal.selectedOptionId ?? input.selectedSurface,
-        targetSurface: target ?? activeProposal.selectedOptionId ?? input.selectedSurface,
-        targetOptionId: target ?? undefined,
+        reason:
+          "The user asked to verify or debug the authoritative Live surface, not a legacy proposal lane.",
+        baseSurface: "Live",
         wantsOptions: false,
-        backingPreference: activeProposal.backing,
-        buildStrategy: activeProposal.buildStrategy,
       };
     }
+
+    return {
+      action: "CREATE_DRAFT",
+      canvasRelevant: true,
+      reason:
+        "Legacy proposal context is present, but P34 uses a Draft for reviewable visual follow-up work.",
+      baseSurface: "Live",
+      targetSurface: "Live",
+      wantsOptions: false,
+    };
   }
 
   if (isBuildSelectedRequest(normalized) || isDirectBuildRequest(normalized)) {
@@ -259,27 +231,21 @@ export function resolveCanvasAction(
     };
   }
 
-  const wantsOptions = isExplicitOptionsRequest(normalized);
   const wantsPreview = isExplicitPreviewRequest(normalized);
+  const wantsOptions = isExplicitOptionsRequest(normalized);
   const backingPreference = chooseBackingPreference(input, normalized, wantsOptions);
 
   if (!input.live.exists) {
     if (wantsOptions || wantsPreview || hasCanvasMention(message)) {
-      return {
-        action: "CREATE_PROPOSAL",
-        canvasRelevant: true,
-        reason: wantsOptions
-          ? "The user explicitly asked for visual options before a Live app exists."
-          : "The user explicitly asked for a Canvas preview before a Live app exists.",
-        baseSurface: "Live",
-        wantsOptions,
-        backingPreference,
-        buildStrategy: buildStrategyForProposalBacking(backingPreference),
-      };
+      return askUserResolution(
+        input,
+        "There is no Live app yet, so Canvas should ask whether to build the first Live version now or start with a simpler product direction.",
+        noLiveQuestion(message),
+      );
     }
     return askUserResolution(
       input,
-      "There is no Live app yet and the user has not clearly chosen direct build or proposal review.",
+      "There is no Live app yet and the user has not clearly chosen direct build or Draft review.",
       noLiveQuestion(message),
     );
   }
@@ -292,36 +258,43 @@ export function resolveCanvasAction(
     );
   }
 
-  if (wantsOptions || wantsPreview || isSmallVisualProposalRequest(normalized)) {
+  if ((wantsPreview && isFeatureDraftRequest(normalized)) || wantsOptions) {
     return {
-      action: "CREATE_PROPOSAL",
+      action: "CREATE_DRAFT",
       canvasRelevant: true,
-      reason: wantsOptions
-        ? "The user asked to compare proposal options."
-        : "The user asked for a visual proposal based on Live.",
+      reason:
+        wantsOptions
+          ? "The user asked for alternatives; P34 routes alternatives into named Draft directions instead of lettered proposal lanes."
+          : "The user asked to see one feature or workflow inside the existing app before implementation.",
       baseSurface: "Live",
-      wantsOptions,
-      backingPreference,
-      buildStrategy: buildStrategyForProposalBacking(backingPreference),
+      wantsOptions: false,
+    };
+  }
+
+  if (wantsPreview || isSmallVisualProposalRequest(normalized)) {
+    return {
+      action: "CREATE_DRAFT",
+      canvasRelevant: true,
+      reason: "The user asked for a visual preview based on Live, so P34 creates a Draft.",
+      baseSurface: "Live",
+      wantsOptions: false,
     };
   }
 
   if (isBroadVisualQuestion(normalized)) {
     return askUserResolution(
       input,
-      "The visual request is broad enough that the user should choose direct build, one preview, or options.",
+      "The visual request is broad enough that the user should choose direct build or a Draft first.",
       liveChoiceQuestion(message),
     );
   }
 
   return {
-    action: "CREATE_PROPOSAL",
+    action: "CREATE_DRAFT",
     canvasRelevant: true,
-    reason: "The request is visual and Live exists, so create one Canvas proposal by default.",
+    reason: "The request is visual and Live exists, so create one Draft by default.",
     baseSurface: "Live",
     wantsOptions: false,
-    backingPreference,
-    buildStrategy: buildStrategyForProposalBacking(backingPreference),
   };
 }
 
@@ -332,18 +305,12 @@ export function canvasActionSummary(resolution: CanvasActionResolution) {
     resolution.targetSurface
       ? `- Target surface: ${resolution.targetSurface}`
       : null,
-    resolution.targetOptionId
-      ? `- Target option: ${resolution.targetOptionId}`
-      : null,
-    resolution.sourceOptionId
-      ? `- Source option: ${resolution.sourceOptionId}`
-      : null,
     `- Wants options: ${resolution.wantsOptions ? "yes" : "no"}`,
     resolution.backingPreference
       ? `- Preferred proposal backing: ${resolution.backingPreference}`
       : null,
     resolution.buildStrategy
-      ? `- Build selected strategy: ${resolution.buildStrategy}`
+      ? `- Build strategy: ${resolution.buildStrategy}`
       : null,
     `- Resolver reason: ${resolution.reason}`,
   ]
@@ -406,9 +373,24 @@ function replacementQuestion(
   void message;
   void activeProposal;
   return {
-    title: "Which proposal slot should change?",
+    title: "Which draft should change?",
     reason:
-      "Canvas v2 can compare A, B, and C at once. Choose whether to replace one option or start a fresh proposal set.",
+      "Canvas now uses Drafts for preview work. Choose whether to revise the current Draft or start a fresh named Draft.",
+  };
+}
+
+function targetConflictQuestion(
+  input: CanvasActionResolverInput,
+  message: string,
+  activeProposal: CanvasProposalState | null,
+): CanvasQuestion {
+  void input;
+  void message;
+  void activeProposal;
+  return {
+    title: "Which surface should change?",
+    reason:
+      "The request mentions Live and an old proposal. Choose whether to update Live or move the idea into a Draft.",
   };
 }
 
@@ -482,6 +464,36 @@ function isExplicitPreviewRequest(text: string) {
   );
 }
 
+function isFeatureDraftRequest(text: string) {
+  if (
+    /\b(?:mockup|mockups|wireframe|wireframes|a\/b|options?|directions|variants|proposal|proposals)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  if (
+    /\b(?:one|1|single)\s+(?:quick\s+)?(?:review\s+)?preview\b/.test(text) &&
+    /\b(?:placement|button|label|copy|where|somewhere|move|resize|align|header|footer|toolbar|menu)\b/.test(
+      text,
+    )
+  ) {
+    return false;
+  }
+  return (
+    /\bshow\s+me\b.*\b(?:feature|flow|workflow|experience|mode|onboarding|checkout|upload|import|export|notification)\b/.test(
+      text,
+    ) ||
+    /\b(?:show|preview|draft|try|explore)\b.*\b(?:feature|flow|workflow|experience|mode|onboarding|checkout|upload|import|export|notification)\b/.test(
+      text,
+    ) ||
+    /\b(?:how|what)\b.*\b(?:would|could|should)\b.*\b(?:work|look|feel)\b/.test(
+      text,
+    ) ||
+    /\b(?:show|preview|draft|try|explore)\b.*\b(?:before|first)\b/.test(text)
+  );
+}
+
 function isSmallVisualProposalRequest(text: string) {
   if (
     isBroadVisualQuestion(text) ||
@@ -533,6 +545,30 @@ function isDirectBuildRequest(text: string) {
   );
 }
 
+function isExplicitDraftTarget(text: string) {
+  return /\b(?:draft|feature\s+draft|visuali[sz]e\s+first|visuali[sz]e\s+in\s+draft|before\s+implementation|before\s+implementing|show\s+me\s+the\s+workflow\s+first)\b/.test(
+    text,
+  );
+}
+
+function isExplicitLiveTarget(text: string) {
+  return /\b(?:live|working\s+app|real\s+app|main\s+files|project\s+folder|source\s+files|directly\s+to\s+live|inside\s+the\s+project|make\s+it\s+real|production|finished\s+product)\b/.test(
+    text,
+  );
+}
+
+function isExplicitProposalTarget(text: string) {
+  return /\b(?:option\s+[abc]|proposal|proposals|compare|comparison|a\/b|a\/b\/c)\b/.test(
+    text,
+  );
+}
+
+function isVerificationRequest(text: string) {
+  return /\b(?:check|test|verify|debug|try\s+the|walk\s+through|run\s+through|does\s+it\s+work|workflow\s+works|add\s+(?:a\s+)?test|smoke\s+test)\b/.test(
+    text,
+  );
+}
+
 function isBuildSelectedRequest(text: string) {
   if (/\b(?:looking|thinking|considering|planning)\s+to\s+implement\b/.test(text)) {
     return false;
@@ -555,86 +591,8 @@ function isBuildSelectedRequest(text: string) {
   );
 }
 
-function isAddOrReplaceOptionRequest(text: string) {
-  return /\b(add|create|new|another|additional|one more|replace|refresh|put it in|make it option)\b/.test(
-    text,
-  );
-}
-
-function isProposalRevisionRequest(text: string) {
-  if (isBuildSelectedRequest(text)) return false;
-  return /\b(revise|tweak|adjust|change|move|put|make|show me|instead|rather than|swap|replace|smaller|larger|higher|lower|top|bottom|left|right|there|this area|marked|mark)\b/.test(
-    text,
-  );
-}
-
 function isArchiveRequest(text: string) {
   return /\b(archive|dismiss|clear|reset)\s+(?:the\s+)?(?:canvas\s+)?(?:proposal|proposals|options|comparison)\b/.test(
     text,
   );
-}
-
-function requestedOptionId(message: string): CanvasOptionId | null {
-  const target = requestedOptionLabel(message);
-  return isCanvasOptionId(target) ? target : null;
-}
-
-function requestedOptionLabel(message: string): string | null {
-  const matches = [
-    ...message.matchAll(
-      /\b(?:add|create|new|another|additional|one\s+more|make|as|called|label(?:ed)?|replace|refresh|put(?:\s+it)?\s+in)\s+(?:it\s+)?(?:an?\s+)?(?:option\s+)?([a-z])\b/gi,
-    ),
-  ];
-  const last = matches[matches.length - 1]?.[1]?.toUpperCase();
-  if (last) return last;
-  const optionMatch = message.match(/\boption\s+([a-z])\b/i);
-  return optionMatch?.[1]?.toUpperCase() ?? null;
-}
-
-function sourceOptionIdFromText(message: string): CanvasOptionId | null {
-  const match = message.match(
-    /\b(?:based\s+on|from|like|derive(?:d)?\s+from|using)\s+(?:option\s+)?([a-z])\b/i,
-  );
-  const value = match?.[1]?.toUpperCase();
-  return isCanvasOptionId(value) ? value : null;
-}
-
-function unsupportedOptionLabel(message: string) {
-  const optionMatches = [...message.matchAll(/\boption\s+([a-z])\b/gi)];
-  return (
-    optionMatches
-      .map((match) => match[1]?.toUpperCase() ?? "")
-      .find((label) => Boolean(label) && !isCanvasOptionId(label)) ?? null
-  );
-}
-
-function isCanvasOptionId(value: string | null | undefined): value is CanvasOptionId {
-  return value === "A" || value === "B" || value === "C";
-}
-
-function surfaceToOptionId(
-  value: CanvasSurface | null | undefined,
-): CanvasOptionId | null {
-  return value === "A" || value === "B" || value === "C" ? value : null;
-}
-
-function firstProposalOption(
-  proposal: CanvasProposalState | null | undefined,
-): CanvasOptionId | null {
-  const option = proposal?.options
-    .map((candidate) => surfaceToOptionId(candidate.id))
-    .find((id): id is CanvasOptionId => Boolean(id));
-  return option ?? null;
-}
-
-function nextMissingOption(
-  proposal: CanvasProposalState,
-): CanvasOptionId | null {
-  const existing = new Set(proposal.options.map((option) => option.id));
-  return OPTION_IDS.find((id) => !existing.has(id)) ?? null;
-}
-
-function isFullProposal(proposal: CanvasProposalState) {
-  const existing = new Set(proposal.options.map((option) => option.id));
-  return OPTION_IDS.every((id) => existing.has(id));
 }

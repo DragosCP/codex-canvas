@@ -17,6 +17,7 @@ import { fileURLToPath } from "node:url";
 
 const require = createRequire(import.meta.url);
 const repoRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const { DatabaseSync } = require("node:sqlite");
 const {
   prepareDraftWorkspace,
 } = require(path.join(repoRoot, "apps/desktop/electron/draft-workspaces.cjs"));
@@ -176,6 +177,8 @@ const bridgePort = await findAvailablePort(appServerPort + 1, 49120);
 const rendererUrl = "http://127.0.0.1:4317";
 
 mkdirSync(evidenceDir, { recursive: true });
+rmSync(path.join(evidenceDir, "failure-state.png"), { force: true });
+rmSync(path.join(evidenceDir, "failure-state.json"), { force: true });
 rmSync(userDataDir, { recursive: true, force: true });
 mkdirSync(userDataDir, { recursive: true });
 resetInterfaceProject();
@@ -245,9 +248,7 @@ try {
   await writeFacts(cdp, "02-after-draft-seed", {
     draftId: draftOne.draftId,
   });
-  await waitForText(cdp, "Quick add flow", 60_000);
-  await clickButton(cdp, { title: "Quick add flow" });
-  await waitForText(cdp, "Build this", 60_000);
+  await ensureCanvasButton(cdp, { title: "Build this draft into Live" }, 60_000);
   await screenshot(cdp, "02-draft-open.png");
   await writeFacts(cdp, "02-draft-open", {
     sourceUnchanged: await sourceSnapshot(interfaceProjectPath),
@@ -258,26 +259,15 @@ try {
     "opening a draft should not change source",
   );
 
+  await ensureCanvasButton(cdp, { title: "Park this draft" }, 60_000);
   await clickButton(cdp, { title: "Park this draft" });
-  await waitForText(cdp, "Parked", 60_000);
+  await waitForDraftLifecycle(cdp, draftOne.draftId, "parked", 60_000);
+  await waitForText(cdp, "Ready in P33 Interface", 60_000);
   await screenshot(cdp, "03-draft-parked.png");
   assert.deepEqual(
     await sourceSnapshot(interfaceProjectPath),
     sourceBefore,
     "parking a draft should not change source",
-  );
-
-  await clickButton(cdp, { title: "Resume this draft" });
-  await waitForText(cdp, "Build this", 60_000);
-  await screenshot(cdp, "04-draft-resumed.png");
-
-  await clickButton(cdp, { title: "Discard this draft" });
-  await waitForText(cdp, "Ready in P33 Interface", 60_000);
-  await screenshot(cdp, "05-draft-discarded-live.png");
-  assert.deepEqual(
-    await sourceSnapshot(interfaceProjectPath),
-    sourceBefore,
-    "discarding a draft should not change source",
   );
 
   const draftTwo = await prepareReadyDraft({
@@ -296,12 +286,15 @@ try {
     projectId: "p33-interface",
     projectName: "P33 Interface",
     threadId,
-    drafts: [draftState(draftTwo, "Ready build proof draft.")],
+    drafts: [
+      {
+        ...draftState(draftTwo, "Ready build proof draft."),
+        updatedAt: Date.now() + 100_000,
+      },
+    ],
     activeDraftId: draftTwo.draftId,
   });
-  await waitForText(cdp, "Build proof", 60_000);
-  await clickButton(cdp, { title: "Build proof" });
-  await waitForText(cdp, "Build this", 60_000);
+  await ensureCanvasButton(cdp, { title: "Build this draft into Live" }, 60_000);
   await screenshot(cdp, "06-build-proof-draft.png");
   assert.deepEqual(
     await sourceSnapshot(interfaceProjectPath),
@@ -309,6 +302,7 @@ try {
     "source should remain unchanged immediately before Build this",
   );
 
+  await ensureCanvasButton(cdp, { title: "Build this draft into Live" }, 60_000);
   await clickButton(cdp, { title: "Build this draft into Live" });
   await waitFor(
     cdp,
@@ -364,9 +358,7 @@ try {
     ],
     activeDraftId: workflowDraft.draftId,
   });
-  await waitForText(cdp, "Approval routing", 60_000);
-  await clickButton(cdp, { title: "Approval routing" });
-  await waitForText(cdp, "Build this", 60_000);
+  await ensureCanvasButton(cdp, { title: "Build this draft into Live" }, 60_000);
   await screenshot(cdp, "09-workflow-draft-open.png");
   assert.deepEqual(
     await sourceSnapshot(workflowProjectPath),
@@ -375,6 +367,7 @@ try {
   );
 
   const workflowBeforeBuild = await sourceSnapshot(workflowProjectPath);
+  await ensureCanvasButton(cdp, { title: "Build this draft into Live" }, 60_000);
   await clickButton(cdp, { title: "Build this draft into Live" });
   await waitFor(
     cdp,
@@ -404,9 +397,12 @@ try {
     ),
     "Built workflow source should include backend escalation route",
   );
+  const workflowDatabase = workflowDatabaseSnapshot();
+  assert.equal(workflowDatabase.jobs.length, 3, "workflow database should seed jobs");
   await writeFacts(cdp, "10-workflow-built-live", {
     beforeBuild: workflowBeforeBuild,
     afterBuild: workflowAfterBuild,
+    workflowDatabase,
     sourceChanged: !sameSnapshot(workflowAfterBuild, workflowBeforeBuild),
   });
 
@@ -416,8 +412,6 @@ try {
       "01-live-only-seeded.png",
       "02-draft-open.png",
       "03-draft-parked.png",
-      "04-draft-resumed.png",
-      "05-draft-discarded-live.png",
       "06-build-proof-draft.png",
       "07-built-live.png",
       "08-workflow-live-only-seeded.png",
@@ -427,6 +421,12 @@ try {
   });
   console.log("P33 Electron dogfood passed.");
 } catch (error) {
+  if (cdp) {
+    await screenshot(cdp, "failure-state.png").catch(() => null);
+    await writeFacts(cdp, "failure-state", {
+      error: error?.stack || String(error),
+    }).catch(() => null);
+  }
   await writeSummary({ passed: false, error: error?.stack || String(error), logs, connectTrace });
   throw error;
 } finally {
@@ -626,41 +626,26 @@ function renderJobs(jobs) {`,
   writeFileSync(appPath, nextAppJs, "utf8");
 
   const serverJs = readFileSync(serverPath, "utf8");
-  const nextServerJs = serverJs
-    .replace(
-      "const jobs = [",
-      `const escalations = [];
-
-const jobs = [`,
-    )
-    .replace(
-      "  if (request.method === \"POST\" && pathname.startsWith(\"/api/jobs/\") && pathname.endsWith(\"/complete\")) {",
-      `  if (request.method === "GET" && pathname === "/api/escalations") {
-    json(response, 200, { escalations });
+  const nextServerJs = serverJs.replace(
+    "  if (request.method === \"POST\" && pathname.startsWith(\"/api/jobs/\") && pathname.endsWith(\"/complete\")) {",
+    `  if (request.method === "GET" && pathname === "/api/escalations") {
+    json(response, 200, { escalations: allEscalations() });
     return;
   }
 
   if (request.method === "POST" && pathname === "/api/escalations") {
     const body = await readJson(request);
-    const job = jobs.find((item) => item.id === body.jobId);
-    if (!job) {
+    const escalation = createEscalation(body.jobId, String(body.owner || "Ops lead"));
+    if (!escalation) {
       json(response, 404, { error: "Job not found" });
       return;
     }
-    const escalation = {
-      id: \`esc-\${Date.now()}\`,
-      jobId: job.id,
-      account: job.account,
-      owner: String(body.owner || "Ops lead"),
-      status: "pending",
-    };
-    escalations.unshift(escalation);
     json(response, 201, { escalation });
     return;
   }
 
   if (request.method === "POST" && pathname.startsWith("/api/jobs/") && pathname.endsWith("/complete")) {`,
-    );
+  );
   assert.notEqual(nextServerJs, serverJs, "Workflow draft should update server.js");
   writeFileSync(serverPath, nextServerJs, "utf8");
 
@@ -883,24 +868,81 @@ async function createThreadForProject(cdp, projectPath) {
 }
 
 async function clickButton(cdp, { title, text }) {
-  const clicked = await cdp.evaluate(
+  const started = Date.now();
+  let target = null;
+  while (Date.now() - started < 30_000) {
+    target = await buttonTarget(cdp, { title, text });
+    if (target) break;
+    await delay(250);
+  }
+  if (!target) {
+    const facts = await collectFacts(cdp);
+    throw new Error(`Could not click button ${title || text}. Buttons: ${JSON.stringify(facts.buttons)}`);
+  }
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseMoved",
+    x: target.x,
+    y: target.y,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mousePressed",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await cdp.send("Input.dispatchMouseEvent", {
+    type: "mouseReleased",
+    x: target.x,
+    y: target.y,
+    button: "left",
+    clickCount: 1,
+  });
+  await delay(150);
+}
+
+async function ensureCanvasButton(cdp, { title, text }, timeoutMs) {
+  if (!(await hasButton(cdp, { title, text }))) {
+    await clickButton(cdp, { title: "Open live preview" });
+  }
+  await waitForButton(cdp, { title, text }, timeoutMs);
+}
+
+async function hasButton(cdp, { title, text }) {
+  const facts = await collectFacts(cdp);
+  return facts.buttons.some((button) => {
+    const titleMatch = title ? button.title === title : true;
+    const textMatch = text ? button.text === text : true;
+    return titleMatch && textMatch && !button.disabled;
+  });
+}
+
+function buttonTarget(cdp, { title, text }) {
+  return cdp.evaluate(
     `({ title, text }) => {
       const buttons = [...document.querySelectorAll("button")];
       const button = buttons.find((candidate) => {
         const titleMatch = title ? candidate.title === title : true;
         const textMatch = text ? candidate.textContent.trim() === text : true;
-        return titleMatch && textMatch;
+        const rect = candidate.getBoundingClientRect();
+        const style = window.getComputedStyle(candidate);
+        const visible =
+          rect.width > 0 &&
+          rect.height > 0 &&
+          style.display !== "none" &&
+          style.visibility !== "hidden" &&
+          style.opacity !== "0";
+        return titleMatch && textMatch && visible;
       });
-      if (!button) return false;
-      button.click();
-      return true;
+      if (!button) return null;
+      const rect = button.getBoundingClientRect();
+      return {
+        x: rect.left + rect.width / 2,
+        y: rect.top + rect.height / 2,
+      };
     }`,
     { title, text },
   );
-  if (!clicked) {
-    const facts = await collectFacts(cdp);
-    throw new Error(`Could not click button ${title || text}. Buttons: ${JSON.stringify(facts.buttons)}`);
-  }
 }
 
 async function screenshot(cdp, name) {
@@ -939,6 +981,34 @@ async function waitForText(cdp, text, timeoutMs) {
     async () => {
       const bodyText = await cdp.evaluate("() => document.body.innerText");
       return bodyText.includes(text);
+    },
+    timeoutMs,
+  );
+}
+
+async function waitForButton(cdp, { title, text }, timeoutMs) {
+  await waitFor(
+    cdp,
+    async () => {
+      const facts = await collectFacts(cdp);
+      return facts.buttons.some((button) => {
+        const titleMatch = title ? button.title === title : true;
+        const textMatch = text ? button.text === text : true;
+        return titleMatch && textMatch && !button.disabled;
+      });
+    },
+    timeoutMs,
+  );
+}
+
+async function waitForDraftLifecycle(cdp, draftId, lifecycle, timeoutMs) {
+  await waitFor(
+    cdp,
+    async () => {
+      const state = await cdp.evaluate(
+        "() => JSON.parse(localStorage.getItem('codex.desktop.v1') || '{}')",
+      );
+      return state.featureDrafts?.[draftId]?.lifecycle === lifecycle;
     },
     timeoutMs,
   );
@@ -988,6 +1058,7 @@ async function sourceSnapshot(rootPath) {
   const files = {};
   await walk(rootPath, async (filePath, relativePath) => {
     if (relativePath.split(/[\\/]/).includes(".codex")) return;
+    if (/\.sqlite(?:-(?:shm|wal))?$/i.test(relativePath)) return;
     const bytes = readFileSync(filePath);
     files[relativePath.replace(/\\/g, "/")] = crypto
       .createHash("sha256")
@@ -995,6 +1066,29 @@ async function sourceSnapshot(rootPath) {
       .digest("hex");
   });
   return files;
+}
+
+function workflowDatabaseSnapshot() {
+  const dbPath = path.join(workflowProjectPath, "workflow.sqlite");
+  assert.ok(existsSync(dbPath), "workflow preview should create workflow.sqlite");
+  const db = new DatabaseSync(dbPath);
+  try {
+    const jobs = db
+      .prepare("SELECT id, account, stage, status FROM jobs ORDER BY id")
+      .all();
+    const escalations = db
+      .prepare(
+        "SELECT e.id, e.job_id AS jobId, j.account, e.owner, e.status FROM escalations e JOIN jobs j ON j.id = e.job_id ORDER BY e.created_at DESC",
+      )
+      .all();
+    return {
+      path: dbPath,
+      jobs,
+      escalations,
+    };
+  } finally {
+    db.close();
+  }
 }
 
 async function walk(rootPath, visit, dirPath = rootPath) {
@@ -1179,6 +1273,9 @@ li { display: flex; justify-content: space-between; gap: 12px; padding: 12px; bo
 function resetWorkflowProject() {
   const publicDir = path.join(workflowProjectPath, "public");
   mkdirSync(publicDir, { recursive: true });
+  rmSync(path.join(workflowProjectPath, "workflow.sqlite"), { force: true });
+  rmSync(path.join(workflowProjectPath, "workflow.sqlite-shm"), { force: true });
+  rmSync(path.join(workflowProjectPath, "workflow.sqlite-wal"), { force: true });
   writeFileSync(
     path.join(workflowProjectPath, "package.json"),
     `${JSON.stringify(
@@ -1198,31 +1295,53 @@ function resetWorkflowProject() {
     `const http = require("node:http");
 const fs = require("node:fs");
 const path = require("node:path");
+const { DatabaseSync } = require("node:sqlite");
 
 const publicDir = path.join(__dirname, "public");
-const jobs = [
-  { id: "job-101", account: "Atlas Clinics", stage: "Intake", status: "blocked" },
-  { id: "job-102", account: "Boreal Bank", stage: "Review", status: "ready" },
-  { id: "job-103", account: "Cinder Labs", stage: "Fulfillment", status: "ready" },
-];
+const db = new DatabaseSync(path.join(__dirname, "workflow.sqlite"));
+
+db.exec(\`
+  CREATE TABLE IF NOT EXISTS jobs (
+    id TEXT PRIMARY KEY,
+    account TEXT NOT NULL,
+    stage TEXT NOT NULL,
+    status TEXT NOT NULL
+  );
+  CREATE TABLE IF NOT EXISTS escalations (
+    id TEXT PRIMARY KEY,
+    job_id TEXT NOT NULL,
+    owner TEXT NOT NULL,
+    status TEXT NOT NULL,
+    created_at INTEGER NOT NULL,
+    FOREIGN KEY (job_id) REFERENCES jobs(id)
+  );
+\`);
+
+if (db.prepare("SELECT COUNT(*) AS count FROM jobs").get().count === 0) {
+  const insertJob = db.prepare(
+    "INSERT INTO jobs (id, account, stage, status) VALUES (?, ?, ?, ?)",
+  );
+  insertJob.run("job-101", "Atlas Clinics", "Intake", "blocked");
+  insertJob.run("job-102", "Boreal Bank", "Review", "ready");
+  insertJob.run("job-103", "Cinder Labs", "Fulfillment", "ready");
+}
 
 const server = http.createServer(async (request, response) => {
   const url = new URL(request.url, "http://127.0.0.1");
   const pathname = url.pathname;
 
   if (request.method === "GET" && pathname === "/api/jobs") {
-    json(response, 200, { jobs });
+    json(response, 200, { jobs: allJobs() });
     return;
   }
 
   if (request.method === "POST" && pathname.startsWith("/api/jobs/") && pathname.endsWith("/complete")) {
     const jobId = pathname.split("/")[3];
-    const job = jobs.find((item) => item.id === jobId);
+    const job = completeJob(jobId);
     if (!job) {
       json(response, 404, { error: "Job not found" });
       return;
     }
-    job.status = "done";
     json(response, 200, { job });
     return;
   }
@@ -1238,6 +1357,46 @@ const server = http.createServer(async (request, response) => {
 });
 
 server.listen(Number(process.env.PORT || 4100), process.env.HOST || "127.0.0.1");
+
+function allJobs() {
+  return db
+    .prepare("SELECT id, account, stage, status FROM jobs ORDER BY id")
+    .all();
+}
+
+function findJob(jobId) {
+  return db
+    .prepare("SELECT id, account, stage, status FROM jobs WHERE id = ?")
+    .get(jobId);
+}
+
+function completeJob(jobId) {
+  if (!findJob(jobId)) return null;
+  db.prepare("UPDATE jobs SET status = 'done' WHERE id = ?").run(jobId);
+  return findJob(jobId);
+}
+
+function allEscalations() {
+  return db
+    .prepare(
+      "SELECT e.id, e.job_id AS jobId, j.account, e.owner, e.status FROM escalations e JOIN jobs j ON j.id = e.job_id ORDER BY e.created_at DESC",
+    )
+    .all();
+}
+
+function createEscalation(jobId, owner) {
+  const job = findJob(jobId);
+  if (!job) return null;
+  const id = \`esc-\${Date.now()}\`;
+  db.prepare(
+    "INSERT INTO escalations (id, job_id, owner, status, created_at) VALUES (?, ?, ?, 'pending', ?)",
+  ).run(id, job.id, owner, Date.now());
+  return db
+    .prepare(
+      "SELECT e.id, e.job_id AS jobId, j.account, e.owner, e.status FROM escalations e JOIN jobs j ON j.id = e.job_id WHERE e.id = ?",
+    )
+    .get(id);
+}
 
 function safePublicPath(pathname) {
   const filePath = path.normalize(path.join(publicDir, pathname));

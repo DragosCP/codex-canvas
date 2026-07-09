@@ -1,16 +1,28 @@
 export function proposalWorkspaceDisplayPath(path: string) {
   const normalized = path.replace(/\\/g, "/");
-  const match = normalized.match(
+  const proposalMatch = normalized.match(
     /(?:^|\/)proposal-workspaces\/[^/]+\/[^/]+\/([ABC])(?:\/(.+))?$/i,
   );
-  if (!match) return null;
-  const optionId = match[1].toUpperCase();
-  const optionLabel = `Option ${optionId}`;
-  const innerPath = (match[2] ?? "").replace(/^\/+/, "");
-  if (!innerPath || innerPath.toLowerCase() === "index.html") {
-    return optionLabel;
+  if (proposalMatch) {
+    const optionId = proposalMatch[1].toUpperCase();
+    return workspaceInnerDisplayPath(
+      `Option ${optionId}`,
+      proposalMatch[2] ?? "",
+    );
   }
-  return `${optionLabel} / ${innerPath}`;
+  const draftMatch = normalized.match(
+    /(?:^|\/)draft-workspaces\/workspaces\/[^/]+\/[^/]+\/A(?:\/(.+))?$/i,
+  );
+  if (draftMatch) return workspaceInnerDisplayPath("Draft", draftMatch[1] ?? "");
+  return null;
+}
+
+function workspaceInnerDisplayPath(label: string, path: string) {
+  const innerPath = path.replace(/^\/+/, "");
+  if (!innerPath || innerPath.toLowerCase() === "index.html") {
+    return label;
+  }
+  return `${label} / ${innerPath}`;
 }
 
 export function projectRelativeDisplayPath(path: string, projectPath: string) {

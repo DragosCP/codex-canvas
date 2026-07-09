@@ -1,60 +1,113 @@
-<p align="center"><code>npm i -g @openai/codex</code><br />or <code>brew install --cask codex</code></p>
-<p align="center"><strong>Codex CLI</strong> is a coding agent from OpenAI that runs locally on your computer.
-<p align="center">
-  <img src="https://github.com/openai/codex/blob/main/.github/codex-cli-splash.png" alt="Codex CLI splash" width="80%" />
-</p>
-</br>
-If you want Codex in your code editor (VS Code, Cursor, Windsurf), <a href="https://developers.openai.com/codex/ide">install in your IDE.</a>
-</br>If you want the desktop app experience, run <code>codex app</code> or visit <a href="https://chatgpt.com/codex?app-landing-page=true">the Codex App page</a>.
-</br>If you are looking for the <em>cloud-based agent</em> from OpenAI, <strong>Codex Web</strong>, go to <a href="https://chatgpt.com/codex">chatgpt.com/codex</a>.</p>
+# Codex Local Desktop
 
----
+Codex Local Desktop is a local Electron app built on top of the Codex runtime. It is a workbench for opening a local project, chatting with Codex, reviewing file changes, managing approvals, and using a Live/Draft preview loop before source changes are promoted.
 
-## Quickstart
+This repository is a product fork/workspace around Codex. The upstream Codex CLI and Rust app-server remain the runtime foundation; the desktop app adds the local project shell, preview workflow, and Canvas-oriented product layer.
 
-### Installing and running Codex CLI
+## Current Status
 
-Install globally with your preferred package manager:
+- Desktop shell: implemented for local development.
+- Live App Preview: implemented for runnable local projects.
+- Draft workflow: implemented as the current preview-before-build path.
+- Canvas proposal lanes: removed from the active product model; current visual work uses `Live` and `Draft`.
+- Windows sidecar staging: implemented for development/release preparation.
+- Unsigned Windows installer packaging: implemented for local release artifacts.
 
-```shell
-# Install using npm
-npm install -g @openai/codex
+## What The App Does
+
+- Opens local project folders.
+- Keeps chats scoped to projects and threads.
+- Streams Codex progress, commands, approvals, and file changes.
+- Shows changed-file summaries and review entry points.
+- Starts or connects to a local app preview.
+- Lets the user mark Live/Draft preview areas as visual context.
+- Creates source-safe Draft workspaces for reviewable UI/workflow changes.
+- Applies a Draft to the real project only after an explicit build action.
+
+## Repository Layout
+
+- `apps/desktop/` - React/Electron desktop app.
+- `apps/desktop/electron/` - Electron host, preview helpers, sidecar launch, and desktop IPC.
+- `codex-rs/` - upstream Rust Codex runtime and app-server.
+- `docs/` - durable product, architecture, and UI/UX direction for this desktop product.
+- `plans/` - active and completed implementation plans.
+- `scripts/` - focused verification, dogfood, and sidecar staging scripts.
+
+## Prerequisites
+
+- Windows for the current desktop sidecar staging path.
+- Node.js 22 or newer.
+- pnpm 10.33 or newer.
+- Rust/Cargo for building the Codex sidecar.
+- `rg.exe` available on `PATH` when staging the Windows sidecar.
+
+## Run From Source
+
+Install dependencies:
+
+```powershell
+pnpm install
 ```
 
-```shell
-# Install using Homebrew
-brew install --cask codex
+Run the desktop app in development mode:
+
+```powershell
+npm --prefix apps/desktop run electron:dev
 ```
 
-Then simply run `codex` to get started.
+Build the desktop renderer:
 
-<details>
-<summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
+```powershell
+npm --prefix apps/desktop run build
+```
 
-Each GitHub Release contains many executables, but in practice, you likely want one of these:
+Stage the Windows native sidecar and build the desktop renderer:
 
-- macOS
-  - Apple Silicon/arm64: `codex-aarch64-apple-darwin.tar.gz`
-  - x86_64 (older Mac hardware): `codex-x86_64-apple-darwin.tar.gz`
-- Linux
-  - x86_64: `codex-x86_64-unknown-linux-musl.tar.gz`
-  - arm64: `codex-aarch64-unknown-linux-musl.tar.gz`
+```powershell
+npm --prefix apps/desktop run electron:build
+```
 
-Each archive contains a single entry with the platform baked into the name (e.g., `codex-x86_64-unknown-linux-musl`), so you likely want to rename it to `codex` after extracting it.
+Create an unpacked desktop app for local smoke testing:
 
-</details>
+```powershell
+npm --prefix apps/desktop run electron:pack
+```
 
-### Using Codex with your ChatGPT plan
+Create an unsigned Windows installer:
 
-Run `codex` and select **Sign in with ChatGPT**. We recommend signing into your ChatGPT account to use Codex as part of your Plus, Pro, Business, Edu, or Enterprise plan. [Learn more about what's included in your ChatGPT plan](https://help.openai.com/en/articles/11369540-codex-in-chatgpt).
+```powershell
+npm --prefix apps/desktop run electron:dist
+```
 
-You can also use Codex with an API key, but this requires [additional setup](https://developers.openai.com/codex/auth#sign-in-with-an-api-key).
+`electron:build` stages the native sidecar under `apps/desktop/electron/resources/codex-sidecar` and builds the renderer. `electron:dist` runs that full sidecar stage before creating the installer, so the first run can be slow while Rust release binaries are rebuilt.
 
-## Docs
+`electron:pack` reuses the already staged sidecar and creates an unpacked app for faster local smoke tests. After a successful `electron:build`, `electron:dist:staged` can rebuild the unsigned installer without rerunning the Rust sidecar stage. Packaging artifacts are written under `apps/desktop/release/`.
 
-- [**Codex Documentation**](https://developers.openai.com/codex)
-- [**Contributing**](./docs/contributing.md)
-- [**Installing & building**](./docs/install.md)
-- [**Open source fund**](./docs/open-source-fund.md)
+## Focused Verification
+
+Useful checks while working on the current Live/Draft desktop path:
+
+```powershell
+git diff --check
+npm --prefix apps/desktop run test:p34
+npm --prefix apps/desktop run test:p35
+npm --prefix apps/desktop run test:p36
+npm --prefix apps/desktop run build
+```
+
+Broader product-flow changes should also run the relevant P33/P33b/P33c/P33d checks and Electron dogfood scripts documented in the plans.
+
+## Release Readiness
+
+Before publishing a first downloadable desktop release:
+
+- replace development-only metadata and screenshots with public-facing material;
+- add a real product icon and signed release certificate;
+- verify the app from a clean clone;
+- confirm the native sidecar is included in the package;
+- decide on update strategy;
+- add a release workflow that builds reproducible artifacts.
+
+## License
 
 This repository is licensed under the [Apache-2.0 License](LICENSE).

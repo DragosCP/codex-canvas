@@ -1,18 +1,24 @@
 {
-  "name": "@openai/codex-desktop",
-  "version": "0.0.0-dev",
+  "name": "codex-local-desktop",
+  "version": "0.1.0",
+  "description": "Electron desktop app for local Codex project workflows.",
   "private": true,
+  "license": "Apache-2.0",
   "type": "module",
+  "main": "electron/main.cjs",
   "scripts": {
     "app-server:mock": "node ../../scripts/p03-dev-app-server.mjs",
     "app-server:real": "node ../../scripts/p03-real-app-server.mjs",
     "smoke:real-command": "node ../../scripts/p03-real-command-smoke.mjs",
-    "dev": "vite --host 127.0.0.1",
-    "build": "tsc -b && vite build",
-    "electron:build": "node ../../scripts/stage-desktop-sidecar.mjs && tsc -b && vite build",
+    "dev": "node ../../node_modules/vite/bin/vite.js --host 127.0.0.1",
+    "build": "node ../../node_modules/typescript/bin/tsc -b && node ../../node_modules/vite/bin/vite.js build",
+    "electron:build": "node ../../scripts/stage-desktop-sidecar.mjs && npm run build",
     "electron:dev": "node electron/run.mjs --dev",
+    "electron:dist": "npm run electron:build && node ../../node_modules/electron-builder/cli.js --win nsis --config electron-builder.json --publish never",
+    "electron:dist:staged": "npm run build && node ../../node_modules/electron-builder/cli.js --win nsis --config electron-builder.json --publish never",
+    "electron:pack": "npm run build && node ../../node_modules/electron-builder/cli.js --dir --config electron-builder.json --publish never",
     "electron:run": "node electron/run.mjs",
-    "preview": "vite preview --host 127.0.0.1",
+    "preview": "node ../../node_modules/vite/bin/vite.js preview --host 127.0.0.1",
     "proof": "node ../../scripts/p03-backend-proof-gate.mjs",
     "sidecar:stage": "node ../../scripts/stage-desktop-sidecar.mjs",
     "test:compaction-render": "node ../../scripts/p03-compaction-render-test.mjs",
@@ -24,18 +30,24 @@
     "test:p25b": "node ../../scripts/p25b-saved-mockup-history-guard-test.mjs && node ../../scripts/p25b-code-proposal-workspace-test.mjs",
     "test:p27": "node ../../scripts/p27-canvas-action-resolver-test.mjs",
     "test:p30": "node ../../scripts/p30-visual-patch-runtime-test.mjs",
-    "test:p33": "node ../../scripts/p33-draft-workspace-test.mjs && node ../../scripts/p33-draft-routing-test.mjs"
-  },
-  "dependencies": {
-    "lucide-react": "^0.468.0",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "test:p33": "node ../../scripts/p33-draft-workspace-test.mjs && node ../../scripts/p33-draft-routing-test.mjs",
+    "test:p33b": "node ../../scripts/p33b-draft-prompt-contract-test.mjs && node ../../scripts/p33b-draft-registry-race-test.mjs && node ../../scripts/p33b-warm-draft-preview-test.mjs && node ../../scripts/p33b-composer-immediate-clear-test.mjs",
+    "test:p33c": "node ../../scripts/p33c-feature-draft-validation-test.mjs",
+    "test:p33d": "node ../../scripts/p33d-canvas-workflow-ledger-test.mjs",
+    "test:p33d:electron": "node ../../scripts/p33d-electron-ledger-recovery-test.mjs",
+    "test:p34": "node ../../scripts/p34-draft-only-static-test.mjs && node ../../scripts/p27-canvas-action-resolver-test.mjs && node ../../scripts/p33-draft-routing-test.mjs",
+    "test:p35": "node ../../scripts/p35-single-mark-static-test.mjs",
+    "test:p36": "node ../../scripts/p36-app-tsx-decomposition-test.mjs"
   },
   "devDependencies": {
     "@types/react": "^18.3.12",
     "@types/react-dom": "^18.3.1",
     "@vitejs/plugin-react": "^4.3.3",
     "electron": "39.8.10",
+    "electron-builder": "^26.15.3",
+    "lucide-react": "^0.468.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
     "vite": "^5.4.11"
   }
 }

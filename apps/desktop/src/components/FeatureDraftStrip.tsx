@@ -1,12 +1,24 @@
-import { GitBranch, Pause, Play, Trash2 } from "lucide-react";
+import {
+  ExternalLink,
+  GitBranch,
+  Hammer,
+  Pause,
+  Play,
+  RefreshCw,
+  Trash2,
+} from "lucide-react";
 import type { FeatureDraft } from "../types";
 
 export function FeatureDraftStrip(props: {
   activeDraftId: string | null;
   drafts: FeatureDraft[];
+  onBuild: (draft: FeatureDraft) => void;
+  onContinue: (draft: FeatureDraft) => void;
   onDiscard: (draft: FeatureDraft) => void;
   onOpen: (draft: FeatureDraft) => void;
+  onOpenLive?: () => void;
   onPark: (draft: FeatureDraft) => void;
+  onRefresh: (draft: FeatureDraft) => void;
   onResume: (draft: FeatureDraft) => void;
 }) {
   const drafts = props.drafts.filter(
@@ -22,6 +34,9 @@ export function FeatureDraftStrip(props: {
     drafts[0];
   const active = selected.lifecycle === "active";
   const parked = selected.lifecycle === "parked";
+  const needsAttention = selected.status === "failed";
+  const canBuild =
+    active && selected.status === "ready" && selected.changedFiles.length > 0;
 
   return (
     <section className="mockup-option-strip" aria-label="Feature drafts">
@@ -49,6 +64,46 @@ export function FeatureDraftStrip(props: {
             </button>
           ))}
         </div>
+        {canBuild && (
+          <button
+            className="ghost-button primary"
+            onClick={() => props.onBuild(selected)}
+            title="Build this draft into Live"
+            type="button"
+          >
+            <Hammer size={15} /> Build this
+          </button>
+        )}
+        {active && (
+          <button
+            className="ghost-button"
+            onClick={() => props.onRefresh(selected)}
+            title="Refresh this draft preview"
+            type="button"
+          >
+            <RefreshCw size={15} /> Refresh
+          </button>
+        )}
+        {needsAttention && active && (
+          <button
+            className="ghost-button primary"
+            onClick={() => props.onContinue(selected)}
+            title="Continue this draft"
+            type="button"
+          >
+            <Play size={15} /> Continue
+          </button>
+        )}
+        {needsAttention && props.onOpenLive && (
+          <button
+            className="ghost-button"
+            onClick={props.onOpenLive}
+            title="Open Live"
+            type="button"
+          >
+            <ExternalLink size={15} /> Open Live
+          </button>
+        )}
         {active && (
           <button
             className="ghost-button"

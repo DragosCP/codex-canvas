@@ -43,12 +43,16 @@ export function threadTitle(thread: Thread): string {
   if (codeProposalTitle) return codeProposalTitle;
   const liveOverlayProposalTitle = friendlyLiveOverlayProposalTitle(title);
   if (liveOverlayProposalTitle) return liveOverlayProposalTitle;
+  const featureDraftTitle = friendlyFeatureDraftWorkspaceTitle(title);
+  if (featureDraftTitle) return featureDraftTitle;
   const mockupReviewTitle = friendlySavedMockupReviewTitle(title);
   if (mockupReviewTitle) return mockupReviewTitle;
   const visualDecisionTitle = friendlyVisualDecisionSelectionTitle(title);
   if (visualDecisionTitle) return visualDecisionTitle;
   const buildSelectedTitle = friendlyBuildSelectedMockupTitle(title);
   if (buildSelectedTitle) return buildSelectedTitle;
+  const codexContextTitle = friendlyCodexContextTitle(title);
+  if (codexContextTitle) return codexContextTitle;
   const mockupTitle = friendlyMockupPromptTitle(title);
   if (mockupTitle) return mockupTitle;
   return scrubInternalThreadTitle(
@@ -100,6 +104,18 @@ function friendlyLiveOverlayProposalTitle(text: string) {
   return request ? compactTitle(request) : "Review Live proposal";
 }
 
+function friendlyFeatureDraftWorkspaceTitle(text: string) {
+  const request = extractFeatureDraftWorkspaceRequest(text);
+  if (request == null) return null;
+  return request ? compactTitle(request) : "Draft";
+}
+
+function friendlyCodexContextTitle(text: string) {
+  const request = extractCodexContextUserRequest(text);
+  if (request == null) return null;
+  return request ? compactTitle(request) : "New chat";
+}
+
 function scrubInternalThreadTitle(title: string) {
   if (title.includes("[Codex Saved Mockup Review Context]")) {
     return `Review saved ${savedArtifactLabel(title, 2)}`;
@@ -113,14 +129,20 @@ function scrubInternalThreadTitle(title: string) {
   if (title.includes("[Codex Live Overlay Proposal Context]")) {
     return "Review Live proposal";
   }
+  if (title.includes("[Codex Feature Draft Context]")) {
+    return "Draft";
+  }
+  if (isCodexContextWrapper(title)) {
+    return "New chat";
+  }
   if (title.includes("[Codex Visual Decision Selection]")) {
-    return "Use selected option";
+    return "Use selected Draft action";
   }
   if (title.includes("[Codex Mockup Artifact Task]")) {
     return `Update saved ${savedArtifactLabel(title, 2)}`;
   }
   if (title.includes("[Codex Build Selected Mockup]")) {
-    return `Build selected ${savedArtifactLabel(title, 1)}`;
+    return `Build this ${savedArtifactLabel(title, 1)}`;
   }
   return title;
 }
@@ -132,11 +154,11 @@ function friendlyVisualDecisionSelectionTitle(text: string) {
   }
   const marker = "\n\nUser-visible composer text:\n";
   const markerIndex = visible.indexOf(marker);
-  if (markerIndex === -1) return "Use selected option";
+  if (markerIndex === -1) return "Use selected Draft action";
   const request = trimInternalContextTail(
     visible.slice(markerIndex + marker.length),
   ).trim();
-  return request ? compactTitle(request) : "Use selected option";
+  return request ? compactTitle(request) : "Use selected Draft action";
 }
 
 function friendlyBuildSelectedMockupTitle(text: string) {
@@ -150,7 +172,7 @@ function friendlyBuildSelectedMockupTitle(text: string) {
   const request = trimInternalContextTail(
     visible.slice(markerIndex + marker.length),
   ).trim();
-  return request ? compactTitle(request) : `Build selected ${savedArtifactLabel(visible, 1)}`;
+  return request ? compactTitle(request) : `Build this ${savedArtifactLabel(visible, 1)}`;
 }
 
 function unwrapPlanModeUserRequest(text: string) {
@@ -162,6 +184,16 @@ function unwrapPlanModeUserRequest(text: string) {
   return visible.slice(visible.indexOf(marker) + marker.length);
 }
 
+export function extractFeatureDraftWorkspaceRequest(text: string) {
+  return extractMarkedCodexContextRequest(text, "[Codex Feature Draft Context]");
+}
+
+export function extractCodexContextUserRequest(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!isCodexContextWrapper(visible)) return null;
+  return extractMarkedUserRequest(visible) ?? "";
+}
+
 function extractOriginalRequestForSentinel(text: string, sentinel: string) {
   const visible = unwrapPlanModeUserRequest(text).trimStart();
   if (!visible.startsWith(sentinel)) return null;
@@ -171,6 +203,34 @@ function extractOriginalRequestForSentinel(text: string, sentinel: string) {
   return trimInternalContextTail(
     visible.slice(markerIndex + marker.length),
   ).trim();
+}
+
+function extractMarkedCodexContextRequest(text: string, sentinel: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  if (!visible.startsWith(sentinel)) return null;
+  return extractMarkedUserRequest(visible) ?? "";
+}
+
+function extractMarkedUserRequest(text: string) {
+  for (const marker of [
+    "\n\nUser request:\n",
+    "\n\nOriginal user request:\n",
+    "User request:\n",
+    "Original user request:\n",
+  ]) {
+    const markerIndex = text.indexOf(marker);
+    if (markerIndex !== -1) {
+      return trimInternalContextTail(
+        text.slice(markerIndex + marker.length),
+      ).trim();
+    }
+  }
+  return null;
+}
+
+function isCodexContextWrapper(text: string) {
+  const visible = unwrapPlanModeUserRequest(text).trimStart();
+  return /^\[Codex [^\]]*Context\]/.test(visible);
 }
 
 function trimInternalContextTail(text: string) {
@@ -217,22 +277,14 @@ export function friendlyMockupPromptTitle(text: string): string | null {
         "lower",
       )} first`;
     }
-    const reviseMatch = visible.match(
-      /Revise saved (?:mockup|wireframe|preview) option\s+([A-C]|Option [A-C]|(?:mockup|wireframe|preview)-[a-c])/i,
-    );
-    if (reviseMatch) {
-      return `Revise ${previewArtifactActionName(artifactKind)} ${mockupOptionLabel(
-        reviseMatch[1],
-      )}`;
-    }
     return `Update saved ${previewArtifactDisplayName(artifactKind, 2, "lower")}`;
   }
   if (visible.startsWith("[Codex Build Selected Mockup]")) {
     const artifactLabel = savedArtifactLabel(visible, 1);
     const titleMatch = visible.match(/- Title:\s*(.+)/);
     return titleMatch?.[1]?.trim()
-      ? `Build selected ${artifactLabel}: ${titleMatch[1].trim()}`
-      : `Build selected ${artifactLabel}`;
+      ? `Build this ${artifactLabel}: ${titleMatch[1].trim()}`
+      : `Build this ${artifactLabel}`;
   }
   return null;
 }
@@ -243,11 +295,6 @@ function savedArtifactLabel(text: string, count: number) {
     count,
     "lower",
   );
-}
-
-function mockupOptionLabel(value: string) {
-  const match = value.match(/[A-C]/i);
-  return match ? match[0].toUpperCase() : value;
 }
 
 export function appendDelta(
@@ -469,6 +516,9 @@ function mergeThreadItems(
   const incomingHasRealUserMessage = incomingItems.some(
     (item) => item.type === "userMessage" && !isOptimisticUserMessage(item),
   );
+  const incomingHasContextCompaction = incomingItems.some(
+    (item) => item.type === "contextCompaction",
+  );
   return [
     ...incomingItems.map((item) =>
       mergeThreadItemWithLocalState(item, localById.get(item.id)),
@@ -476,6 +526,7 @@ function mergeThreadItems(
     ...localItems.filter(
       (item) =>
         !incomingIds.has(item.id) &&
+        !(incomingHasContextCompaction && item.type === "contextCompaction") &&
         !(incomingHasRealUserMessage && isOptimisticUserMessage(item)),
     ),
   ];

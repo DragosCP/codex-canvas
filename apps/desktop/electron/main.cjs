@@ -8,20 +8,25 @@ const path = require("node:path");
 const {
   addProposalWorkspaceOption,
   applyProposalWorkspace,
+  cleanupPreviewDependencyReuse,
   cleanupProposalRegistry,
   diffProposalWorkspace,
+  ensurePreviewDependencyReuse,
   prepareProposalWorkspaces,
 } = require("./proposal-workspaces.cjs");
 const {
   applyDraftWorkspace,
   diffDraftWorkspace,
+  listDraftWorkspaces,
   prepareDraftWorkspace,
   updateDraftBrief,
   updateDraftLifecycle,
 } = require("./draft-workspaces.cjs");
 
-const APP_SERVER_PORT = envPort("CODEX_DESKTOP_APP_SERVER_PORT", 48889);
-const BRIDGE_PORT = envPort("CODEX_DESKTOP_BRIDGE_PORT", 48890);
+const APP_SERVER_PORT_ENV = "CODEX_DESKTOP_APP_SERVER_PORT";
+const BRIDGE_PORT_ENV = "CODEX_DESKTOP_BRIDGE_PORT";
+let APP_SERVER_PORT = envPort(APP_SERVER_PORT_ENV, 48889);
+let BRIDGE_PORT = envPort(BRIDGE_PORT_ENV, 48890);
 const BACKEND_ENV = "P03_DESKTOP_BACKEND";
 const SIDECAR_DIR_ENV = "CODEX_DESKTOP_SIDECAR_DIR";
 const PREVIEW_PROBE_MAX_BYTES = 64 * 1024;
@@ -99,6 +104,10 @@ function envPort(name, fallback) {
   return fallback;
 }
 
+function hasConfiguredPort(name) {
+  return String(process.env[name] ?? "").trim().length > 0;
+}
+
 const repoRoot = path.resolve(__dirname, "..", "..", "..");
 const appDir = path.resolve(__dirname, "..");
 
@@ -106,6 +115,10 @@ let backendState = null;
 let mainWindow = null;
 const bridgeToken = crypto.randomBytes(32).toString("base64url");
 const managedPreviewProcesses = new Map();
+const managedPreviewStartGenerations = new Map();
+const managedPreviewStopGenerations = new Map();
+const managedPreviewStopUntil = new Map();
+const reservedPreviewPorts = new Set();
 const workspaceProgressSessions = new Map();
 
 const remoteDebuggingPort = process.env.CODEX_DESKTOP_REMOTE_DEBUGGING_PORT;
@@ -145,7 +158,9 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
     case "app_preview_start":
       return startManagedAppPreview(String(args.projectPath ?? ""));
     case "app_preview_stop":
-      return stopManagedAppPreview(String(args.projectPath ?? ""));
+      return stopManagedAppPreview(String(args.projectPath ?? ""), {
+        cancelPendingStart: args.cancelPendingStart !== false,
+      });
     case "app_preview_status":
       return managedAppPreviewStatus(String(args.projectPath ?? ""));
     case "project_empty_status":
@@ -222,6 +237,13 @@ ipcMain.handle("desktop:invoke", async (_event, command, args = {}) => {
         cacheRoot: draftWorkspacesRoot(),
         projectPath: nativeFilePath(String(args.projectPath ?? "")),
         draftId: String(args.draftId ?? ""),
+      });
+    case "draft_workspace_list":
+      return listDraftWorkspaces({
+        cacheRoot: draftWorkspacesRoot(),
+        projectPath: args.projectPath
+          ? nativeFilePath(String(args.projectPath))
+          : "",
       });
     case "draft_workspace_apply":
       return applyDraftWorkspace({
@@ -370,6 +392,13 @@ async function startNativeBackend() {
   let child = null;
   let bridgeServer = null;
 
+  if (!hasConfiguredPort(APP_SERVER_PORT_ENV)) {
+    APP_SERVER_PORT = await availablePort(APP_SERVER_PORT, APP_SERVER_PORT + 100);
+  }
+  if (!hasConfiguredPort(BRIDGE_PORT_ENV)) {
+    BRIDGE_PORT = await availablePort(BRIDGE_PORT, BRIDGE_PORT + 100, APP_SERVER_PORT);
+  }
+
   try {
     bridgeServer = await startOriginBridge(BRIDGE_PORT, APP_SERVER_PORT);
   } catch (error) {
@@ -509,6 +538,24 @@ function startOriginBridge(listenPort, targetPort) {
     server.listen(listenPort, "127.0.0.1", () => {
       server.off("error", reject);
       resolve(server);
+    });
+  });
+}
+
+async function availablePort(start, end, excludedPort = null) {
+  for (let port = start; port <= end; port += 1) {
+    if (port === excludedPort) continue;
+    if (await canBindLocalPort(port)) return port;
+  }
+  return start;
+}
+
+function canBindLocalPort(port) {
+  return new Promise((resolve) => {
+    const server = net.createServer();
+    server.once("error", () => resolve(false));
+    server.listen(port, "127.0.0.1", () => {
+      server.close(() => resolve(true));
     });
   });
 }
@@ -728,6 +775,11 @@ async function startManagedAppPreview(projectPath) {
   }
 
   const key = previewProcessKey(projectDir);
+  if ((managedPreviewStopUntil.get(key) ?? 0) > Date.now()) {
+    return unavailableManagedPreview("Preview start was cancelled.");
+  }
+  const startGeneration = (managedPreviewStartGenerations.get(key) ?? 0) + 1;
+  managedPreviewStartGenerations.set(key, startGeneration);
   const existing = managedPreviewProcesses.get(key);
   if (existing) {
     const status = await managedPreviewStatusForRecord(existing);
@@ -735,8 +787,17 @@ async function startManagedAppPreview(projectPath) {
     await stopManagedPreviewRecord(existing);
   }
 
+  const dependencyReuse = await ensurePreviewDependencyReuse(projectDir).catch((error) => ({
+    status: "skipped",
+    reason: errorMessage(error),
+  }));
+  if (previewStartWasCancelled(key, startGeneration)) {
+    await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
+    return unavailableManagedPreview("Preview start was cancelled.");
+  }
   const descriptor = previewStartDescriptor(projectDir);
   if (!descriptor) {
+    await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
     return {
       ...unavailableManagedPreview("No runnable app was found. Build a baseline app first."),
       needsBaseline: true,
@@ -747,71 +808,98 @@ async function startManagedAppPreview(projectPath) {
   if (!port) {
     return unavailableManagedPreview("No available local preview port was found.");
   }
+  reservedPreviewPorts.add(String(port));
+  try {
+    if (previewStartWasCancelled(key, startGeneration)) {
+      await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
+      return unavailableManagedPreview("Preview start was cancelled.");
+    }
 
-  const url = `http://127.0.0.1:${port}/`;
-  let record;
-  if (descriptor.kind === "static") {
-    const server = await startStaticPreviewServer(projectDir, port);
+    const url = `http://127.0.0.1:${port}/`;
+    let record;
+    if (descriptor.kind === "static") {
+      const server = await startStaticPreviewServer(projectDir, port);
+      if (previewStartWasCancelled(key, startGeneration)) {
+        await new Promise((resolve) => server.close(resolve));
+        await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
+        return unavailableManagedPreview("Preview start was cancelled.");
+      }
+      record = {
+        kind: "static",
+        projectDir,
+        url,
+        title: path.basename(projectDir),
+        commandLabel: "static file preview",
+        server,
+        exited: false,
+        logs: "",
+        dependencyReuse,
+      };
+      managedPreviewProcesses.set(key, record);
+      const result = await probeAppPreviewUrl(url);
+      return {
+        status: result.status === "available" ? "running" : "unavailable",
+        url,
+        finalUrl: result.finalUrl || url,
+        title: result.title || record.title,
+        reason: result.reason,
+        command: record.commandLabel,
+        managed: true,
+      };
+    }
+
+    const commandSpec = descriptor.commandForPort(port);
+    if (previewStartWasCancelled(key, startGeneration)) {
+      await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
+      return unavailableManagedPreview("Preview start was cancelled.");
+    }
     record = {
-      kind: "static",
+      kind: "process",
       projectDir,
       url,
       title: path.basename(projectDir),
-      commandLabel: "static file preview",
-      server,
+      commandLabel: commandSpec.label,
+      child: spawn(commandSpec.command, commandSpec.args, {
+        cwd: projectDir,
+        detached: false,
+        shell: commandSpec.shell ?? process.platform === "win32",
+        stdio: ["ignore", "pipe", "pipe"],
+        windowsHide: true,
+        env: {
+          ...process.env,
+          ...commandSpec.env,
+          BROWSER: "none",
+          NO_COLOR: "1",
+        },
+      }),
       exited: false,
       logs: "",
+      dependencyReuse,
     };
     managedPreviewProcesses.set(key, record);
-    const result = await probeAppPreviewUrl(url);
-    return {
-      status: result.status === "available" ? "running" : "unavailable",
-      url,
-      finalUrl: result.finalUrl || url,
-      title: result.title || record.title,
-      reason: result.reason,
-      command: record.commandLabel,
-      managed: true,
-    };
+    attachPreviewProcessLogging(key, record);
+
+    const result = await waitForManagedPreview(record, 18000);
+    if (result.status === "running") return result;
+    await stopManagedPreviewRecord(record);
+    return result;
+  } finally {
+    reservedPreviewPorts.delete(String(port));
   }
-
-  const commandSpec = descriptor.commandForPort(port);
-  record = {
-    kind: "process",
-    projectDir,
-    url,
-    title: path.basename(projectDir),
-    commandLabel: commandSpec.label,
-    child: spawn(commandSpec.command, commandSpec.args, {
-      cwd: projectDir,
-      detached: false,
-      shell: commandSpec.shell ?? process.platform === "win32",
-      stdio: ["ignore", "pipe", "pipe"],
-      windowsHide: true,
-      env: {
-        ...process.env,
-        ...commandSpec.env,
-        BROWSER: "none",
-        NO_COLOR: "1",
-      },
-    }),
-    exited: false,
-    logs: "",
-  };
-  managedPreviewProcesses.set(key, record);
-  attachPreviewProcessLogging(key, record);
-
-  const result = await waitForManagedPreview(record, 18000);
-  if (result.status === "running") return result;
-  await stopManagedPreviewRecord(record);
-  return result;
 }
 
-async function stopManagedAppPreview(projectPath) {
+async function stopManagedAppPreview(projectPath, options = {}) {
   const projectDir = nativeFilePath(projectPath);
   const key = previewProcessKey(projectDir);
+  managedPreviewStopGenerations.set(
+    key,
+    managedPreviewStartGenerations.get(key) ?? 0,
+  );
   const record = managedPreviewProcesses.get(key);
   if (!record) {
+    if (options.cancelPendingStart) {
+      managedPreviewStopUntil.set(key, Date.now() + 30_000);
+    }
     return {
       status: "stopped",
       url: "",
@@ -822,6 +910,7 @@ async function stopManagedAppPreview(projectPath) {
     };
   }
   await stopManagedPreviewRecord(record);
+  await cleanupPreviewDependencyReuse(projectDir).catch(() => null);
   return {
     status: "stopped",
     url: "",
@@ -832,9 +921,14 @@ async function stopManagedAppPreview(projectPath) {
   };
 }
 
+function previewStartWasCancelled(key, startGeneration) {
+  return (managedPreviewStopGenerations.get(key) ?? -1) >= startGeneration;
+}
+
 async function managedAppPreviewStatus(projectPath) {
   const projectDir = nativeFilePath(projectPath);
-  const record = managedPreviewProcesses.get(previewProcessKey(projectDir));
+  const key = previewProcessKey(projectDir);
+  const record = managedPreviewProcesses.get(key);
   if (!record) {
     return {
       status: "stopped",
@@ -845,11 +939,32 @@ async function managedAppPreviewStatus(projectPath) {
       managed: false,
     };
   }
-  return managedPreviewStatusForRecord(record);
+  const status = await managedPreviewStatusForRecord(record);
+  if (status.status === "stopped" && record.exited) {
+    managedPreviewProcesses.delete(key);
+    await cleanupPreviewDependencyReuse(record.projectDir).catch(() => null);
+  }
+  return status;
 }
 
 async function managedPreviewStatusForRecord(record) {
   if (record.exited) {
+    const result = await probeAppPreviewUrl(record.url);
+    if (result.status === "available") {
+      record.exited = false;
+      record.child = null;
+      record.exitCode = undefined;
+      record.exitSignal = undefined;
+      return {
+        status: "running",
+        url: record.url,
+        finalUrl: result.finalUrl || record.url,
+        title: result.title || record.title,
+        reason: result.reason,
+        command: record.commandLabel,
+        managed: true,
+      };
+    }
     return {
       status: "stopped",
       url: record.url,
@@ -1008,10 +1123,12 @@ function commandName(name) {
 
 async function findAvailablePreviewPort() {
   for (const port of PREVIEW_START_PORTS) {
+    if (reservedPreviewPorts.has(String(port))) continue;
     if (isCodexRuntimePort(String(port))) continue;
     if (await isPortAvailable(port)) return port;
   }
   for (let port = 4100; port < 4300; port += 1) {
+    if (reservedPreviewPorts.has(String(port))) continue;
     if (isCodexRuntimePort(String(port))) continue;
     if (await isPortAvailable(port)) return port;
   }
@@ -1087,9 +1204,6 @@ function attachPreviewProcessLogging(key, record) {
     record.exited = true;
     record.exitCode = code;
     record.exitSignal = signal;
-    if (managedPreviewProcesses.get(key) === record) {
-      managedPreviewProcesses.delete(key);
-    }
   });
 }
 
@@ -1099,7 +1213,9 @@ function previewFailureReason(record) {
     : record.exitSignal
       ? "Preview command stopped before it became available."
       : "Preview command stopped before it became available.";
-  return exit;
+  const logs = String(record.logs || "").trim();
+  if (!logs) return exit;
+  return `${exit} ${logs.slice(-600)}`;
 }
 
 async function stopManagedPreviewRecord(record) {
@@ -1114,22 +1230,62 @@ async function stopManagedPreviewRecord(record) {
       record.server.closeAllConnections?.();
     });
     record.exited = true;
+    await cleanupPreviewDependencyReuse(record.projectDir).catch(() => null);
     return;
   }
-  if (!record.child || record.child.killed || record.exited) return;
-  if (process.platform === "win32" && record.child.pid) {
-    await new Promise((resolve) => {
-      const killer = spawn("taskkill", ["/pid", String(record.child.pid), "/t", "/f"], {
-        windowsHide: true,
-        stdio: "ignore",
+  try {
+    if (!record.child || record.child.killed || record.exited) return;
+    if (process.platform === "win32" && record.child.pid) {
+      await new Promise((resolve) => {
+        const killer = spawn("taskkill", ["/pid", String(record.child.pid), "/t", "/f"], {
+          windowsHide: true,
+          stdio: "ignore",
+        });
+        killer.once("exit", resolve);
+        killer.once("error", resolve);
       });
-      killer.once("exit", resolve);
-      killer.once("error", resolve);
-    });
-  } else {
-    record.child.kill();
+    } else {
+      record.child.kill();
+    }
+    await waitForPreviewChildExit(record.child, 3000);
+    await waitForPreviewPortAvailable(record, 3000);
+  } finally {
+    await cleanupPreviewDependencyReuse(record.projectDir).catch(() => null);
   }
   record.exited = true;
+}
+
+function waitForPreviewChildExit(child, timeoutMs) {
+  if (!child || child.exitCode !== null || child.signalCode) {
+    return Promise.resolve(true);
+  }
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      child.off("exit", onExit);
+      resolve(false);
+    }, timeoutMs);
+    function onExit() {
+      clearTimeout(timer);
+      resolve(true);
+    }
+    child.once("exit", onExit);
+  });
+}
+
+async function waitForPreviewPortAvailable(record, timeoutMs) {
+  let port = 0;
+  try {
+    port = Number(new URL(record.url).port);
+  } catch {
+    return false;
+  }
+  if (!Number.isFinite(port) || port <= 0) return false;
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (await isPortAvailable(port)) return true;
+    await sleep(100);
+  }
+  return false;
 }
 
 function stopAllManagedPreviews() {

@@ -6,11 +6,13 @@ import {
   Monitor,
   MoreHorizontal,
   MousePointer2,
+  Pause,
   Play,
   RefreshCw,
   Search,
   Smartphone,
   Square,
+  Trash2,
   X,
 } from "lucide-react";
 import {
@@ -29,10 +31,6 @@ import {
   buildCanvasTargetMetadataScript,
   type CanvasTargetMetadataResult,
 } from "../canvasTargeting";
-import {
-  mergeProposalHighlightsWithVisualPatchTargets,
-  proposalHighlightsForVisualPatchTargets,
-} from "../canvasVisualReferences";
 import {
   evaluateLiveDomPatchStaleness,
   freshCanvasProposalStaleness,
@@ -88,6 +86,21 @@ type ElectronWebviewElement = HTMLElement & {
   getURL: () => string;
   reload: () => void;
   reloadIgnoringCache?: () => void;
+  sendInputEvent?: (event: PreviewWebviewInputEvent) => Promise<void> | void;
+};
+
+type PreviewWebviewInputEvent = {
+  type: "char" | "keyDown" | "keyUp";
+  keyCode: string;
+  modifiers?: string[];
+};
+
+type PreviewCredentialSnapshot = {
+  localStorage: Record<string, string>;
+  sessionStorage: Record<string, string>;
+  clearLocalStorageKeys: string[];
+  clearSessionStorageKeys: string[];
+  updatedAt: number;
 };
 
 type PreviewProbeResult = {
@@ -109,6 +122,9 @@ type ManagedPreviewResult = {
   managed?: boolean;
   needsBaseline?: boolean;
 };
+
+const PREVIEW_CREDENTIAL_EVENT = "codex-preview-credentials-updated";
+const previewCredentialSnapshots = new Map<string, PreviewCredentialSnapshot>();
 
 type PreviewAvailability = "idle" | "probing" | "available" | "unavailable";
 type ManagedPreviewState = "stopped" | "starting" | "running" | "failed";
@@ -136,8 +152,8 @@ export type LiveAppPreviewMarkMeta = CanvasVisualReferenceMeta & {
   viewport: "desktop" | "mobile";
   thumbnailDataUrl?: string;
   label?: string;
-  source?: "userMark" | "proposalHighlight";
-  highlightId?: string;
+  surface?: "live" | "draft";
+  draftId?: string;
 };
 
 export function LiveAppPreview(props: {
@@ -145,6 +161,9 @@ export function LiveAppPreview(props: {
   proposal?: PlanProposal | null;
   areaMark?: PlanPreviewAreaMark | null;
   appPreviewContexts?: ComposerAppPreviewContext[];
+  appStateTabOptions?: PreviewToolbarSelectOption[];
+  appStateLaneTitle?: string;
+  appStateLaneStatus?: string;
   compareTabOptions?: PreviewToolbarSelectOption[];
   statusLabel?: string;
   viewport?: "desktop" | "mobile";
@@ -157,21 +176,33 @@ export function LiveAppPreview(props: {
   onVariantChange?: (variantId: string) => void;
   onBuildBaselineRequest?: (project: Project) => void;
   onLaneTransfer?: (from: string, to: string) => void;
+  autoStartNonce?: number;
+  preferredRoute?: string;
+  sessionPartitionKey?: string;
   proposalLaneTitle?: string;
   proposalLaneStatus?: string;
-  proposalControls?: {
+  previewControls?: {
     autoStart?: boolean;
     buildDisabled?: boolean;
     buildLabel: string;
     buildTitle?: string;
     onBuild: () => void;
+    refreshLabel?: string;
+    refreshTitle?: string;
+    onRefresh?: () => void;
     secondaryDanger?: boolean;
     secondaryLabel?: string;
     secondaryTitle?: string;
     onSecondary?: () => void;
+    dangerLabel?: string;
+    dangerTitle?: string;
+    onDanger?: () => void;
   };
 }) {
   const storageKey = `codex.preview.url.${props.project.id}`;
+  const sessionPartitionKey = cleanPreviewPartitionKey(
+    props.sessionPartitionKey || props.project.id,
+  );
   const [draftUrl, setDraftUrl] = useState(
     () => window.localStorage.getItem(storageKey) ?? "",
   );
@@ -202,10 +233,6 @@ export function LiveAppPreview(props: {
   >({});
   const highlightAdjustmentsRef = useRef<Record<string, PlanPreviewAreaMark>>({});
   const [proposalVisible, setProposalVisible] = useState(true);
-  const [showProposalHighlights, setShowProposalHighlights] = useState(false);
-  const [visualPatchHighlights, setVisualPatchHighlights] = useState<
-    ProposalHighlight[]
-  >([]);
   const [proposalSelectionStatus, setProposalSelectionStatus] =
     useState<ProposalSelectionStatus>("idle");
   const [proposalStaleness, setProposalStaleness] =
@@ -227,36 +254,23 @@ export function LiveAppPreview(props: {
   const previewSnapshotRequestRef = useRef(0);
   const mountedRef = useRef(true);
   const supportsElectronPreview = hasDesktopBridge();
-  const proposalControls = props.proposalControls ?? null;
-  const proposalToolbar = Boolean(proposalControls);
+  const previewControls = props.previewControls ?? null;
+  const appStateTabOptions = props.appStateTabOptions ?? null;
+  const appStateMode = Boolean(appStateTabOptions?.length);
+  const proposalToolbar = Boolean(previewControls);
   const spec = props.proposal?.previewSpec ?? null;
   const selectedVariant = selectedPlanPreviewVariant(
     spec,
     props.proposal?.previewSelectedVariantId,
   );
   const variants = spec?.variants.slice(0, 3) ?? [];
-  const authoredHighlights = selectedVariant?.highlights ?? [];
-  const selectedHighlights = useMemo(
-    () =>
-      mergeProposalHighlightsWithVisualPatchTargets(
-        authoredHighlights,
-        visualPatchHighlights,
-      ),
-    [authoredHighlights, visualPatchHighlights],
-  );
+  const p35AgentHighlights = useMemo<ProposalHighlight[]>(() => [], []);
   const singleMark = props.areaMark ?? props.proposal?.previewAreaMark ?? null;
   const viewport = props.viewport ?? uncontrolledViewport;
-  const adjustedHighlightContexts =
-    props.appPreviewContexts?.filter(
-      (context) =>
-        context.source === "proposalHighlight" &&
-        context.projectId === props.project.id &&
-        context.viewport === viewport,
-    ) ?? [];
+  const adjustedHighlightContexts: ComposerAppPreviewContext[] = [];
   const renderedMarks =
     props.appPreviewContexts && props.appPreviewContexts.length > 0
       ? props.appPreviewContexts
-          .filter((context) => context.source !== "proposalHighlight")
           .map((context) => ({
             id: context.id,
             label: context.markLabel || "Mark 1",
@@ -278,6 +292,25 @@ export function LiveAppPreview(props: {
   const captureWebview = useCallback((node: HTMLElement | null) => {
     setWebview(node as ElectronWebviewElement | null);
   }, []);
+  const focusPreviewWebview = useCallback(() => {
+    const target = webview;
+    if (!target) return;
+    try {
+      target.focus();
+    } catch {
+      // Electron can detach a webview while React swaps preview lanes.
+    }
+    window.requestAnimationFrame(() => {
+      try {
+        target.focus();
+      } catch {
+        // Electron can detach a webview while React swaps preview lanes.
+      }
+      void target
+        .executeJavaScript?.("window.focus();", false)
+        .catch(() => {});
+    });
+  }, [webview]);
   const moreMenuRef = useRef<HTMLDivElement | null>(null);
 
   useEffect(() => {
@@ -321,9 +354,7 @@ export function LiveAppPreview(props: {
   useEffect(() => {
     probeRequestRef.current += 1;
     proposalSelectionGenerationRef.current += 1;
-    const storedUrl = props.proposalControls?.autoStart
-      ? ""
-      : window.localStorage.getItem(storageKey) ?? "";
+    const storedUrl = window.localStorage.getItem(storageKey) ?? "";
     setDraftUrl(storedUrl);
     setCurrentRoute("");
     setInteractionState("No temporary interaction recorded.");
@@ -347,14 +378,14 @@ export function LiveAppPreview(props: {
       void restoreRememberedPreview(storedUrl);
       return;
     }
-    if (!props.proposalControls?.autoStart) {
+    if (!props.previewControls?.autoStart) {
       clearRenderedPreview();
     }
     setPreviewUrl("");
     setFrameStatus("idle");
     setAvailability("unavailable");
     setAvailabilityMessage("No preview running.");
-    if (props.proposalControls?.autoStart && supportsElectronPreview) {
+    if (props.previewControls?.autoStart && supportsElectronPreview) {
       void runPreview();
       return;
     }
@@ -393,45 +424,30 @@ export function LiveAppPreview(props: {
 
   useEffect(() => {
     setProposalVisible(true);
-    setShowProposalHighlights(false);
     setHighlightDrag(null);
     highlightAdjustmentsRef.current = {};
     setHighlightAdjustments({});
-    setVisualPatchHighlights([]);
     setProposalStaleness(freshCanvasProposalStaleness);
   }, [props.proposal?.turnId, spec?.updatedAt]);
 
   useEffect(() => {
-    setVisualPatchHighlights([]);
     setProposalStaleness(freshCanvasProposalStaleness);
   }, [selectedVariant?.id]);
-
-  useEffect(() => {
-    if (selectedHighlights.length === 0) setShowProposalHighlights(false);
-  }, [selectedHighlights.length]);
 
   useEffect(() => {
     if (
       !webview ||
       frameStatus !== "loaded" ||
-      !showProposalHighlights ||
-      selectedHighlights.length === 0
+      p35AgentHighlights.length === 0
     ) {
       return;
     }
     let cancelled = false;
     const variantId = selectedVariant?.id ?? "preview";
     void Promise.all(
-      selectedHighlights.map(async (highlight) => {
+      p35AgentHighlights.map(async (highlight) => {
         const key = highlightKey(variantId, highlight.id, viewport);
         if (highlightAdjustmentsRef.current[key]) return null;
-        if (
-          adjustedHighlightContexts.some(
-            (context) => context.highlightId === highlight.id,
-          )
-        ) {
-          return null;
-        }
         const area = await detectHighlightAreaInWebview(webview, highlight.label);
         if (!area) return null;
         return { key, area: { ...area, note: highlight.note, createdAt: Date.now() } };
@@ -455,9 +471,8 @@ export function LiveAppPreview(props: {
   }, [
     adjustedHighlightContexts,
     frameStatus,
-    selectedHighlights,
+    p35AgentHighlights,
     selectedVariant?.id,
-    showProposalHighlights,
     viewport,
     webview,
   ]);
@@ -472,6 +487,10 @@ export function LiveAppPreview(props: {
       setFrameStatus("loaded");
       setAvailability("available");
       rememberRenderedPreview(webview);
+      void importSharedPreviewCredentials(webview, sessionPartitionKey).then(() => {
+        void refreshRoute(webview);
+      });
+      void captureSharedPreviewCredentials(webview, sessionPartitionKey);
       void refreshRoute(webview);
     };
     const handleFailLoad = () => {
@@ -482,6 +501,7 @@ export function LiveAppPreview(props: {
     };
     const handleNavigate = () => {
       void refreshRoute(webview);
+      void captureSharedPreviewCredentials(webview, sessionPartitionKey);
     };
     webview.addEventListener("did-finish-load", handleFinishLoad);
     webview.addEventListener("did-fail-load", handleFailLoad);
@@ -493,7 +513,22 @@ export function LiveAppPreview(props: {
       webview.removeEventListener("did-navigate", handleNavigate);
       webview.removeEventListener("did-navigate-in-page", handleNavigate);
     };
-  }, [rememberRenderedPreview, webview]);
+  }, [rememberRenderedPreview, sessionPartitionKey, webview]);
+
+  useEffect(() => {
+    if (!webview) return;
+    const handleCredentialUpdate = (event: Event) => {
+      const key = (event as CustomEvent<{ key?: string }>).detail?.key;
+      if (key !== sessionPartitionKey) return;
+      void importSharedPreviewCredentials(webview, sessionPartitionKey).then(() => {
+        void refreshRoute(webview);
+      });
+    };
+    window.addEventListener(PREVIEW_CREDENTIAL_EVENT, handleCredentialUpdate);
+    return () => {
+      window.removeEventListener(PREVIEW_CREDENTIAL_EVENT, handleCredentialUpdate);
+    };
+  }, [sessionPartitionKey, webview]);
 
   useEffect(() => {
     if (!webview || frameStatus !== "loaded") return;
@@ -641,7 +676,12 @@ export function LiveAppPreview(props: {
     setManagedCommand(result?.command ?? "");
     if (result?.status === "running") {
       setManagedState("running");
-      activatePreview(result.finalUrl || result.url);
+      activatePreview(
+        applyPreferredPreviewRoute(
+          result.finalUrl || result.url,
+          props.preferredRoute,
+        ),
+      );
       return;
     }
     setManagedState("failed");
@@ -653,6 +693,13 @@ export function LiveAppPreview(props: {
     clearRenderedPreview();
     setProposalSelectionStatus("unavailable");
   }
+
+  useEffect(() => {
+    if (!props.autoStartNonce || !supportsElectronPreview) return;
+    void runPreview();
+    // runPreview intentionally owns transient preview state and is not memoized.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [props.autoStartNonce, supportsElectronPreview]);
 
   async function stopPreview() {
     probeRequestRef.current += 1;
@@ -680,7 +727,12 @@ export function LiveAppPreview(props: {
     if (result?.status === "running") {
       setManagedState("running");
       setManagedCommand(result.command ?? "");
-      activatePreview(result.finalUrl || result.url);
+      activatePreview(
+        applyPreferredPreviewRoute(
+          result.finalUrl || result.url,
+          props.preferredRoute,
+        ),
+      );
     }
   }
 
@@ -703,7 +755,12 @@ export function LiveAppPreview(props: {
       })?.catch(() => null);
       if (status?.status === "running" && status.url) {
         setManagedCommand(status.command ?? "");
-        activatePreview(status.finalUrl || status.url);
+        activatePreview(
+          applyPreferredPreviewRoute(
+            status.finalUrl || status.url,
+            props.preferredRoute,
+          ),
+        );
         return;
       }
     }
@@ -724,7 +781,11 @@ export function LiveAppPreview(props: {
       return;
     }
 
-    void openPreview(normalized);
+    const opened = await openPreview(normalized);
+    if (!opened && props.previewControls?.autoStart) {
+      window.localStorage.removeItem(storageKey);
+      void runPreview();
+    }
   }
 
   async function openPreview(url = draftUrl) {
@@ -743,14 +804,14 @@ export function LiveAppPreview(props: {
       setAvailabilityMessage("Choose or enter a local preview URL.");
       setManagedState("stopped");
       await cleanupSelectedProposal("reset");
-      return;
+      return false;
     }
     if (!supportsElectronPreview) {
       setAvailability("unavailable");
       setAvailabilityMessage(
         "Run Codex Local in Electron to use live app preview.",
       );
-      return;
+      return false;
     }
     const requestId = probeRequestRef.current + 1;
     probeRequestRef.current = requestId;
@@ -767,7 +828,7 @@ export function LiveAppPreview(props: {
       window.localStorage.setItem(storageKey, result.finalUrl || normalized);
       activatePreview(result.finalUrl || normalized);
       setShowUrlEntry(false);
-      return;
+      return true;
     }
     setManagedState("failed");
     setAvailability("unavailable");
@@ -776,6 +837,7 @@ export function LiveAppPreview(props: {
     setFrameStatus("idle");
     clearRenderedPreview();
     setProposalSelectionStatus("unavailable");
+    return false;
   }
 
   function activatePreview(url: string) {
@@ -945,7 +1007,7 @@ export function LiveAppPreview(props: {
     const moved = !sameAreaMark(adjusted, highlightDrag.startMark);
     const label = highlightDrag.label;
     const highlightId = highlightDrag.highlightId;
-    const highlight = selectedHighlights.find(
+    const highlight = p35AgentHighlights.find(
       (candidate) => candidate.id === highlightId,
     );
     setHighlightDrag(null);
@@ -960,12 +1022,7 @@ export function LiveAppPreview(props: {
       route: routeForContext,
       viewport,
       label,
-      source: "proposalHighlight",
-      highlightId,
       threadId: highlight?.threadId ?? props.proposal?.threadId ?? null,
-      proposalTurnId: highlight?.proposalTurnId ?? props.proposal?.turnId,
-      proposalOptionId: highlight?.proposalOptionId ?? selectedVariant?.id,
-      canvasLane: highlight?.canvasLane ?? selectedVariant?.id,
       canvasId: highlight?.canvasId,
       sourceFile: highlight?.sourceFile,
       componentName: highlight?.componentName,
@@ -980,13 +1037,8 @@ export function LiveAppPreview(props: {
         route: routeForContext,
         viewport,
         label,
-        source: "proposalHighlight",
-        highlightId,
         thumbnailDataUrl,
         threadId: highlight?.threadId ?? props.proposal?.threadId ?? null,
-        proposalTurnId: highlight?.proposalTurnId ?? props.proposal?.turnId,
-        proposalOptionId: highlight?.proposalOptionId ?? selectedVariant?.id,
-        canvasLane: highlight?.canvasLane ?? selectedVariant?.id,
         canvasId: highlight?.canvasId,
         sourceFile: highlight?.sourceFile,
         componentName: highlight?.componentName,
@@ -1043,10 +1095,6 @@ export function LiveAppPreview(props: {
   }
 
   function adjustedHighlightArea(highlight: ProposalHighlight) {
-    const adjustedContext = adjustedHighlightContexts.find(
-      (context) => context.highlightId === highlight.id,
-    );
-    if (adjustedContext) return adjustedContext.areaMark;
     return (
       highlightAdjustments[
         highlightKey(selectedVariant?.id ?? "preview", highlight.id, viewport)
@@ -1109,7 +1157,6 @@ export function LiveAppPreview(props: {
     const generation = proposalSelectionGenerationRef.current + 1;
     proposalSelectionGenerationRef.current = generation;
     setProposalSelectionStatus("cleaning");
-    setVisualPatchHighlights([]);
     setProposalStaleness(freshCanvasProposalStaleness);
     try {
       await target.executeJavaScript(cleanupScript(), false);
@@ -1170,7 +1217,6 @@ export function LiveAppPreview(props: {
       });
       if (staleness.stale) {
         setProposalStaleness(staleness);
-        setVisualPatchHighlights([]);
         setProposalSelectionStatus("failed");
         setInteractionState(staleness.message);
         return;
@@ -1210,8 +1256,8 @@ export function LiveAppPreview(props: {
             result.route || currentRoute || previewUrl,
             targetMetadata,
           );
+          void patchHighlights;
           if (generation !== proposalSelectionGenerationRef.current) return;
-          setVisualPatchHighlights(patchHighlights);
         } catch {
           if (generation !== proposalSelectionGenerationRef.current) return;
           reloadPreviewAfterFailedHotSwap(target);
@@ -1220,12 +1266,10 @@ export function LiveAppPreview(props: {
         setInteractionState("Proposal runtime was unavailable.");
           return;
         }
-      } else {
-        setVisualPatchHighlights([]);
       }
       setCurrentRoute(result.route || currentRoute || previewUrl);
       setProposalSelectionStatus(result.ok ? "selected" : "failed");
-      setInteractionState("Proposal selected. Use Show changes to inspect agent marks.");
+      setInteractionState("Draft preview selected.");
     } catch {
       if (generation !== proposalSelectionGenerationRef.current) return;
       setProposalSelectionStatus("failed");
@@ -1243,19 +1287,7 @@ export function LiveAppPreview(props: {
     const metadata =
       targetMetadata ?? (await collectCanvasTargetMetadata(target, variant));
     if (!metadata.ok) return [];
-    return proposalHighlightsForVisualPatchTargets({
-      bundle,
-      targetMetadata: metadata,
-      variantId: variant.id,
-      route,
-      createdAt: Date.now(),
-      referenceMeta: {
-        threadId: props.proposal?.threadId ?? null,
-        proposalTurnId: props.proposal?.turnId,
-        proposalOptionId: variant.id,
-        canvasLane: variant.id,
-      },
-    });
+    return [];
   }
 
   async function collectCanvasTargetMetadata(
@@ -1312,6 +1344,41 @@ export function LiveAppPreview(props: {
     (chromeState === "running" ? "Live app" : "Preview controls");
 
   useEffect(() => {
+    if (!webview || !canShowWebview || marking) return;
+    const shouldRelayInputToPreview = () =>
+      document.activeElement === webview &&
+      typeof webview.sendInputEvent === "function";
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (
+        event.defaultPrevented ||
+        event.isComposing ||
+        !shouldRelayInputToPreview()
+      ) {
+        return;
+      }
+      const inputEvents = previewKeyboardInputEvents(event);
+      if (inputEvents.length === 0) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void sendPreviewInputEvents(webview, inputEvents);
+    };
+    const handlePaste = (event: ClipboardEvent) => {
+      if (event.defaultPrevented || !shouldRelayInputToPreview()) return;
+      const text = event.clipboardData?.getData("text/plain") ?? "";
+      if (!text) return;
+      event.preventDefault();
+      event.stopPropagation();
+      void insertPreviewText(webview, text);
+    };
+    window.addEventListener("keydown", handleKeyDown, true);
+    window.addEventListener("paste", handlePaste, true);
+    return () => {
+      window.removeEventListener("keydown", handleKeyDown, true);
+      window.removeEventListener("paste", handlePaste, true);
+    };
+  }, [canShowWebview, marking, webview]);
+
+  useEffect(() => {
     if (chromeState !== "running") {
       setMoreMenuOpen(false);
     }
@@ -1326,8 +1393,11 @@ export function LiveAppPreview(props: {
     compactMax: 1080,
     balancedMax: 1360,
   });
-  const proposalLaneActive = Boolean(proposalControls) && proposalVisible;
+  const proposalLaneActive = Boolean(previewControls) && proposalVisible;
   const liveLaneActive = !proposalLaneActive;
+  const appStateRowActive = appStateMode || liveLaneActive;
+  const appStatePreviewStateActive =
+    liveLaneActive || (appStateMode && proposalLaneActive);
   const overflowOpenAction = proposalLaneActive
     ? toolbarWidth < 850
     : toolbarWidth < 460;
@@ -1370,20 +1440,28 @@ export function LiveAppPreview(props: {
   const showOpenIconOnly = showLiveActionIconOnly;
   const showBuildIconOnly = proposalLaneActive && toolbarWidth < 620;
   const overflowBuildAction = proposalLaneActive && toolbarWidth < 450;
-  const hasSecondaryAction = Boolean(proposalControls?.onSecondary);
+  const hasProposalRefreshAction = Boolean(previewControls?.refreshLabel);
+  const showProposalRefreshIconOnly = proposalLaneActive && toolbarWidth < 700;
+  const overflowProposalRefreshAction =
+    proposalLaneActive && hasProposalRefreshAction && toolbarWidth < 520;
+  const hasSecondaryAction = Boolean(previewControls?.onSecondary);
   const showSecondaryIconOnly = proposalLaneActive && toolbarWidth < 720;
   const overflowSecondaryAction =
     proposalLaneActive && hasSecondaryAction && toolbarWidth < 540;
+  const hasDangerAction = Boolean(previewControls?.onDanger);
+  const showDangerIconOnly = proposalLaneActive && toolbarWidth < 720;
+  const overflowDangerAction =
+    proposalLaneActive && hasDangerAction && toolbarWidth < 560;
   const overflowChangesAction = proposalLaneActive
     ? false
     : toolbarWidth < 680;
   const showChangesInline =
     proposalLaneActive &&
-    selectedHighlights.length > 0 &&
+    p35AgentHighlights.length > 0 &&
     !overflowChangesAction;
   const showChangesInMenu =
     proposalLaneActive &&
-    selectedHighlights.length > 0 &&
+    p35AgentHighlights.length > 0 &&
     overflowChangesAction;
   const showReloadInline =
     runningPreview && liveLaneActive && !overflowReloadAction;
@@ -1405,16 +1483,28 @@ export function LiveAppPreview(props: {
   const showMarkInMenu = canMarkArea && overflowMarkAction;
   const showBuildInline = proposalLaneActive && !overflowBuildAction;
   const showBuildInMenu = proposalLaneActive && overflowBuildAction;
+  const showProposalRefreshInline =
+    proposalLaneActive &&
+    hasProposalRefreshAction &&
+    !overflowProposalRefreshAction;
+  const showProposalRefreshInMenu =
+    proposalLaneActive &&
+    hasProposalRefreshAction &&
+    overflowProposalRefreshAction;
   const showSecondaryInline =
     proposalLaneActive && hasSecondaryAction && !overflowSecondaryAction;
   const showSecondaryInMenu =
     proposalLaneActive && hasSecondaryAction && overflowSecondaryAction;
+  const showDangerInline =
+    proposalLaneActive && hasDangerAction && !overflowDangerAction;
+  const showDangerInMenu =
+    proposalLaneActive && hasDangerAction && overflowDangerAction;
   const proposalBuildDisabled = Boolean(
-    proposalControls?.buildDisabled || proposalStaleness.stale,
+    previewControls?.buildDisabled || proposalStaleness.stale,
   );
   const proposalBuildTitle = proposalStaleness.stale
     ? staleProposalBuildMessage(proposalStaleness)
-    : proposalControls?.buildTitle || "Build the selected proposal into Live";
+    : previewControls?.buildTitle || "Build the selected proposal into Live";
   const showChangeUrlInMenu =
     runningPreview &&
     liveLaneActive &&
@@ -1426,22 +1516,24 @@ export function LiveAppPreview(props: {
     showChangesInMenu ||
     showMarkInMenu ||
     showBuildInMenu ||
+    showProposalRefreshInMenu ||
     showSecondaryInMenu ||
+    showDangerInMenu ||
     showReloadInMenu ||
     showStopInMenu ||
     showOpenInMenu ||
     showChangeUrlInMenu;
   const showOriginChip =
     runningPreview &&
-    liveLaneActive &&
+    appStatePreviewStateActive &&
     Boolean(originLabel) &&
     (toolbarDensity === "full" || toolbarDensity === "balanced");
   const showRouteChip =
     runningPreview &&
-    liveLaneActive &&
+    appStatePreviewStateActive &&
     Boolean(showRouteLabel) &&
     toolbarDensity === "full";
-  const showStateChip = runningPreview && liveLaneActive;
+  const showStateChip = runningPreview && appStatePreviewStateActive;
   const compareTabOptions =
     props.compareTabOptions ??
     (variants.length > 0
@@ -1477,8 +1569,9 @@ export function LiveAppPreview(props: {
     }
   }, [showMoreMenu]);
   const liveLaneOption =
+    appStateTabOptions?.find((option) => option.id === "live") ??
     compareTabOptions.find((option) => option.id === "live") ??
-    (compareTabOptions.length === 0
+    (compareTabOptions.length === 0 && !appStateMode
       ? {
           id: "live",
           label: "Live",
@@ -1492,9 +1585,11 @@ export function LiveAppPreview(props: {
   );
   const hasProposalLanes = proposalLaneOptions.length > 0;
   const laneIsUpdating = frameStatus === "loading" || chromeState === "starting";
-  const liveLaneTabs = liveLaneOption
-    ? renderLaneTabs([liveLaneOption], "Live lane")
-    : null;
+  const liveLaneTabs = appStateMode
+    ? renderLaneTabs(appStateTabOptions ?? [], "App lanes")
+    : liveLaneOption
+      ? renderLaneTabs([liveLaneOption], "Live lane")
+      : null;
   const proposalLaneTabs =
     hasProposalLanes
       ? showTabSelect ? (
@@ -1603,32 +1698,6 @@ export function LiveAppPreview(props: {
 
     return (
       <>
-        {showChangesInline && (
-          <button
-            className={[
-              "ghost-button",
-              showProposalHighlights ? "active" : "",
-              showChangesIconOnly ? "icon-only" : "",
-            ]
-              .filter(Boolean)
-              .join(" ")}
-            onClick={() => setShowProposalHighlights((current) => !current)}
-            title={
-              showProposalHighlights
-                ? "Hide proposed changes"
-                : "Show proposed changes"
-            }
-            type="button"
-          >
-            {showProposalHighlights ? <EyeOff size={15} /> : <Eye size={15} />}
-            {!showChangesIconOnly &&
-              (proposalLaneActive
-                ? "Changes"
-                : showProposalHighlights
-                  ? "Hide changes"
-                  : "Show changes")}
-          </button>
-        )}
         {showMarkInline && (
           <button
             aria-label={markActionLabel}
@@ -1655,38 +1724,74 @@ export function LiveAppPreview(props: {
             {!showMarkIconOnly && markActionLabel}
           </button>
         )}
-        {proposalControls && showBuildInline && (
+        {previewControls && showProposalRefreshInline && (
           <button
-            aria-label={proposalControls.buildLabel}
+            aria-label={previewControls.refreshLabel ?? "Refresh"}
+            className={`ghost-button ${
+              showProposalRefreshIconOnly ? "icon-only" : ""
+            }`.trim()}
+            onClick={() => {
+              previewControls.onRefresh?.();
+              if (!previewControls.onRefresh) reloadPreview();
+            }}
+            title={previewControls.refreshTitle ?? "Refresh preview"}
+            type="button"
+          >
+            <RefreshCw size={15} />
+            {!showProposalRefreshIconOnly &&
+              (previewControls.refreshLabel ?? "Refresh")}
+          </button>
+        )}
+        {previewControls && showBuildInline && (
+          <button
+            aria-label={previewControls.buildLabel}
             className={`ghost-button primary ${
               showBuildIconOnly ? "icon-only" : ""
             }`.trim()}
             disabled={proposalBuildDisabled}
-            onClick={proposalControls.onBuild}
+            onClick={previewControls.onBuild}
             title={proposalBuildTitle}
             type="button"
           >
             <Hammer size={15} />
-            {!showBuildIconOnly && proposalControls.buildLabel}
+            {!showBuildIconOnly && previewControls.buildLabel}
           </button>
         )}
-        {proposalControls?.onSecondary && showSecondaryInline && (
+        {previewControls?.onSecondary && showSecondaryInline && (
           <button
-            aria-label={proposalControls.secondaryLabel ?? "Discard"}
+            aria-label={previewControls.secondaryLabel ?? "Discard"}
             className={[
               "ghost-button",
-              proposalControls.secondaryDanger ? "danger" : "",
+              previewControls.secondaryDanger ? "danger" : "",
               showSecondaryIconOnly ? "icon-only" : "",
             ]
               .filter(Boolean)
               .join(" ")}
-            onClick={proposalControls.onSecondary}
-            title={proposalControls.secondaryTitle ?? "Discard"}
+            onClick={previewControls.onSecondary}
+            title={previewControls.secondaryTitle ?? "Discard"}
             type="button"
           >
-            <X size={15} />
+            <SecondaryActionIcon label={previewControls.secondaryLabel} />
             {!showSecondaryIconOnly &&
-              (proposalControls.secondaryLabel ?? "Discard")}
+              (previewControls.secondaryLabel ?? "Discard")}
+          </button>
+        )}
+        {previewControls?.onDanger && showDangerInline && (
+          <button
+            aria-label={previewControls.dangerLabel ?? "Discard"}
+            className={[
+              "ghost-button",
+              "danger",
+              showDangerIconOnly ? "icon-only" : "",
+            ]
+              .filter(Boolean)
+              .join(" ")}
+            onClick={previewControls.onDanger}
+            title={previewControls.dangerTitle ?? "Discard"}
+            type="button"
+          >
+            <Trash2 size={15} />
+            {!showDangerIconOnly && (previewControls.dangerLabel ?? "Discard")}
           </button>
         )}
         {runningPreview && showReloadInline && (
@@ -1802,48 +1907,60 @@ export function LiveAppPreview(props: {
                     {marking ? "Stop marking" : "Mark area"}
                   </button>
                 )}
-                {showChangesInMenu && (
+                {previewControls && showProposalRefreshInMenu && (
                   <button
                     onClick={() => {
-                      setShowProposalHighlights((current) => !current);
                       setMoreMenuOpen(false);
+                      previewControls.onRefresh?.();
+                      if (!previewControls.onRefresh) reloadPreview();
                     }}
+                    title={previewControls.refreshTitle ?? "Refresh preview"}
                     type="button"
                   >
-                    {showProposalHighlights ? (
-                      <EyeOff size={15} />
-                    ) : (
-                      <Eye size={15} />
-                    )}
-                    {showProposalHighlights ? "Hide changes" : "Show changes"}
+                    <RefreshCw size={15} />
+                    {previewControls.refreshLabel ?? "Refresh"}
                   </button>
                 )}
-                {proposalControls && showBuildInMenu && (
+                {previewControls && showBuildInMenu && (
                   <button
                     disabled={proposalBuildDisabled}
                     onClick={() => {
                       if (proposalBuildDisabled) return;
                       setMoreMenuOpen(false);
-                      proposalControls.onBuild();
+                      previewControls.onBuild();
                     }}
                     title={proposalBuildTitle}
                     type="button"
                   >
                     <Hammer size={15} />
-                    {proposalControls.buildLabel}
+                    {previewControls.buildLabel}
                   </button>
                 )}
-                {proposalControls?.onSecondary && showSecondaryInMenu && (
+                {previewControls?.onSecondary && showSecondaryInMenu && (
                   <button
                     onClick={() => {
                       setMoreMenuOpen(false);
-                      proposalControls.onSecondary?.();
+                      previewControls.onSecondary?.();
                     }}
-                    title={proposalControls.secondaryTitle ?? "Discard"}
+                    title={previewControls.secondaryTitle ?? "Discard"}
                     type="button"
                   >
-                    <X size={15} />
-                    {proposalControls.secondaryLabel ?? "Discard"}
+                    <SecondaryActionIcon label={previewControls.secondaryLabel} />
+                    {previewControls.secondaryLabel ?? "Discard"}
+                  </button>
+                )}
+                {previewControls?.onDanger && showDangerInMenu && (
+                  <button
+                    className="danger"
+                    onClick={() => {
+                      setMoreMenuOpen(false);
+                      previewControls.onDanger?.();
+                    }}
+                    title={previewControls.dangerTitle ?? "Discard"}
+                    type="button"
+                  >
+                    <Trash2 size={15} />
+                    {previewControls.dangerLabel ?? "Discard"}
                   </button>
                 )}
                 {showReloadInMenu && (
@@ -1908,12 +2025,12 @@ export function LiveAppPreview(props: {
       >
         {liveLaneTabs && (
           <div
-            className={`canvas-lane-row live ${liveLaneActive ? "active" : ""}`}
+            className={`canvas-lane-row live ${appStateRowActive ? "active" : ""}`}
           >
             <div className="preview-toolbar-left">
               <div className="preview-title-row">
-                <strong>{liveTitle}</strong>
-                <span>{liveStatus}</span>
+                <strong>{props.appStateLaneTitle ?? liveTitle}</strong>
+                <span>{props.appStateLaneStatus ?? liveStatus}</span>
               </div>
               <div className={`preview-chip-row ${chromeState}`}>
                 {runningPreview ? (
@@ -1957,7 +2074,7 @@ export function LiveAppPreview(props: {
               </div>
             </div>
             <div className="preview-toolbar-tabs">{liveLaneTabs}</div>
-            {liveLaneActive && (
+            {appStateRowActive && (
               <div className={`preview-actions live-preview-controls ${chromeState}`}>
                 {renderToolbarActions()}
               </div>
@@ -2050,15 +2167,21 @@ export function LiveAppPreview(props: {
           .filter(Boolean)
           .join(" ")}
         ref={stageRef}
+        onMouseDownCapture={canShowWebview && !marking ? focusPreviewWebview : undefined}
+        onPointerDownCapture={canShowWebview && !marking ? focusPreviewWebview : undefined}
       >
         {viewportControl}
         {canShowWebview ? (
           <webview
             data-testid="electron-app-preview-webview"
             key={`${props.project.id}:${frameKey}`}
-            partition={`persist:codex-app-preview-${props.project.id}`}
+            onClick={focusPreviewWebview}
+            onFocus={focusPreviewWebview}
+            onPointerDown={focusPreviewWebview}
+            partition={`persist:codex-app-preview-${sessionPartitionKey}`}
             ref={captureWebview}
             src={previewUrl}
+            tabIndex={0}
           />
         ) : (
           <PreviewUnavailable
@@ -2100,36 +2223,6 @@ export function LiveAppPreview(props: {
             }}
           />
         )}
-        {showProposalHighlights &&
-          selectedHighlights.map((highlight) => (
-            <div
-              className="live-preview-mark proposal-highlight"
-              key={`${selectedVariant?.id ?? "preview"}:${highlight.id}`}
-              onPointerDown={(event) =>
-                beginHighlightAdjust(event, highlight, "move")
-              }
-              onPointerMove={updateHighlightAdjust}
-              onPointerUp={(event) => {
-                void finishHighlightAdjust(event);
-              }}
-              style={markStyle(adjustedHighlightArea(highlight))}
-              title={highlight.note || highlight.label}
-            >
-              <span>{highlight.label}</span>
-              <button
-                aria-label={`Resize ${highlight.label}`}
-                className="live-preview-highlight-handle"
-                onPointerDown={(event) =>
-                  beginHighlightAdjust(event, highlight, "resize")
-                }
-                onPointerMove={updateHighlightAdjust}
-                onPointerUp={(event) => {
-                  void finishHighlightAdjust(event);
-                }}
-                type="button"
-              />
-            </div>
-          ))}
         {renderedMarks.map((renderedMark) => (
           <div
             className="live-preview-mark"
@@ -2194,6 +2287,348 @@ function normalizePreviewUrl(value: string) {
   if (!trimmed) return "";
   if (/^https?:\/\//i.test(trimmed)) return trimmed;
   return `http://${trimmed}`;
+}
+
+function applyPreferredPreviewRoute(value: string, preferredRoute?: string) {
+  const normalized = normalizePreviewUrl(value);
+  const route = normalizePreferredPreviewRoute(preferredRoute);
+  if (!normalized || !route) return normalized || value;
+  try {
+    const url = new URL(normalized);
+    const routeUrl = new URL(route, "http://codex.local");
+    url.pathname = routeUrl.pathname;
+    url.search = routeUrl.search;
+    url.hash = routeUrl.hash;
+    return url.toString();
+  } catch {
+    return normalized || value;
+  }
+}
+
+function normalizePreferredPreviewRoute(value?: string) {
+  const trimmed = String(value ?? "").trim();
+  if (!trimmed || !trimmed.startsWith("/") || trimmed.startsWith("//")) {
+    return "";
+  }
+  return trimmed;
+}
+
+function cleanPreviewPartitionKey(value: string) {
+  return String(value || "project")
+    .trim()
+    .replace(/[^a-zA-Z0-9._:-]+/g, "-")
+    .slice(0, 120) || "project";
+}
+
+const previewEditingKeys = new Set([
+  "ArrowDown",
+  "ArrowLeft",
+  "ArrowRight",
+  "ArrowUp",
+  "Backspace",
+  "Delete",
+  "End",
+  "Enter",
+  "Escape",
+  "Home",
+  "PageDown",
+  "PageUp",
+  "Tab",
+]);
+const previewShortcutKeys = new Set(["a", "c", "x", "y", "z"]);
+
+function previewKeyboardInputEvents(event: KeyboardEvent) {
+  const modifiers = previewKeyboardModifiers(event);
+  if (event.ctrlKey || event.metaKey) {
+    if (event.altKey || !previewShortcutKeys.has(event.key.toLowerCase())) {
+      return [];
+    }
+    return [
+      {
+        type: "keyDown" as const,
+        keyCode: event.key.toUpperCase(),
+        modifiers,
+      },
+      { type: "keyUp" as const, keyCode: event.key.toUpperCase(), modifiers },
+    ];
+  }
+  if (event.altKey) return [];
+  if (event.key.length === 1) {
+    return [{ type: "char" as const, keyCode: event.key, modifiers }];
+  }
+  if (!previewEditingKeys.has(event.key)) return [];
+  return [
+    { type: "keyDown" as const, keyCode: event.key, modifiers },
+    { type: "keyUp" as const, keyCode: event.key, modifiers },
+  ];
+}
+
+function previewKeyboardModifiers(event: KeyboardEvent) {
+  const modifiers: string[] = [];
+  if (event.ctrlKey) modifiers.push("control");
+  if (event.metaKey) modifiers.push("meta");
+  if (event.shiftKey) modifiers.push("shift");
+  return modifiers;
+}
+
+async function sendPreviewInputEvents(
+  webview: ElectronWebviewElement,
+  events: PreviewWebviewInputEvent[],
+) {
+  if (typeof webview.sendInputEvent !== "function") return;
+  try {
+    for (const event of events) {
+      await webview.sendInputEvent(event);
+    }
+  } catch {
+    // The preview webview can detach or navigate while a keystroke is in flight.
+  }
+}
+
+async function insertPreviewText(
+  webview: ElectronWebviewElement,
+  text: string,
+) {
+  if (typeof webview.sendInputEvent === "function") {
+    try {
+      await sendPreviewTextInput(webview, text);
+      return;
+    } catch {
+      // Fall through to script insertion if native text replay is unavailable.
+    }
+  }
+  try {
+    await webview.executeJavaScript<boolean>(
+      buildPreviewTextInsertionScript(text),
+      false,
+    );
+  } catch {
+    // The preview webview can detach or navigate while pasted text is in flight.
+  }
+}
+
+async function sendPreviewTextInput(
+  webview: ElectronWebviewElement,
+  text: string,
+) {
+  for (const character of Array.from(text).slice(0, 20000)) {
+    if (character === "\r") continue;
+    if (character === "\n") {
+      await sendPreviewInputEvents(webview, [
+        { type: "keyDown", keyCode: "Enter" },
+        { type: "keyUp", keyCode: "Enter" },
+      ]);
+      continue;
+    }
+    if (character === "\t") {
+      await sendPreviewInputEvents(webview, [
+        { type: "keyDown", keyCode: "Tab" },
+        { type: "keyUp", keyCode: "Tab" },
+      ]);
+      continue;
+    }
+    await webview.sendInputEvent?.({ type: "char", keyCode: character });
+  }
+}
+
+function buildPreviewTextInsertionScript(text: string) {
+  return `(() => {
+    const text = ${JSON.stringify(text)};
+    const active = document.activeElement;
+    const emitInput = (target) => {
+      try {
+        target.dispatchEvent(new InputEvent("input", {
+          bubbles: true,
+          data: text,
+          inputType: "insertText",
+        }));
+      } catch {
+        target.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      target.dispatchEvent(new Event("change", { bubbles: true }));
+    };
+    if (
+      active instanceof HTMLInputElement ||
+      active instanceof HTMLTextAreaElement
+    ) {
+      const value = active.value || "";
+      const start = active.selectionStart ?? value.length;
+      const end = active.selectionEnd ?? start;
+      const nextValue = value.slice(0, start) + text + value.slice(end);
+      const valueSetter = Object.getOwnPropertyDescriptor(
+        Object.getPrototypeOf(active),
+        "value",
+      )?.set;
+      if (valueSetter) {
+        valueSetter.call(active, nextValue);
+      } else {
+        active.value = nextValue;
+      }
+      const nextSelection = start + text.length;
+      active.setSelectionRange(nextSelection, nextSelection);
+      emitInput(active);
+      return true;
+    }
+    if (active instanceof HTMLElement && active.isContentEditable) {
+      const selection = window.getSelection();
+      if (selection && selection.rangeCount > 0) {
+        selection.deleteFromDocument();
+        const range = selection.getRangeAt(0);
+        const node = document.createTextNode(text);
+        range.insertNode(node);
+        range.setStartAfter(node);
+        range.setEndAfter(node);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } else {
+        active.textContent = (active.textContent || "") + text;
+      }
+      emitInput(active);
+      return true;
+    }
+    return false;
+  })();`;
+}
+
+async function captureSharedPreviewCredentials(
+  webview: ElectronWebviewElement,
+  key: string,
+) {
+  if (!key) return;
+  try {
+    const captured = await webview.executeJavaScript<{
+      localStorage?: Record<string, string>;
+      sessionStorage?: Record<string, string>;
+    }>(capturePreviewCredentialStorageScript(), false);
+    const localStorage = captured?.localStorage ?? {};
+    const sessionStorage = captured?.sessionStorage ?? {};
+    const previous = previewCredentialSnapshots.get(key);
+    if (
+      Object.keys(localStorage).length === 0 &&
+      Object.keys(sessionStorage).length === 0 &&
+      !previous
+    ) {
+      return;
+    }
+    const snapshot: PreviewCredentialSnapshot = {
+      localStorage,
+      sessionStorage,
+      clearLocalStorageKeys: previous
+        ? Object.keys(previous.localStorage).filter(
+            (storageKey) => !(storageKey in localStorage),
+          )
+        : [],
+      clearSessionStorageKeys: previous
+        ? Object.keys(previous.sessionStorage).filter(
+            (storageKey) => !(storageKey in sessionStorage),
+          )
+        : [],
+      updatedAt: Date.now(),
+    };
+    if (previous && previewCredentialSnapshotsEqual(previous, snapshot)) {
+      return;
+    }
+    previewCredentialSnapshots.set(key, snapshot);
+    window.dispatchEvent(
+      new CustomEvent(PREVIEW_CREDENTIAL_EVENT, { detail: { key } }),
+    );
+  } catch {
+    // Preview apps can navigate or detach while auth state is being read.
+  }
+}
+
+async function importSharedPreviewCredentials(
+  webview: ElectronWebviewElement,
+  key: string,
+) {
+  const snapshot = previewCredentialSnapshots.get(key);
+  if (!snapshot) return false;
+  const hasCredentials = hasPreviewCredentialValues(snapshot);
+  try {
+    const applied = await webview.executeJavaScript<boolean>(
+      applyPreviewCredentialStorageScript(snapshot),
+      false,
+    );
+    if (applied && hasCredentials) {
+      await webview
+        .executeJavaScript(
+          `if (window.location.pathname === "/auth") window.location.assign("/");`,
+          false,
+        )
+        .catch(() => {});
+    }
+    return Boolean(applied);
+  } catch {
+    return false;
+  }
+}
+
+function hasPreviewCredentialValues(snapshot: PreviewCredentialSnapshot) {
+  return (
+    Object.keys(snapshot.localStorage).length > 0 ||
+    Object.keys(snapshot.sessionStorage).length > 0
+  );
+}
+
+function previewCredentialSnapshotsEqual(
+  left: PreviewCredentialSnapshot,
+  right: PreviewCredentialSnapshot,
+) {
+  return (
+    recordEquals(left.localStorage, right.localStorage) &&
+    recordEquals(left.sessionStorage, right.sessionStorage) &&
+    listEquals(left.clearLocalStorageKeys, right.clearLocalStorageKeys) &&
+    listEquals(left.clearSessionStorageKeys, right.clearSessionStorageKeys)
+  );
+}
+
+function recordEquals(left: Record<string, string>, right: Record<string, string>) {
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  if (!listEquals(leftKeys, rightKeys)) return false;
+  return leftKeys.every((key) => left[key] === right[key]);
+}
+
+function listEquals(left: string[], right: string[]) {
+  if (left.length !== right.length) return false;
+  const sortedLeft = [...left].sort();
+  const sortedRight = [...right].sort();
+  return sortedLeft.every((value, index) => value === sortedRight[index]);
+}
+
+function capturePreviewCredentialStorageScript() {
+  return `(() => {
+    const shouldSyncKey = (key) => /^(sb-|supabase\\.|supabase-|gotrue\\.|auth\\.|auth-|agentcat-auth)/i.test(String(key || ""));
+    const copyStorage = (storage) => {
+      const values = {};
+      for (let index = 0; index < storage.length; index += 1) {
+        const key = storage.key(index);
+        if (!shouldSyncKey(key)) continue;
+        const value = storage.getItem(key);
+        if (value != null) values[key] = value;
+      }
+      return values;
+    };
+    return {
+      localStorage: copyStorage(window.localStorage),
+      sessionStorage: copyStorage(window.sessionStorage),
+    };
+  })();`;
+}
+
+function applyPreviewCredentialStorageScript(snapshot: PreviewCredentialSnapshot) {
+  return `(() => {
+    const snapshot = ${JSON.stringify(snapshot)};
+    const applyStorage = (storage, values, clearKeys) => {
+      for (const key of clearKeys || []) storage.removeItem(key);
+      for (const [key, value] of Object.entries(values || {})) {
+        storage.setItem(key, String(value));
+      }
+    };
+    applyStorage(window.localStorage, snapshot.localStorage, snapshot.clearLocalStorageKeys);
+    applyStorage(window.sessionStorage, snapshot.sessionStorage, snapshot.clearSessionStorageKeys);
+    return true;
+  })();`;
 }
 
 function rememberedPreviewUrlsForOtherProjects(activeStorageKey: string) {
@@ -2532,6 +2967,22 @@ type GuestPreviewState = {
 
 function variantTabLabel(id: string, total: number) {
   return total === 1 ? "A" : id;
+}
+
+function SecondaryActionIcon({ label }: { label?: string }) {
+  const normalized = (label ?? "").toLowerCase();
+  if (normalized.includes("continue") || normalized.includes("resume")) {
+    return <Play size={15} />;
+  }
+  if (normalized.includes("park")) return <Pause size={15} />;
+  if (
+    normalized.includes("discard") ||
+    normalized.includes("delete") ||
+    normalized.includes("remove")
+  ) {
+    return <Trash2 size={15} />;
+  }
+  return <X size={15} />;
 }
 
 function laneTransferPrompt(from: string, to: string) {

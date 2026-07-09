@@ -1,4 +1,3 @@
-import { previewArtifactDisplayName } from "./mockupArtifacts";
 import type { ComposerContextReference, PlanPreviewAreaMark } from "./types";
 import type { PreviewImageItem } from "./components/ImagePreviewLightbox";
 
@@ -20,19 +19,13 @@ export function composerContextPreviewImage(
 }
 
 export function composerContextVisualLabel(context: ComposerContextReference) {
-  if (context.type === "appPreview") return context.markLabel || "Mark 1";
-  if (context.source === "proposalHighlight") {
-    return context.markLabel.replace(/^Adjusted change area:\s*/i, "Change: ");
-  }
-  return context.markLabel;
+  return context.markLabel || "Mark 1";
 }
 
 export function composerContextVisualTitle(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${composerContextVisualLabel(context)} - App preview`;
-  }
-  const artifact = previewArtifactDisplayName(context.artifactKind, 1, "title");
-  return `${composerContextVisualLabel(context)} - ${artifact} ${context.mockupLabel}`;
+  return `${composerContextVisualLabel(context)} - ${
+    context.surface === "draft" ? "Draft" : "Live"
+  } preview`;
 }
 
 export function fallbackContextThumbnailDataUrl(

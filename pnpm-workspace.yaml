@@ -4,9 +4,6 @@ packages:
   - codex-rs/responses-api-proxy/npm
   - sdk/typescript
 
-ignoredBuiltDependencies:
-  - esbuild
-
 minimumReleaseAge: 10080
 minimumReleaseAgeExclude: []
 
@@ -15,4 +12,7 @@ strictDepBuilds: true
 trustPolicy: no-downgrade
 trustPolicyIgnoreAfter: 10080
 trustPolicyExclude: []
-allowBuilds: {}
+allowBuilds:
+  electron: true
+  electron-winstaller: true
+  esbuild: true

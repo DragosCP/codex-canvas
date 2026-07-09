@@ -1603,8 +1603,6 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 .visual-decision-strip,
 .mockup-option-strip {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) auto;
-  align-items: center;
   gap: 10px;
   padding: 9px 10px;
   border: 1px solid rgba(255, 255, 255, 0.11);
@@ -1663,7 +1661,29 @@ button.settings-popover-row:focus-visible:not(:disabled) {
   background: rgba(143, 199, 255, 0.12);
 }
 
-.visual-decision-options,
+.visual-decision-strip {
+  grid-template-columns: minmax(0, 1fr);
+  align-items: stretch;
+}
+
+.mockup-option-strip {
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+}
+
+.visual-decision-header {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: 8px;
+}
+
+.visual-decision-options {
+  display: grid;
+  gap: 6px;
+  min-width: 0;
+}
+
 .mockup-option-actions {
   display: flex;
   align-items: center;
@@ -1686,15 +1706,39 @@ button.settings-popover-row:focus-visible:not(:disabled) {
 }
 
 .visual-decision-option {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
   gap: 7px;
-  max-width: 172px;
-  padding: 0 10px;
+  width: 100%;
+  min-height: 42px;
+  padding: 8px 10px;
+  text-align: left;
 }
 
-.visual-decision-option span {
+.visual-decision-option > svg {
+  color: #9fd0ff;
+}
+
+.visual-decision-option-copy {
+  display: grid;
+  min-width: 0;
+}
+
+.visual-decision-option-copy strong,
+.visual-decision-option-copy small {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+
+.visual-decision-option-copy strong {
+  color: var(--app-text-soft);
+  font-size: 13px;
+}
+
+.visual-decision-option-copy small {
+  color: var(--app-muted);
+  font-size: 12px;
 }
 
 .visual-decision-option:hover,
@@ -4671,7 +4715,6 @@ body {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  .visual-decision-options,
   .mockup-option-actions {
     justify-content: flex-start;
     overflow-x: auto;
@@ -4897,6 +4940,46 @@ body {
   padding: 10px;
   gap: 8px;
   overflow: hidden;
+}
+
+.draft-preview-warm-stack {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+  overflow: hidden;
+}
+
+.draft-preview-warm-pane {
+  display: flex;
+  flex: 1 1 auto;
+  min-width: 0;
+  min-height: 0;
+  width: 100%;
+  height: 100%;
+}
+
+.draft-preview-warm-pane.active {
+  position: relative;
+  z-index: 1;
+  visibility: visible;
+}
+
+.draft-preview-warm-pane.inactive {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  visibility: hidden;
+}
+
+.draft-preview-warm-pane > .live-preview-panel {
+  flex: 1 1 auto;
+  min-width: 0;
+  width: 100%;
 }
 
 .mockup-preview-surface {
@@ -5503,6 +5586,15 @@ body {
 .more-actions-menu button:hover,
 .more-actions-menu button:focus-visible {
   background: var(--app-surface-soft);
+}
+
+.more-actions-menu button.danger {
+  color: #ffd6cf;
+}
+
+.more-actions-menu button.danger:hover,
+.more-actions-menu button.danger:focus-visible {
+  background: rgba(255, 141, 121, 0.12);
 }
 
 .live-preview-controls {

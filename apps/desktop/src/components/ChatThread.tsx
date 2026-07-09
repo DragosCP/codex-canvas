@@ -13,6 +13,7 @@ import {
 import { useEffect, useRef, useState } from "react";
 import {
   commandStatusText,
+  extractCodexContextUserRequest,
   friendlyMockupPromptTitle,
   itemLabel,
 } from "../itemUtils";
@@ -22,6 +23,7 @@ import {
 } from "../mockupArtifacts";
 import { composerContextPreviewImage } from "../previewContextImages";
 import type {
+  ComposerAttachment,
   ComposerContextReference,
   InspectorSelection,
   LocalChatDraft,
@@ -65,6 +67,14 @@ type UserMessageContentPart = Extract<
   { type: "userMessage" }
 >["content"][number];
 
+type PendingComposerSend = {
+  projectId: string;
+  prompt: string;
+  attachments: ComposerAttachment[];
+  contexts: ComposerContextReference[];
+  createdAt: number;
+};
+
 export function ChatThread(props: {
   activeProject: Project | null;
   activeDraft: LocalChatDraft | null;
@@ -78,6 +88,7 @@ export function ChatThread(props: {
   onSelect: (selection: InspectorSelection) => void;
   planProposalFeedbackDrafts?: Record<string, string>;
   planProposals?: Record<string, PlanProposal>;
+  pendingComposerSend?: PendingComposerSend | null;
   sentComposerContextsByTurnId?: Record<string, ComposerContextReference[]>;
 }) {
   const scrollerRef = useRef<HTMLDivElement | null>(null);
@@ -108,22 +119,38 @@ export function ChatThread(props: {
     );
   }
 
+  const pendingComposerSend =
+    props.pendingComposerSend?.projectId === props.activeProject.id
+      ? props.pendingComposerSend
+      : null;
+
   if (!props.activeThread) {
     return (
       <div className="turn-list" ref={scrollerRef} onScroll={handleScroll}>
-        <div className="empty-chat">
-          {props.activeDraft ? (
-            <>
-              <h2>New chat</h2>
-              <p>Write the first message, then Codex will create the chat.</p>
-            </>
-          ) : (
-            <>
-              <h2>Ready in {props.activeProject.name}</h2>
-              <p>Start a chat or send a prompt from the composer.</p>
-            </>
-          )}
-        </div>
+        {pendingComposerSend ? (
+          <article className="turn-card inProgress">
+            <UserMessageView
+              activeProject={props.activeProject}
+              contexts={pendingComposerSend.contexts}
+              item={pendingComposerSendItem(pendingComposerSend)}
+            />
+            <p className="turn-quiet-status">Starting chat...</p>
+          </article>
+        ) : (
+          <div className="empty-chat">
+            {props.activeDraft ? (
+              <>
+                <h2>New chat</h2>
+                <p>Write the first message, then Codex will create the chat.</p>
+              </>
+            ) : (
+              <>
+                <h2>Ready in {props.activeProject.name}</h2>
+                <p>Start a chat or send a prompt from the composer.</p>
+              </>
+            )}
+          </div>
+        )}
       </div>
     );
   }
@@ -133,7 +160,17 @@ export function ChatThread(props: {
 
   return (
     <div className="turn-list" ref={scrollerRef} onScroll={handleScroll}>
-      {activeThread.turns.length === 0 && (
+      {activeThread.turns.length === 0 && pendingComposerSend && (
+        <article className="turn-card inProgress">
+          <UserMessageView
+            activeProject={activeProject}
+            contexts={pendingComposerSend.contexts}
+            item={pendingComposerSendItem(pendingComposerSend)}
+          />
+          <p className="turn-quiet-status">Starting chat...</p>
+        </article>
+      )}
+      {activeThread.turns.length === 0 && !pendingComposerSend && (
         <div className="empty-chat">
           <h2>New chat</h2>
           <p>Ask Codex to inspect, plan, run commands, or edit this project.</p>
@@ -160,8 +197,40 @@ export function ChatThread(props: {
           }
         />
       ))}
+      {activeThread.turns.length > 0 && pendingComposerSend && (
+        <article className="turn-card inProgress">
+          <UserMessageView
+            activeProject={activeProject}
+            contexts={pendingComposerSend.contexts}
+            item={pendingComposerSendItem(pendingComposerSend)}
+          />
+          <p className="turn-quiet-status">Starting chat...</p>
+        </article>
+      )}
     </div>
   );
+}
+
+function pendingComposerSendItem(
+  pending: PendingComposerSend,
+): Extract<ThreadItem, { type: "userMessage" }> {
+  return {
+    type: "userMessage",
+    id: `pending-send:${pending.projectId}:${pending.createdAt}`,
+    content: [
+      {
+        type: "text",
+        text: pending.prompt,
+        text_elements: [],
+      },
+      ...pending.attachments
+        .filter((attachment) => attachment.kind === "image")
+        .map((attachment) => ({
+          type: "localImage" as const,
+          path: attachment.path,
+        })),
+    ],
+  };
 }
 
 function TurnView(props: {
@@ -198,9 +267,8 @@ function TurnView(props: {
   const activityItems = props.turn.items.filter((item) =>
     isActivityItem(item, props.turn.status),
   );
-  const compactionItems = props.turn.items.filter(
-    (item): item is Extract<ThreadItem, { type: "contextCompaction" }> =>
-      item.type === "contextCompaction",
+  const hasCompaction = props.turn.items.some(
+    (item) => item.type === "contextCompaction",
   );
   const mergedFileChangeItem =
     props.turn.status === "inProgress" ? null : mergeTurnFileChanges(props.turn);
@@ -235,9 +303,7 @@ function TurnView(props: {
             workspaceProgress={props.workspaceProgress}
           />
         )}
-      {compactionItems.map((item) => (
-        <ContextCompactionDivider key={item.id} />
-      ))}
+      {hasCompaction && <ContextCompactionDivider />}
       {finalItems.map((item) => (
         <AssistantMessageView
           activeProject={props.activeProject}
@@ -254,7 +320,6 @@ function TurnView(props: {
             onAccept={props.onAcceptPlanProposal}
             onDecline={props.onDeclinePlanProposal}
             onModify={props.onModifyPlanProposal}
-            onOpenPreview={props.onShowPlanUiImpact}
             feedbackDraft={props.planProposalFeedbackDraft ?? ""}
             onFeedbackChange={(value) =>
               props.onPlanProposalFeedbackChange(
@@ -502,24 +567,19 @@ function PlanProposalReview(props: {
   onDecline: (proposal: PlanProposal) => void;
   onFeedbackChange: (value: string) => void;
   onModify: (proposal: PlanProposal, feedback?: string) => void;
-  onOpenPreview: (proposal: PlanProposal) => void;
 }) {
   const pending = props.proposal.status === "pending";
   const title = planProposalTitle(props.proposal);
   const [decision, setDecision] = useState<"accept" | "revise">("accept");
   const feedbackText = props.feedbackDraft.trim();
-  const selectedPreviewVariant = selectedPlanPreviewVariant(props.proposal);
-  const hasAttachedPreviewContext = Boolean(
-    selectedPreviewVariant || props.proposal.previewAreaMark,
-  );
+  const hasAttachedPreviewContext = Boolean(props.proposal.previewAreaMark);
   useEffect(() => {
     if (props.feedbackDraft.trim()) setDecision("revise");
   }, [props.feedbackDraft]);
   useEffect(() => {
     if (props.proposal.previewAreaMark) setDecision("revise");
   }, [props.proposal.previewAreaMark]);
-  const acceptLabel = planAcceptLabel(props.proposal, selectedPreviewVariant);
-  const canShowPendingPreview = pending && hasPlanUiImpact(props.proposal);
+  const acceptLabel = planAcceptLabel(props.proposal);
   function submitDecision() {
     if (decision === "accept") {
       props.onAccept(props.proposal);
@@ -581,30 +641,11 @@ function PlanProposalReview(props: {
                 <small className="plan-decision-chip">
                   {props.proposal.previewAreaMark
                     ? "Includes preview mark"
-                    : selectedPreviewVariant
-                      ? `Option ${selectedPreviewVariant.id} selected`
-                      : "Visual reference selected"}
+                    : "Visual reference selected"}
                 </small>
               )}
             </label>
           </div>
-          {canShowPendingPreview && (
-            <div className="plan-decision-inspect">
-              <button
-                data-testid="plan-show-preview"
-                type="button"
-                onClick={() => props.onOpenPreview(props.proposal)}
-              >
-                <PanelRightOpen size={14} />
-                <span>
-                  {props.proposal.previewSpec?.variants.length &&
-                  props.proposal.previewSpec.variants.length > 1
-                    ? "Compare options"
-                    : "Show app preview"}
-                </span>
-              </button>
-            </div>
-          )}
           <div className="plan-decision-actions">
             <button
               data-testid="plan-decline"
@@ -646,31 +687,10 @@ export function shouldShowPlanProposalReview(
   return proposal.status === "pending" || proposal.status === "accepted" || proposal.status === "declined";
 }
 
-function hasPlanUiImpact(proposal: PlanProposal) {
-  return Boolean(proposal.previewSpec?.variants.length || proposal.previewAreaMark);
-}
-
-function selectedPlanPreviewVariant(proposal: PlanProposal) {
-  const variants = proposal.previewSpec?.variants ?? [];
-  if (variants.length === 0) return null;
-  return (
-    variants.find((variant) => variant.id === proposal.previewSelectedVariantId) ??
-    variants[0] ??
-    null
-  );
-}
-
-function planAcceptLabel(
-  proposal: PlanProposal,
-  selectedVariant: ReturnType<typeof selectedPlanPreviewVariant>,
-) {
+function planAcceptLabel(proposal: PlanProposal) {
   if (proposal.proposalKind === "safer_alternative") {
     return "Yes, implement safer plan";
   }
-  if (selectedVariant && (proposal.previewSpec?.variants.length ?? 0) > 1) {
-    return `Implement option ${selectedVariant.id}`;
-  }
-  if (selectedVariant) return "Implement selected preview";
   return "Yes, implement this plan";
 }
 
@@ -679,11 +699,6 @@ function planProposalTitle(proposal: PlanProposal) {
 }
 
 function planReviewText(proposal: PlanProposal) {
-  if (proposal.previewSpec?.variants.length) {
-    return proposal.previewSpec.variants.length > 1
-      ? "Preview options ready."
-      : "Preview ready.";
-  }
   return "Plan ready.";
 }
 
@@ -1339,6 +1354,10 @@ function mapUserDisplayText(
   if (codeProposalRequest) {
     return { text: friendlyText(codeProposalRequest, activeProject) };
   }
+  const codexContextRequest = extractCodexContextUserRequest(visible);
+  if (codexContextRequest != null) {
+    return { text: friendlyText(codexContextRequest, activeProject) };
+  }
   const mockupReviewRequest = extractSavedMockupReviewRequest(visible);
   if (mockupReviewRequest) {
     return { text: friendlyText(mockupReviewRequest, activeProject) };
@@ -1440,7 +1459,7 @@ function extractVisualDecisionSelectionRequest(text: string) {
   }
   const marker = "\n\nUser-visible composer text:\n";
   const markerIndex = visible.indexOf(marker);
-  if (markerIndex === -1) return "Use selected option.";
+  if (markerIndex === -1) return "Use selected Draft action.";
   return trimInternalContextTail(
     visible.slice(markerIndex + marker.length),
   ).trim();

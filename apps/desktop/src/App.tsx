@@ -14,15 +14,19 @@ import {
   type AuthDialogState,
 } from "./components/AuthDialog";
 import { ChatThread } from "./components/ChatThread";
-import { CodeProposalOptionStrip } from "./components/CodeProposalOptionStrip";
 import { Composer } from "./components/Composer";
-import { FeatureDraftStrip } from "./components/FeatureDraftStrip";
 import {
-  nextAppPreviewChangeNumber,
-  nextAppPreviewMarkNumber,
+  composerContextIdentity,
+  composerContextSearchLabel,
+  composerContextsForProject,
+  dedupeComposerContexts,
+  promptWithComposerContexts,
+  pruneSentComposerContextsByTurnId,
+  quotePromptValue,
+  sameComposerContextList,
+  visibleDraftForProject,
 } from "./composerContexts";
 import { Inspector } from "./components/Inspector";
-import { MockupOptionStrip } from "./components/MockupOptionStrip";
 import { ProjectSidebar } from "./components/ProjectSidebar";
 import { VisualDecisionStripView } from "./components/VisualDecisionStrip";
 import { WorkspaceHeader } from "./components/WorkspaceHeader";
@@ -33,11 +37,47 @@ import {
   unsupportedAttachments,
 } from "./attachments";
 import {
+  CHAT_COMFORT_WIDTH,
+  CHAT_PHONE_LAYOUT_WIDTH,
+  INSPECTOR_AUTO_COLLAPSE_QUERY,
+  INSPECTOR_AUTO_COLLAPSE_WIDTH,
+  INSPECTOR_MIN_WIDTH,
+  PREVIEW_CHAT_MIN_WIDTH,
+  SIDEBAR_DRAWER_WIDTH,
+  clamp,
+  maxInspectorWidthForShell,
+  preferredPreviewInspectorWidth,
+  sidebarWidthForShell,
+} from "./appLayout";
+import {
+  errorMessage,
+  isDraftWorkspaceNotRegisteredError,
+  isKnownThreadForCwd,
+  isStaleThreadError,
+  isThreadNotMaterialized,
+  isUnsupportedAttachmentError,
+  sendFailureMessage,
+  wait,
+  withRequestTimeout,
+} from "./appErrors";
+import {
+  sendBlockReason,
+  shouldPreserveLocalThreadDuringRefresh,
+  turnWithOptimisticUserMessage,
+} from "./appSendGuards";
+import {
+  firstMarkdownChangeSelection,
+  sameInspectorSelection,
+} from "./appInspector";
+import {
+  removeComposerContextByIdentity,
+  upsertAppPreviewMarkContext,
+} from "./composerMarkWorkflow";
+import {
   CANVAS_OPERATING_PROMPT,
   canvasActionSummary,
   resolveCanvasAction,
   type CanvasActionResolution,
-  type CanvasProposalState,
   type CanvasQuestion,
   type CanvasSurface,
 } from "./canvasActions";
@@ -47,12 +87,55 @@ import {
   type ProposalBacking,
 } from "./canvasProposalModel";
 import {
+  deriveCanvasWorkflowLedger,
+} from "./canvasWorkflowLedger";
+import {
   evaluateLiveDomPatchStaleness,
   staleProposalBuildMessage,
 } from "./canvasProposalStaleness";
 import { useAppServerConnection } from "./hooks/useAppServerConnection";
 import { useAppServerEvents } from "./hooks/useAppServerEvents";
 import { useDocumentPreview } from "./hooks/useDocumentPreview";
+import {
+  FEATURE_DRAFT_PLACEMENT_PREFLIGHT_CONTRACT,
+  featureDraftValidationMessage,
+  isBlockingFeatureDraftValidationResult,
+  validateFeatureDraftChangedPaths,
+  validateFeatureDraftCompletion,
+  validateFeatureDraftFirstEdit,
+  validateFeatureDraftPlacementPreflight,
+  validateFeatureDraftPreValidationCommand,
+} from "./featureDraftValidation";
+import {
+  codeProposalChangeSummary,
+  createFeatureDraftId,
+  featureDraftFromRegisteredWorkspace,
+  featureDraftIsActiveForRouting,
+  featureDraftName,
+  featureDraftNeedsAttention,
+  isFeatureDraftBuildRequest,
+  isFeatureDraftContinueRequest,
+  isFeatureDraftDiscardRequest,
+  isFeatureDraftParkRequest,
+  isFeatureDraftResumeRequest,
+  markFeatureDraftBuilt,
+  mergeHydratedFeatureDraft,
+  parkFeatureDraftInState,
+  removeRecordKey,
+  resumeFeatureDraftInState,
+  shouldCreateFeatureDraftFromCanvasPrompt,
+  shouldRouteToFeatureDraftPrompt,
+  shouldRouteToFeatureDraftRecoveryPrompt,
+  type DraftWorkspaceApplyResult,
+  type DraftWorkspaceDiffResult,
+  type PreparedDraftWorkspace,
+  type RegisteredDraftWorkspace,
+} from "./featureDraftWorkflow";
+import {
+  FEATURE_DRAFT_WORKSPACE_SENTINEL,
+  featureDraftRevisionPrompt,
+  featureDraftWorkspacePrompt,
+} from "./featureDraftPrompts";
 import {
   activeTurn,
   ensureTurn,
@@ -73,25 +156,38 @@ import {
   sameRuntimePath,
 } from "./runtime";
 import { desktopInvoke } from "./desktopBridge";
+import { resolveModelDisplay } from "./modelDisplay";
+import { preferredLivePreviewSelection } from "./previewSelection";
 import {
-  parsePlanPreviewSpec,
   planPreviewDecisionSummary,
   selectedPlanPreviewVariant,
   selectedPlanPreviewVariantHasVisualPatchBundle,
-  shouldOfferPlanPreview,
 } from "./planPreview";
 import {
   createProposalSetId,
   previewArtifactActionName,
   previewArtifactDisplayName,
   previewArtifactFilePrefix,
-  previewArtifactKindFromText,
 } from "./mockupArtifacts";
 import {
-  parseVisualDecisionStrip,
   type VisualDecisionOption,
-  type VisualDecisionStrip,
 } from "./visualDecision";
+import {
+  finalAgentText,
+  latestVisualDecision,
+  loadDismissedVisualDecisionIds,
+  saveDismissedVisualDecisionIds,
+  selectedMockupIdForLoadedSet,
+  turnTouchesSavedMockups,
+  visualDecisionComposerText,
+  visualDecisionFeatureDraftRequest,
+  visualDecisionOptionCreatesCodeProposal,
+  visualDecisionOptionCreatesFeatureDraft,
+  visualDecisionOptionCreatesLiveOverlay,
+  visualDecisionOptionCreatesMockups,
+  type ActiveVisualDecision,
+  type VisualDecisionComposerAction,
+} from "./visualDecisionWorkflow";
 import {
   WORKSPACE_PROGRESS_POLL_MS,
   formatDuration,
@@ -104,16 +200,11 @@ import {
   type TurnProgressSummary,
 } from "./turnProgress";
 import type {
-  AppServerSnapshot,
-  BackendMode,
   CanvasVisualReferenceMeta,
   CodeProposalFileChange,
-  CodeProposalOption,
-  CodeProposalSet,
   ComposerAttachment,
   ComposerAppPreviewContext,
   ComposerContextReference,
-  ComposerMockupPreviewContext,
   DesktopState,
   FeatureDraft,
   InspectorSelection,
@@ -151,24 +242,34 @@ type SubmissionDraft = {
   openMockupsOnComplete?: boolean;
   liveOverlayProposalOnComplete?: boolean;
   liveProposalAcceptedForBuildTurnId?: string | null;
-  codeProposalOnComplete?: boolean;
-  codeProposalHistoryOnComplete?: boolean;
   featureDraftOnComplete?: boolean;
   featureDraftId?: string | null;
   mockupHistoryOnComplete?: boolean;
   proposalSetId?: string | null;
   artifactKind?: PreviewArtifactKind | null;
+  deferredFeatureDraft?: DeferredFeatureDraftPreparation | null;
+};
+
+type DeferredFeatureDraftPreparation = {
+  draftId: string;
+  originalPrompt: string;
+  status: ProjectEmptyStatus | null;
+  planModeWasOn: boolean;
+  liveContext: string;
+};
+
+type PendingComposerSend = {
+  projectId: string;
+  prompt: string;
+  attachments: ComposerAttachment[];
+  contexts: ComposerContextReference[];
+  createdAt: number;
 };
 
 type ProjectThreadGroup = {
   project: Project;
   threads: Thread[];
   draft: LocalChatDraft | null;
-};
-
-type VisualDecisionComposerAction = {
-  decisionId: string;
-  option: VisualDecisionOption;
 };
 
 type ProjectEmptyStatus = {
@@ -185,79 +286,31 @@ type MockupsListResult = Omit<
   projectPath: string;
 };
 
-type PreparedProposalWorkspaces = {
-  proposalSetId: string;
-  registryId: string;
-  rootPath: string;
-  options: Array<{
-    id: "A" | "B" | "C";
-    workspacePath: string;
-    previewOwnerId: string;
-  }>;
-};
+export {
+  isFeatureDraftBuildRequest,
+  isFeatureDraftContinueRequest,
+  isFeatureDraftDiscardRequest,
+  isFeatureDraftParkRequest,
+  isFeatureDraftResumeRequest,
+  shouldCreateFeatureDraftFromCanvasPrompt,
+  shouldRouteToFeatureDraftPrompt,
+  shouldRouteToFeatureDraftRecoveryPrompt,
+} from "./featureDraftWorkflow";
+export {
+  EXPERIENTIAL_DRAFT_PROMPT_CONTRACT,
+  FEATURE_DRAFT_FINAL_RESPONSE_CONTRACT,
+  FEATURE_DRAFT_OPERATING_PROMPT,
+  FEATURE_IN_PLACE_DRAFT_PROMPT_CONTRACT,
+  featureDraftRevisionPrompt,
+  featureDraftWorkspacePrompt,
+} from "./featureDraftPrompts";
+export {
+  visualDecisionOptionCreatesCodeProposal,
+  visualDecisionOptionCreatesFeatureDraft,
+  visualDecisionOptionCreatesLiveOverlay,
+  visualDecisionOptionCreatesMockups,
+} from "./visualDecisionWorkflow";
 
-type PreparedDraftWorkspace = {
-  draftId: string;
-  registryId: string;
-  projectPath: string;
-  threadId: string | null;
-  name: string;
-  slug: string;
-  status: FeatureDraft["lifecycle"];
-  rootPath: string;
-  workspacePath: string;
-  previewOwnerId: string;
-  affectedRoutes: string[];
-  mockAssumptions: string[];
-  briefPath: string;
-  createdAt: number;
-  updatedAt: number;
-};
-
-type CodeProposalAddOptionRequest = {
-  optionId: "A" | "B" | "C";
-  sourceOptionId: "A" | "B" | "C" | null;
-};
-
-type ProposalWorkspaceDiffResult = {
-  proposalSetId: string;
-  registryId: string;
-  optionId: "A" | "B" | "C";
-  workspacePath: string;
-  previewOwnerId: string;
-  changedFiles: CodeProposalFileChange[];
-};
-
-type DraftWorkspaceDiffResult = {
-  draftId: string;
-  registryId: string;
-  projectPath: string;
-  rootPath: string;
-  workspacePath: string;
-  previewOwnerId: string;
-  status: FeatureDraft["lifecycle"];
-  changedFiles: CodeProposalFileChange[];
-};
-
-type ProposalWorkspaceApplyResult = {
-  ok: boolean;
-  changedFiles: CodeProposalFileChange[];
-  conflicts: Array<{ path: string; reason: string }>;
-};
-
-type ActiveVisualDecision = {
-  id: string;
-  turnId: string;
-  decision: VisualDecisionStrip;
-};
-
-const SIDEBAR_DRAWER_WIDTH = 700;
-const INSPECTOR_AUTO_COLLAPSE_WIDTH = 660;
-const INSPECTOR_MIN_WIDTH = 320;
-const CHAT_COMFORT_WIDTH = 520;
-const PREVIEW_CHAT_MIN_WIDTH = 320;
-const CHAT_PHONE_LAYOUT_WIDTH = 460;
-const INSPECTOR_AUTO_COLLAPSE_QUERY = `(max-width: ${INSPECTOR_AUTO_COLLAPSE_WIDTH}px)`;
 const TURN_SETTLE_POLL_INTERVAL_MS = 1500;
 const TURN_SETTLE_POLL_TIMEOUT_MS = 30 * 60 * 1000;
 
@@ -293,9 +346,11 @@ export function App() {
   const [composerContexts, setComposerContexts] = useState<
     ComposerContextReference[]
   >([]);
+  const [pendingComposerSend, setPendingComposerSend] =
+    useState<PendingComposerSend | null>(null);
   const [visualDecisionComposerAction, setVisualDecisionComposerAction] =
     useState<VisualDecisionComposerAction | null>(null);
-  const [mockupPreviewSets, setMockupPreviewSets] = useState<
+  const [savedMockupReviewSets, setSavedMockupReviewSets] = useState<
     Record<string, MockupPreviewSet>
   >({});
   const [projectEmptyStatusById, setProjectEmptyStatusById] = useState<
@@ -312,8 +367,12 @@ export function App() {
   const [actionError, setActionError] = useState<string | null>(null);
   const [retryDraft, setRetryDraft] = useState<SubmissionDraft | null>(null);
   const [sidebarDrawerOpen, setSidebarDrawerOpen] = useState(false);
-  const [mockupPreviewLiveResetToken, setMockupPreviewLiveResetToken] =
-    useState(0);
+  const [livePreviewAutoStartNonces, setLivePreviewAutoStartNonces] = useState<
+    Record<string, number>
+  >({});
+  const [draftPreviewRefreshNonces, setDraftPreviewRefreshNonces] = useState<
+    Record<string, number>
+  >({});
   const [shellWidth, setShellWidth] = useState(() =>
     typeof window === "undefined" ? 1200 : window.innerWidth,
   );
@@ -337,6 +396,16 @@ export function App() {
   const justStartedThreadIdRef = useRef<string | null>(null);
   const turnPollsRef = useRef<Set<string>>(new Set());
   const inFlightDraftsRef = useRef<Map<string, SubmissionDraft>>(new Map());
+  const draftValidationBlockedTurnsRef = useRef<Set<string>>(new Set());
+  const draftPlacementPreflightPassedTurnsRef = useRef<Set<string>>(new Set());
+  const draftFirstDiffPassedTurnsRef = useRef<Set<string>>(new Set());
+  const draftPlacementPreflightTextByTurnRef = useRef<
+    Map<string, Map<string, string>>
+  >(new Map());
+  const hydratingFeatureDraftProjectIdsRef = useRef<Set<string>>(new Set());
+  const interruptTurnRef = useRef<
+    (threadId: string, turnId: string) => Promise<unknown>
+  >(async () => null);
   const inspectorRetargetThreadIdRef = useRef<string | null>(null);
   const desktopRef = useRef(desktop);
 
@@ -397,16 +466,6 @@ export function App() {
     activeThreadProposalSetId &&
       desktop.mockupHistoryProposalSetIds[activeThreadProposalSetId],
   );
-  const activeThreadCodeProposalSetId =
-    desktop.activeThreadId != null
-      ? desktop.codeProposalActiveSetIdsByThreadId[desktop.activeThreadId] ??
-        null
-      : null;
-  const activeThreadCodeProposalCompareSetId =
-    desktop.activeThreadId != null
-      ? desktop.codeProposalCompareSetIdsByThreadId[desktop.activeThreadId] ??
-        null
-      : null;
   const activeFeatureDraftThreadId =
     desktop.activeThreadId ?? activeProject?.lastActiveThreadId ?? null;
   const fallbackProjectFeatureDraftId =
@@ -415,48 +474,45 @@ export function App() {
           .filter(
             (draft) =>
               draft.projectId === activeProject.id &&
-              (draft.lifecycle === "active" || draft.lifecycle === "parked"),
+              draft.lifecycle === "active",
           )
           .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.draftId ??
         null
       : null;
-  const activeThreadFeatureDraftId =
+  const activeThreadFeatureDraftCandidateId =
     activeFeatureDraftThreadId != null
       ? desktop.featureDraftActiveIdsByThreadId[activeFeatureDraftThreadId] ??
         null
+      : fallbackProjectFeatureDraftId;
+  const activeThreadFeatureDraftCandidate =
+    activeThreadFeatureDraftCandidateId && activeProject
+      ? (desktop.featureDrafts[activeThreadFeatureDraftCandidateId] ?? null)
+      : null;
+  const activeThreadFeatureDraftId =
+    activeThreadFeatureDraftCandidate && activeProject
+      ? activeThreadFeatureDraftCandidate.projectId === activeProject.id &&
+        activeThreadFeatureDraftCandidate.lifecycle === "active"
+        ? activeThreadFeatureDraftCandidateId
+        : fallbackProjectFeatureDraftId
       : fallbackProjectFeatureDraftId;
 
   useEffect(() => {
     if (!activeProject) return;
     void refreshProjectEmptyStatus(activeProject);
-    if (activeThreadProposalSetId) {
-      void loadMockupsForProject(
-        activeProject.id,
-        activeThreadProposalSetId,
-        false,
-        false,
-      );
-    }
     // These helpers intentionally run only when the selected project identity
     // changes. Their internal state writes should not retrigger discovery.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [activeProject?.id, activeProject?.path, activeThreadProposalSetId]);
+  }, [activeProject?.id, activeProject?.path]);
 
   const activePreviewProjectId =
     inspector.type === "appPreview" ||
-    inspector.type === "mockupPreview" ||
-    inspector.type === "draftPreview" ||
-    inspector.type === "codeProposalPreview" ||
-    inspector.type === "planPreview"
+    inspector.type === "draftPreview"
       ? inspector.projectId
       : null;
   const previewFocused =
     desktop.layout.inspectorOpen &&
     (inspector.type === "appPreview" ||
-      inspector.type === "planPreview" ||
-      inspector.type === "draftPreview" ||
-      inspector.type === "codeProposalPreview" ||
-      inspector.type === "mockupPreview");
+      inspector.type === "draftPreview");
   const sidebarDockedWidth = sidebarWidthForShell(shellWidth);
   const inspectorWidth = desktop.layout.inspectorOpen
     ? desktop.layout.inspectorWidth
@@ -487,28 +543,24 @@ export function App() {
   const activeProjectEmptyStatus = activeProject
     ? (projectEmptyStatusById[activeProject.id] ?? null)
     : null;
-  const activeProjectHasSavedMockups = activeProject
-    ? Boolean(
-        activeThreadProposalSetId &&
-          !activeThreadProposalSetIsHistory &&
-          mockupPreviewSets[activeThreadProposalSetId]?.mockups.length,
-      )
-    : false;
+  const activeProjectHasSavedMockups = false;
   const activeVisualDecision = useMemo(
     () =>
       latestVisualDecision(activeThread, dismissedVisualDecisionIds, {
         hasActiveCanvasProposal: Boolean(
-          activeThreadCodeProposalSetId ||
-            activeThreadFeatureDraftId ||
+          activeThreadFeatureDraftId ||
             (activeThreadProposalSetId && !activeThreadProposalSetIsHistory),
         ),
         hasSavedMockups: activeProjectHasSavedMockups,
+        ignoredSentinels: [
+          SAVED_MOCKUP_REVIEW_SENTINEL,
+          FEATURE_DRAFT_WORKSPACE_SENTINEL,
+        ],
         projectEmptyStatus: activeProjectEmptyStatus,
       }),
     [
       activeProjectEmptyStatus,
       activeProjectHasSavedMockups,
-      activeThreadCodeProposalSetId,
       activeThreadFeatureDraftId,
       activeThreadProposalSetId,
       activeThreadProposalSetIsHistory,
@@ -517,84 +569,6 @@ export function App() {
     ],
   );
 
-  function preferredLivePreviewSelection(
-    projectId: string,
-    threadId: string | null,
-  ): InspectorSelection {
-    const activeLiveProposal =
-      threadId != null ? latestActiveLiveProposalForThread(desktop, threadId) : null;
-    if (activeLiveProposal && activeLiveProposal.projectId === projectId) {
-      return {
-        type: "planPreview",
-        projectId,
-        proposalTurnId: activeLiveProposal.turnId,
-      };
-    }
-    const project = desktop.projects.find((item) => item.id === projectId);
-    const featureDraftThreadId = threadId ?? project?.lastActiveThreadId ?? null;
-    const featureDraftId =
-      featureDraftThreadId != null
-        ? desktop.featureDraftActiveIdsByThreadId[featureDraftThreadId]?.trim() ||
-          ""
-        : Object.values(desktop.featureDrafts)
-            .filter(
-              (draft) =>
-                draft.projectId === projectId &&
-                (draft.lifecycle === "active" || draft.lifecycle === "parked"),
-            )
-            .sort((left, right) => right.updatedAt - left.updatedAt)[0]?.draftId ??
-          "";
-    const featureDraft = featureDraftId
-      ? desktop.featureDrafts[featureDraftId]
-      : null;
-    if (featureDraftIsActiveForRouting(featureDraft ?? null, projectId)) {
-      return {
-        type: "draftPreview",
-        projectId,
-        draftId: featureDraftId,
-      };
-    }
-    const codeProposalSetId =
-      threadId != null
-        ? desktop.codeProposalActiveSetIdsByThreadId[threadId]?.trim() || ""
-        : "";
-    if (codeProposalSetId) {
-      return {
-        type: "codeProposalPreview",
-        projectId,
-        proposalSetId: codeProposalSetId,
-      };
-    }
-    const compareCodeProposalSetId =
-      threadId != null
-        ? desktop.codeProposalCompareSetIdsByThreadId[threadId]?.trim() || ""
-        : "";
-    if (compareCodeProposalSetId) {
-      return {
-        type: "codeProposalPreview",
-        projectId,
-        proposalSetId: compareCodeProposalSetId,
-      };
-    }
-    const proposalSetId =
-      threadId != null
-        ? desktop.mockupActiveProposalSetIdsByThreadId[threadId]?.trim() || ""
-        : "";
-    if (
-      proposalSetId &&
-      !desktop.mockupHistoryProposalSetIds[proposalSetId]
-    ) {
-      return {
-        type: "mockupPreview",
-        projectId,
-        proposalSetId,
-      };
-    }
-    return {
-      type: "appPreview",
-      projectId,
-    };
-  }
   const activeDraft = activeDraftProjectId
     ? (chatDrafts[activeDraftProjectId] ?? null)
     : null;
@@ -642,11 +616,161 @@ export function App() {
     [],
   );
 
+  const blockFeatureDraftTurn = useCallback(
+    (threadId: string, turnId: string, message: string) => {
+      if (draftValidationBlockedTurnsRef.current.has(turnId)) return;
+      const draft = inFlightDraftsRef.current.get(turnId);
+      if (!draft?.featureDraftOnComplete || !draft.featureDraftId) return;
+      draftValidationBlockedTurnsRef.current.add(turnId);
+      draftPlacementPreflightPassedTurnsRef.current.delete(turnId);
+      draftFirstDiffPassedTurnsRef.current.delete(turnId);
+      draftPlacementPreflightTextByTurnRef.current.delete(turnId);
+      setSendError(message);
+      setDesktop((current) => {
+        const stored = current.featureDrafts[draft.featureDraftId ?? ""];
+        if (!stored) return current;
+        return {
+          ...current,
+          featureDrafts: {
+            ...current.featureDrafts,
+            [stored.draftId]: {
+              ...stored,
+              status: "failed",
+              error: message,
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+      void interruptTurnRef.current(threadId, turnId).catch((error) => {
+        console.warn("Could not interrupt invalid draft turn", error);
+      });
+    },
+    [],
+  );
+
+  const handleDraftCommandStarted = useCallback(
+    (event: { threadId: string; turnId: string; command: string }) => {
+      const draft = inFlightDraftsRef.current.get(event.turnId);
+      if (!draft?.featureDraftOnComplete || !draft.featureDraftId) return;
+      if (draftValidationBlockedTurnsRef.current.has(event.turnId)) return;
+      const validation = validateFeatureDraftPreValidationCommand({
+        command: event.command,
+        firstDiffValidated: draftFirstDiffPassedTurnsRef.current.has(
+          event.turnId,
+        ),
+      });
+      if (validation.ok) return;
+      if (!isBlockingFeatureDraftValidationResult(validation)) {
+        console.warn("Continuing Draft despite soft validation warning", {
+          code: validation.code,
+          message: featureDraftValidationMessage(validation),
+        });
+        return;
+      }
+      blockFeatureDraftTurn(
+        event.threadId,
+        event.turnId,
+        featureDraftValidationMessage(validation),
+      );
+    },
+    [blockFeatureDraftTurn],
+  );
+
+  const handleDraftAgentMessageUpdated = useCallback(
+    (event: {
+      threadId: string;
+      turnId: string;
+      itemId: string;
+      text: string;
+    }) => {
+      const draft = inFlightDraftsRef.current.get(event.turnId);
+      if (!draft?.featureDraftOnComplete || !draft.featureDraftId) return;
+      if (draftValidationBlockedTurnsRef.current.has(event.turnId)) return;
+      if (draftPlacementPreflightPassedTurnsRef.current.has(event.turnId)) {
+        return;
+      }
+      let preflightTextByItem =
+        draftPlacementPreflightTextByTurnRef.current.get(event.turnId);
+      if (!preflightTextByItem) {
+        preflightTextByItem = new Map();
+        draftPlacementPreflightTextByTurnRef.current.set(
+          event.turnId,
+          preflightTextByItem,
+        );
+      }
+      preflightTextByItem.set(event.itemId, event.text);
+      const combinedText = [...preflightTextByItem.values()].join("\n\n");
+      const validation =
+        validateFeatureDraftPlacementPreflight(event.text).ok
+          ? { ok: true as const }
+          : validateFeatureDraftPlacementPreflight(combinedText);
+      if (validation.ok) {
+        draftPlacementPreflightPassedTurnsRef.current.add(event.turnId);
+      }
+    },
+    [],
+  );
+
+  const handleDraftFileChangePatchUpdated = useCallback(
+    (event: {
+      threadId: string;
+      turnId: string;
+      changes: Extract<ThreadItem, { type: "fileChange" }>["changes"];
+    }) => {
+      const draft = inFlightDraftsRef.current.get(event.turnId);
+      if (!draft?.featureDraftOnComplete || !draft.featureDraftId) return;
+      if (draftValidationBlockedTurnsRef.current.has(event.turnId)) return;
+      const preflightTextByItem =
+        draftPlacementPreflightTextByTurnRef.current.get(event.turnId);
+      const preflightText = preflightTextByItem
+        ? [...preflightTextByItem.values()].join("\n\n")
+        : "";
+      const preflightValidated =
+        draftPlacementPreflightPassedTurnsRef.current.has(event.turnId) ||
+        (preflightText
+          ? validateFeatureDraftPlacementPreflight(preflightText).ok
+          : false);
+      if (preflightValidated) {
+        draftPlacementPreflightPassedTurnsRef.current.add(event.turnId);
+      }
+      const validation = validateFeatureDraftFirstEdit({
+        changes: event.changes,
+        placementPreflightValidated: preflightValidated,
+      });
+      if (validation.ok) {
+        if (event.changes.length > 0) {
+          draftFirstDiffPassedTurnsRef.current.add(event.turnId);
+        }
+        return;
+      }
+      if (!isBlockingFeatureDraftValidationResult(validation)) {
+        if (event.changes.length > 0) {
+          draftFirstDiffPassedTurnsRef.current.add(event.turnId);
+        }
+        console.warn("Continuing Draft despite soft validation warning", {
+          code: validation.code,
+          message: featureDraftValidationMessage(validation),
+        });
+        return;
+      }
+      blockFeatureDraftTurn(
+        event.threadId,
+        event.turnId,
+        featureDraftValidationMessage(validation),
+      );
+    },
+    [blockFeatureDraftTurn],
+  );
+
   const { handleNotification, handleServerRequest } = useAppServerEvents({
     activeProjectPath: activeProject?.path ?? null,
     patchThread,
     refreshThreads: (cwd) => refreshThreadsRef.current(cwd),
     syncThread: (threadId) => syncThreadRef.current(threadId),
+    onAgentMessageUpdated: handleDraftAgentMessageUpdated,
+    onCommandExecutionStarted: handleDraftCommandStarted,
+    onFileChangePatchUpdated: handleDraftFileChangePatchUpdated,
     onThreadArchived: handleThreadArchived,
     onThreadNameUpdated: handleThreadNameUpdated,
     onTokenUsageUpdated: handleTokenUsageUpdated,
@@ -670,6 +794,11 @@ export function App() {
     onNotification: handleNotification,
     onServerRequest: handleServerRequest,
   });
+
+  useEffect(() => {
+    interruptTurnRef.current = (threadId, turnId) =>
+      client.request("turn/interrupt", { threadId, turnId });
+  }, [client]);
 
   useEffect(() => {
     const offNotification = client.onNotification((message) => {
@@ -717,22 +846,6 @@ export function App() {
       offNotification();
     };
   }, [activeProject?.path, client, refreshSettings]);
-
-  useEffect(() => {
-    if (!activeProject || !activeThreadProposalSetId) return;
-    if (mockupPreviewSets[activeThreadProposalSetId]) return;
-    void loadMockupsForProject(
-      activeProject.id,
-      activeThreadProposalSetId,
-      false,
-      false,
-    );
-  }, [
-    activeProject?.id,
-    activeProject?.path,
-    activeThreadProposalSetId,
-    mockupPreviewSets,
-  ]);
 
   const { documentText, documentError } = useDocumentPreview(client, inspector);
   const missingOpenAiAuth = Boolean(
@@ -802,7 +915,10 @@ export function App() {
               if (
                 sameRuntimePath(thread.cwd, cwd, runtime.backendMode) &&
                 !listedIds.has(threadId) &&
-                !shouldPreserveLocalThreadDuringRefresh(thread)
+                !shouldPreserveLocalThreadDuringRefresh(
+                  thread,
+                  desktopRef.current.featureDrafts,
+                )
               ) {
                 delete next[threadId];
               }
@@ -916,6 +1032,110 @@ export function App() {
   }, [syncThread]);
 
   useEffect(() => {
+    if (!activeProject || !runtimeReady) return;
+    const hydrationKey = `${activeProject.id}:${activeProject.path}`;
+    if (hydratingFeatureDraftProjectIdsRef.current.has(hydrationKey)) return;
+    hydratingFeatureDraftProjectIdsRef.current.add(hydrationKey);
+
+    void (async () => {
+      try {
+        const records =
+          (await desktopInvoke<RegisteredDraftWorkspace[]>(
+            "draft_workspace_list",
+            {
+              projectPath: activeProject.path,
+            },
+          )) ?? [];
+        const restorableRecords = records.filter(
+          (record) =>
+            record.projectPath &&
+            record.workspacePath &&
+            (record.status === "active" || record.status === "parked"),
+        );
+        const drafts = await Promise.all(
+          restorableRecords.map(async (record) => {
+            const diffRequest = desktopInvoke<DraftWorkspaceDiffResult>(
+              "draft_workspace_diff",
+              {
+                projectPath: activeProject.path,
+                draftId: record.draftId,
+              },
+            );
+            const diff = diffRequest ? await diffRequest.catch(() => null) : null;
+            if (record.threadId && client.connected) {
+              void syncThread(record.threadId, false).catch((error) => {
+                console.warn("Could not hydrate draft chat thread", error);
+              });
+            }
+            return featureDraftFromRegisteredWorkspace(
+              activeProject.id,
+              record,
+              diff,
+            );
+          }),
+        );
+        if (drafts.length === 0) return;
+        setDesktop((current) => {
+          const projectStillExists = current.projects.some(
+            (project) =>
+              project.id === activeProject.id &&
+              sameRuntimePath(
+                project.path,
+                activeProject.path,
+                runtime.backendMode,
+              ),
+          );
+          if (!projectStillExists) return current;
+          const featureDrafts = { ...current.featureDrafts };
+          const activeIdsByThread = {
+            ...current.featureDraftActiveIdsByThreadId,
+          };
+          let changed = false;
+          for (const draft of drafts) {
+            const existing = featureDrafts[draft.draftId];
+            const merged = existing
+              ? mergeHydratedFeatureDraft(existing, draft)
+              : draft;
+            if (
+              !existing ||
+              JSON.stringify(existing) !== JSON.stringify(merged)
+            ) {
+              featureDrafts[draft.draftId] = merged;
+              changed = true;
+            }
+            if (
+              merged.threadId &&
+              merged.lifecycle === "active"
+            ) {
+              if (activeIdsByThread[merged.threadId] !== merged.draftId) {
+                activeIdsByThread[merged.threadId] = merged.draftId;
+                changed = true;
+              }
+            }
+          }
+          if (!changed) return current;
+          return {
+            ...current,
+            featureDrafts,
+            featureDraftActiveIdsByThreadId: activeIdsByThread,
+          };
+        });
+      } catch (error) {
+        console.warn("Could not hydrate saved feature drafts", error);
+      } finally {
+        hydratingFeatureDraftProjectIdsRef.current.delete(hydrationKey);
+      }
+    })();
+  }, [
+    activeProject?.id,
+    activeProject?.path,
+    client.connected,
+    runtime.backendMode,
+    runtimeReady,
+    syncThread,
+  ]);
+
+  useEffect(() => {
     desktopRef.current = desktop;
     const timer = window.setTimeout(() => {
       saveDesktopState(desktop);
@@ -1024,25 +1244,20 @@ export function App() {
     if (previousThreadId === desktop.activeThreadId) return;
     if (!desktop.activeProjectId) return;
     const projectId = desktop.activeProjectId;
-    let shouldResetToLive = false;
     setInspector((current) => {
-      if (
-        current.type !== "mockupPreview" &&
-        current.type !== "draftPreview" &&
-        current.type !== "codeProposalPreview"
-      ) {
+      if (current.type !== "draftPreview") {
         return current;
       }
-      const nextSelection = preferredLivePreviewSelection(
+      const nextSelection = preferredLivePreviewSelection({
+        projects: desktop.projects,
+        featureDrafts: desktop.featureDrafts,
+        featureDraftActiveIdsByThreadId:
+          desktop.featureDraftActiveIdsByThreadId,
         projectId,
-        desktop.activeThreadId,
-      );
-      shouldResetToLive = nextSelection.type === "mockupPreview";
+        threadId: desktop.activeThreadId,
+      });
       return nextSelection;
     });
-    if (shouldResetToLive) {
-      setMockupPreviewLiveResetToken((value) => value + 1);
-    }
   }, [desktop.activeProjectId, desktop.activeThreadId]);
 
   useEffect(() => {
@@ -1053,78 +1268,18 @@ export function App() {
     setInspector((current) => {
       if (
         current.type !== "appPreview" &&
-        current.type !== "mockupPreview" &&
-        current.type !== "draftPreview" &&
-        current.type !== "codeProposalPreview"
+        current.type !== "draftPreview"
       ) {
         return current;
       }
       if (!desktop.activeProjectId) return { type: "empty" };
       if (current.projectId === desktop.activeProjectId) return current;
-      if (
-        current.type === "mockupPreview" ||
-        current.type === "draftPreview" ||
-        current.type === "codeProposalPreview"
-      ) {
+      if (current.type === "draftPreview") {
         return { type: "empty" };
       }
       return { type: "appPreview", projectId: desktop.activeProjectId };
     });
   }, [desktop.activeProjectId]);
-
-  useEffect(() => {
-    if (inspector.type !== "planPreview") return;
-    const proposal = desktop.planProposals[inspector.proposalTurnId];
-    if (proposal?.status === "pending" && proposal.previewSpec) return;
-    if (
-      proposal?.proposalKind === "live_proposal" &&
-      proposal.status === "accepted" &&
-      proposal.previewSpec
-    ) {
-      return;
-    }
-    const projectId =
-      proposal?.projectId && desktop.projects.some((project) => project.id === proposal.projectId)
-        ? proposal.projectId
-        : desktop.activeProjectId;
-    if (!projectId) {
-      setInspector({ type: "empty" });
-      return;
-    }
-    const nextSelection = preferredLivePreviewSelection(
-      projectId,
-      proposal?.threadId ?? desktop.activeThreadId,
-    );
-    if (nextSelection.type === "mockupPreview") {
-      setMockupPreviewLiveResetToken((value) => value + 1);
-    }
-    setInspector(nextSelection);
-  }, [
-    desktop.activeProjectId,
-    desktop.activeThreadId,
-    desktop.planProposals,
-    desktop.projects,
-    inspector,
-  ]);
-
-  useEffect(() => {
-    if (inspector.type !== "mockupPreview") return;
-    const activeLiveProposal =
-      desktop.activeThreadId != null
-        ? latestActiveLiveProposalForThread(desktop, desktop.activeThreadId)
-        : null;
-    if (
-      !activeLiveProposal?.previewSpec ||
-      activeLiveProposal.projectId !== inspector.projectId
-    ) {
-      return;
-    }
-    setInspector({
-      type: "planPreview",
-      projectId: activeLiveProposal.projectId,
-      proposalTurnId: activeLiveProposal.turnId,
-    });
-  }, [desktop, inspector]);
 
   useEffect(() => {
     runningTurnIdRef.current = runningTurnId;
@@ -1146,10 +1301,7 @@ export function App() {
     setInspector((current) => {
       if (
         current.type === "appPreview" ||
-        current.type === "mockupPreview" ||
-        current.type === "draftPreview" ||
-        current.type === "codeProposalPreview" ||
-        current.type === "planPreview"
+        current.type === "draftPreview"
       ) {
         return current;
       }
@@ -1289,7 +1441,41 @@ export function App() {
   function handleTurnCompleted(threadId: string, turn: Turn) {
     const draft = inFlightDraftsRef.current.get(turn.id);
     if (!draft) return;
+    const turnHadDraftFileChanges = draftFirstDiffPassedTurnsRef.current.has(
+      turn.id,
+    );
     inFlightDraftsRef.current.delete(turn.id);
+    const validationBlocked = draftValidationBlockedTurnsRef.current.delete(
+      turn.id,
+    );
+    draftPlacementPreflightPassedTurnsRef.current.delete(turn.id);
+    draftFirstDiffPassedTurnsRef.current.delete(turn.id);
+    draftPlacementPreflightTextByTurnRef.current.delete(turn.id);
+    if (validationBlocked) return;
+    const project = desktopRef.current.projects.find(
+      (candidate) => candidate.id === draft.projectId,
+    );
+    const targetFeatureDraftId = draft.featureDraftId?.trim() || "";
+    if (
+      (turn.status === "failed" || turn.status === "interrupted") &&
+      draft.featureDraftOnComplete &&
+      targetFeatureDraftId &&
+      project &&
+      turnHadDraftFileChanges
+    ) {
+      setSendError(null);
+      setRetryDraft((current) => (current === draft ? null : current));
+      void finalizeFeatureDraftTurn(
+        project.id,
+        targetFeatureDraftId,
+        threadId,
+        turn.id,
+        draft.visiblePrompt?.trim() || draft.prompt,
+        finalAgentText(turn),
+        { allowIncompleteFinalResponse: true },
+      );
+      return;
+    }
     if (turn.status === "failed" || turn.status === "interrupted") {
       setRetryDraft(draft);
       if (draft.featureDraftId) {
@@ -1313,14 +1499,10 @@ export function App() {
     }
     setSendError(null);
     setRetryDraft((current) => (current === draft ? null : current));
-    const project = desktopRef.current.projects.find(
-      (candidate) => candidate.id === draft.projectId,
-    );
     if (project) {
       void refreshProjectEmptyStatus(project);
     }
     const targetProposalSetId = draft.proposalSetId?.trim() || "";
-    const targetFeatureDraftId = draft.featureDraftId?.trim() || "";
     if (draft.featureDraftOnComplete && targetFeatureDraftId && project) {
       void finalizeFeatureDraftTurn(
         project.id,
@@ -1328,42 +1510,18 @@ export function App() {
         threadId,
         turn.id,
         draft.visiblePrompt?.trim() || draft.prompt,
+        finalAgentText(turn),
       );
       return;
-    }
-    if (draft.codeProposalOnComplete && targetProposalSetId && project) {
-      void finalizeCodeProposalTurn(
-        project.id,
-        targetProposalSetId,
-        turn.id,
-        draft.visiblePrompt?.trim() || draft.prompt,
-      );
-      return;
-    }
-    if (draft.codeProposalHistoryOnComplete && targetProposalSetId) {
-      setDesktop((current) =>
-        markCodeProposalSetAsApplied(current, targetProposalSetId),
-      );
-      if (project) {
-        void refreshProjectEmptyStatus(project);
-        openCodeProposalInspector(project.id, targetProposalSetId);
-      }
     }
     if (draft.settings.planMode || draft.liveOverlayProposalOnComplete) {
       const finalText = finalAgentText(turn);
-      const previewSpec = parsePlanPreviewSpec(finalText);
+      const previewSpec = null;
       const visiblePrompt = draft.visiblePrompt?.trim() || draft.prompt;
       setDesktop((current) => {
         const proposal = current.planProposals[turn.id];
         if (!proposal) return current;
-        const liveProposalBacking = draft.liveOverlayProposalOnComplete
-          ? liveProposalBackingForPreviewSpec(
-              previewSpec,
-              previewSpec?.variants[0]?.id ??
-                proposal.previewSelectedVariantId ??
-                null,
-            )
-          : proposal.proposalBacking;
+        const liveProposalBacking = proposal.proposalBacking;
         return {
           ...current,
           planProposals: {
@@ -1372,10 +1530,7 @@ export function App() {
               ...proposal,
               prompt: visiblePrompt,
               previewSpec,
-              previewSelectedVariantId:
-                previewSpec?.variants[0]?.id ??
-                proposal.previewSelectedVariantId ??
-                null,
+              previewSelectedVariantId: null,
               proposalKind: draft.liveOverlayProposalOnComplete
                 ? "live_proposal"
                 : classifyPlanProposalKind(
@@ -1385,10 +1540,7 @@ export function App() {
               proposalBacking: draft.liveOverlayProposalOnComplete
                 ? liveProposalBacking
                 : proposal.proposalBacking,
-              buildStrategy:
-                draft.liveOverlayProposalOnComplete && liveProposalBacking
-                  ? buildStrategyForProposalBacking(liveProposalBacking)
-                  : proposal.buildStrategy,
+              buildStrategy: proposal.buildStrategy,
               updatedAt: Date.now(),
             },
           },
@@ -1396,9 +1548,8 @@ export function App() {
       });
       if (draft.liveOverlayProposalOnComplete && previewSpec && project) {
         setInspector({
-          type: "planPreview",
+          type: "appPreview",
           projectId: project.id,
-          proposalTurnId: turn.id,
         });
         setDesktop((current) => ({
           ...current,
@@ -1542,22 +1693,7 @@ export function App() {
   }
 
   function openMockupInspector(projectId: string, proposalSetId: string) {
-    setInspector({ type: "mockupPreview", projectId, proposalSetId });
-    setDesktop((current) => ({
-      ...current,
-      layout: {
-        ...current.layout,
-        inspectorOpen: true,
-        inspectorWidth: Math.max(
-          current.layout.inspectorWidth,
-          preferredPreviewInspectorWidth(),
-        ),
-      },
-    }));
-  }
-
-  function openCodeProposalInspector(projectId: string, proposalSetId: string) {
-    setInspector({ type: "codeProposalPreview", projectId, proposalSetId });
+    setInspector({ type: "appPreview", projectId });
     setDesktop((current) => ({
       ...current,
       layout: {
@@ -1590,13 +1726,14 @@ export function App() {
     project: Project,
     draftId: string,
     originalPrompt: string,
+    threadId: string | null = activeThread?.id ?? null,
   ) {
     const prepared = await desktopInvoke<PreparedDraftWorkspace>(
       "draft_workspace_prepare",
       {
         projectPath: project.path,
         draftId,
-        threadId: activeThread?.id ?? null,
+        threadId,
         name: featureDraftName(originalPrompt),
         goal: originalPrompt,
         currentSummary:
@@ -1615,7 +1752,7 @@ export function App() {
       draftId: prepared.draftId,
       registryId: prepared.registryId,
       projectId: project.id,
-      threadId: activeThread?.id ?? prepared.threadId ?? null,
+      threadId: threadId ?? prepared.threadId ?? null,
       turnId: null,
       name: prepared.name || "Draft",
       slug: prepared.slug,
@@ -1649,6 +1786,8 @@ export function App() {
     threadId: string,
     turnId: string,
     latestPrompt?: string,
+    finalText = "",
+    options: { allowIncompleteFinalResponse?: boolean } = {},
   ) {
     const stored = desktopRef.current.featureDrafts[draftId];
     if (!stored) return;
@@ -1666,11 +1805,62 @@ export function App() {
       if (!diff) throw new Error("Draft diff was unavailable.");
       const changedFiles = diff.changedFiles ?? [];
       const summary = codeProposalChangeSummary(changedFiles);
+      const validation =
+        options.allowIncompleteFinalResponse && changedFiles.length > 0
+          ? validateFeatureDraftChangedPaths(changedFiles)
+          : validateFeatureDraftCompletion({
+              changedFiles,
+              finalText,
+            });
+      if (!validation.ok) {
+        const message = featureDraftValidationMessage(validation);
+        void desktopInvoke("draft_workspace_update_brief", {
+          projectPath: project?.path,
+          draftId,
+          goal: latestPrompt?.trim() || stored.originalPrompt,
+          currentSummary: `Draft blocked by feature-in-place validation: ${message}`,
+          affectedRoutes: stored.affectedRoutes,
+          mockAssumptions: stored.mockAssumptions,
+          buildPlan: [
+            "Revise the Draft so the feature appears in the existing app flow.",
+            "Name the fake adapters/state and the real integration Build this should replace.",
+          ],
+        })?.catch(() => null);
+        setSendError(message);
+        setDesktop((current) => {
+          const currentDraft = current.featureDrafts[draftId];
+          if (!currentDraft) return current;
+          return {
+            ...current,
+            featureDrafts: {
+              ...current.featureDrafts,
+              [draftId]: {
+                ...currentDraft,
+                threadId,
+                turnId,
+                lifecycle: diff.status ?? currentDraft.lifecycle,
+                status: "failed",
+                error: message,
+                previewOwnerId:
+                  diff.previewOwnerId || currentDraft.previewOwnerId,
+                originalPrompt:
+                  latestPrompt?.trim() || currentDraft.originalPrompt,
+                summary,
+                changedFiles,
+                updatedAt: Date.now(),
+              },
+            },
+          };
+        });
+        return;
+      }
       void desktopInvoke("draft_workspace_update_brief", {
         projectPath: project?.path,
         draftId,
         goal: latestPrompt?.trim() || stored.originalPrompt,
-        currentSummary: summary,
+        currentSummary: options.allowIncompleteFinalResponse
+          ? `${summary}; final verification was interrupted, but Draft source changes were preserved.`
+          : summary,
         affectedRoutes: stored.affectedRoutes,
         mockAssumptions: stored.mockAssumptions,
         buildPlan: [
@@ -1761,9 +1951,10 @@ export function App() {
     });
     try {
       await desktopInvoke("app_preview_stop", {
+        cancelPendingStart: true,
         projectPath: draft.workspacePath,
       })?.catch(() => null);
-      const result = await desktopInvoke<ProposalWorkspaceApplyResult>(
+      const result = await desktopInvoke<DraftWorkspaceApplyResult>(
         "draft_workspace_apply",
         {
           projectPath: project.path,
@@ -1807,24 +1998,11 @@ export function App() {
         approvedDecisions: ["Built into Live after explicit Build this."],
         buildPlan: ["Built into Live."],
       })?.catch(() => null);
-      await refreshProjectEmptyStatus(project);
-      const previewResult = await desktopInvoke<{
-        status?: string;
-        reason?: string;
-      }>("app_preview_start", {
-        projectPath: project.path,
-      })?.catch((error) => ({
-        status: "unavailable",
-        reason: errorMessage(error),
-      }));
-      if (previewResult && previewResult.status !== "running") {
-        setSendError(
-          `Built draft, but Live preview did not start: ${
-            previewResult.reason || "Preview unavailable."
-          }`,
-        );
-      }
       openPreviewInspector(project.id);
+      setLivePreviewAutoStartNonces((current) => ({
+        ...current,
+        [project.id]: (current[project.id] ?? 0) + 1,
+      }));
       return true;
     } catch (error) {
       const message = `Could not build draft: ${errorMessage(error)}`;
@@ -1849,6 +2027,81 @@ export function App() {
     }
   }
 
+  function inFlightTurnIdForFeatureDraft(draftId: string) {
+    for (const [turnId, draft] of inFlightDraftsRef.current.entries()) {
+      if (draft.featureDraftOnComplete && draft.featureDraftId === draftId) {
+        return turnId;
+      }
+    }
+    return null;
+  }
+
+  function refreshFeatureDraftPreview(draft: FeatureDraft) {
+    setSendError(null);
+    setDraftPreviewRefreshNonces((current) => ({
+      ...current,
+      [draft.draftId]: (current[draft.draftId] ?? 0) + 1,
+    }));
+    openFeatureDraftInspector(draft.projectId, draft.draftId);
+  }
+
+  async function continueFeatureDraft(draft: FeatureDraft) {
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === draft.projectId,
+    );
+    if (!project) {
+      setSendError("That draft belongs to a project that is no longer available.");
+      return false;
+    }
+    const threadId = draft.threadId ?? desktop.activeThreadId;
+    if (!threadId) {
+      setSendError("Open the draft's chat before continuing it.");
+      return false;
+    }
+    const inFlightTurnId = inFlightTurnIdForFeatureDraft(draft.draftId);
+    if (inFlightTurnId) {
+      setSendError(null);
+      setDesktop((current) => {
+        const stored = current.featureDrafts[draft.draftId];
+        if (!stored) return current;
+        return {
+          ...current,
+          featureDrafts: {
+            ...current.featureDrafts,
+            [draft.draftId]: {
+              ...stored,
+              status: "generating",
+              turnId: inFlightTurnId,
+              updatedAt: Date.now(),
+            },
+          },
+        };
+      });
+      openFeatureDraftInspector(project.id, draft.draftId);
+      return true;
+    }
+    const repairPrompt =
+      "Continue this Draft and repair it until it is ready for review. Keep Live source unchanged.";
+    const liveContext = liveAppReviewContext(project, activeComposerContexts);
+    return sendDraft(
+      {
+        prompt: featureDraftRevisionPrompt(draft, repairPrompt, liveContext),
+        visiblePrompt: "Continue Draft",
+        projectId: project.id,
+        settings: { ...project.settings, planMode: false },
+        attachments: [],
+        contexts: [],
+        createdAt: Date.now(),
+        localDraftProjectId: null,
+        targetThreadId: threadId,
+        cwdOverride: draft.workspacePath,
+        featureDraftOnComplete: true,
+        featureDraftId: draft.draftId,
+      },
+      { clearComposer: false },
+    );
+  }
+
   async function parkFeatureDraft(draft: FeatureDraft) {
     const project = desktop.projects.find(
       (candidate) => candidate.id === draft.projectId,
@@ -1860,6 +2113,7 @@ export function App() {
     setSendError(null);
     try {
       void desktopInvoke("app_preview_stop", {
+        cancelPendingStart: true,
         projectPath: draft.workspacePath,
       })?.catch(() => null);
       await desktopInvoke<PreparedDraftWorkspace>(
@@ -1934,6 +2188,7 @@ export function App() {
     setSendError(null);
     try {
       void desktopInvoke("app_preview_stop", {
+        cancelPendingStart: true,
         projectPath: draft.workspacePath,
       })?.catch(() => null);
       await desktopInvoke<PreparedDraftWorkspace>(
@@ -1948,8 +2203,10 @@ export function App() {
         },
       );
     } catch (error) {
-      setSendError(`Could not discard draft: ${errorMessage(error)}`);
-      return false;
+      if (!isDraftWorkspaceNotRegisteredError(error)) {
+        setSendError(`Could not discard draft: ${errorMessage(error)}`);
+        return false;
+      }
     }
     setDesktop((current) => ({
       ...current,
@@ -1973,325 +2230,6 @@ export function App() {
       setInspector({ type: "empty" });
     }
     return true;
-  }
-
-  function selectCodeProposal(proposalSetId: string, optionId: "A" | "B" | "C") {
-    setDesktop((current) => {
-      const previewSet = current.codeProposalSets[proposalSetId];
-      if (!previewSet) return current;
-      return {
-        ...current,
-        codeProposalSets: {
-          ...current.codeProposalSets,
-          [proposalSetId]: {
-            ...previewSet,
-            selectedOptionId: optionId,
-            updatedAt: Date.now(),
-          },
-        },
-      };
-    });
-  }
-
-  async function prepareCodeProposalSet(
-    project: Project,
-    proposalSetId: string,
-    optionIds: Array<"A" | "B" | "C">,
-    originalPrompt: string,
-  ) {
-    const prepared = await desktopInvoke<PreparedProposalWorkspaces>(
-      "proposal_workspaces_prepare",
-      {
-        projectPath: project.path,
-        proposalSetId,
-        optionIds,
-      },
-    );
-    if (!prepared) {
-      throw new Error("Could not prepare proposal workspaces.");
-    }
-    const now = Date.now();
-    const previewSet: CodeProposalSet = {
-      proposalSetId: prepared.proposalSetId,
-      registryId: prepared.registryId,
-      projectId: project.id,
-      threadId: activeThread?.id ?? null,
-      turnId: null,
-      proposalBacking: "code_backed_workspace",
-      buildStrategy: "promote_code_workspace",
-      rootPath: prepared.rootPath,
-      originalPrompt,
-      selectedOptionId: prepared.options[0]?.id ?? null,
-      options: prepared.options.map((option) => ({
-        id: option.id,
-        title: `Option ${option.id}`,
-        summary: "Generating runnable proposal.",
-        workspacePath: option.workspacePath,
-        previewOwnerId: option.previewOwnerId,
-        status: "generating",
-        changedFiles: [],
-      })),
-      status: "generating",
-      createdAt: now,
-      updatedAt: now,
-    };
-    setDesktop((current) => ({
-      ...current,
-      codeProposalSets: {
-        ...current.codeProposalSets,
-        [previewSet.proposalSetId]: previewSet,
-      },
-    }));
-    return prepared;
-  }
-
-  async function prepareAdditionalCodeProposalOption(
-    project: Project,
-    previewSet: CodeProposalSet,
-    request: CodeProposalAddOptionRequest,
-  ) {
-    const sourceOption = request.sourceOptionId
-      ? previewSet.options.find(
-          (candidate) => candidate.id === request.sourceOptionId,
-        )
-      : null;
-    const prepared = await desktopInvoke<PreparedProposalWorkspaces>(
-      "proposal_workspace_add_option",
-      {
-        projectPath: project.path,
-        proposalSetId: previewSet.proposalSetId,
-        optionId: request.optionId,
-        sourceWorkspacePath: sourceOption?.workspacePath ?? "",
-      },
-    );
-    const preparedOption = prepared?.options[0] ?? null;
-    if (!prepared || !preparedOption) {
-      throw new Error("Could not prepare the requested proposal option.");
-    }
-    const now = Date.now();
-    setDesktop((current) => {
-      const stored =
-        current.codeProposalSets[previewSet.proposalSetId] ?? previewSet;
-      const nextOption: CodeProposalOption = {
-        id: preparedOption.id,
-        title: `Option ${preparedOption.id}`,
-        summary: "Generating runnable proposal.",
-        workspacePath: preparedOption.workspacePath,
-        previewOwnerId: preparedOption.previewOwnerId,
-        status: "generating",
-        changedFiles: [],
-      };
-      return {
-        ...current,
-        codeProposalSets: {
-          ...current.codeProposalSets,
-          [stored.proposalSetId]: {
-            ...stored,
-            registryId: prepared.registryId || stored.registryId,
-            rootPath: prepared.rootPath || stored.rootPath,
-            selectedOptionId: preparedOption.id,
-            options: sortCodeProposalOptions([
-              ...stored.options.filter(
-                (option) => option.id !== preparedOption.id,
-              ),
-              nextOption,
-            ]),
-            status: "generating",
-            updatedAt: now,
-          },
-        },
-      };
-    });
-    return prepared;
-  }
-
-  async function applyCodeProposal(
-    previewSet: CodeProposalSet,
-    option: CodeProposalOption,
-  ) {
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === previewSet.projectId,
-    );
-    if (!project) {
-      setSendError(
-        "That proposal belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    setSendError(null);
-    setDesktop((current) => {
-      const stored = current.codeProposalSets[previewSet.proposalSetId];
-      if (!stored) return current;
-      return {
-        ...current,
-        codeProposalSets: {
-          ...current.codeProposalSets,
-          [stored.proposalSetId]: updateCodeProposalOption(stored, option.id, {
-            status: "applying",
-          }),
-        },
-      };
-    });
-    try {
-      void desktopInvoke("app_preview_stop", {
-        projectPath: option.workspacePath,
-      })?.catch(() => null);
-      const result = await desktopInvoke<ProposalWorkspaceApplyResult>(
-        "proposal_workspace_apply",
-        {
-          projectPath: project.path,
-          workspacePath: option.workspacePath,
-        },
-      );
-      if (!result?.ok) {
-        const firstConflict = result?.conflicts?.[0];
-        throw new Error(
-          firstConflict
-            ? `Cannot apply ${firstConflict.path}: ${firstConflict.reason}`
-            : "The proposal could not be applied.",
-        );
-      }
-      setDesktop((current) => {
-        const stored = current.codeProposalSets[previewSet.proposalSetId];
-        if (!stored) return current;
-        const updated = updateCodeProposalOption(stored, option.id, {
-          status: "applied",
-          changedFiles: result.changedFiles,
-          appliedAt: Date.now(),
-        });
-        return {
-          ...current,
-          codeProposalSets: {
-            ...current.codeProposalSets,
-            [stored.proposalSetId]: {
-              ...updated,
-              selectedOptionId: option.id,
-              status: "applied",
-              updatedAt: Date.now(),
-            },
-          },
-          codeProposalActiveSetIdsByThreadId: removeRecordKey(
-            current.codeProposalActiveSetIdsByThreadId,
-            stored.threadId,
-          ),
-          codeProposalCompareSetIdsByThreadId: stored.threadId
-            ? {
-                ...current.codeProposalCompareSetIdsByThreadId,
-                [stored.threadId]: stored.proposalSetId,
-              }
-            : current.codeProposalCompareSetIdsByThreadId,
-        };
-      });
-      await refreshProjectEmptyStatus(project);
-      void desktopInvoke("app_preview_start", {
-        projectPath: project.path,
-      })?.catch(() => null);
-      openCodeProposalInspector(project.id, previewSet.proposalSetId);
-    } catch (error) {
-      const message = `Could not apply proposal: ${errorMessage(error)}`;
-      setSendError(message);
-      setDesktop((current) => {
-        const stored = current.codeProposalSets[previewSet.proposalSetId];
-        if (!stored) return current;
-        return {
-          ...current,
-          codeProposalSets: {
-            ...current.codeProposalSets,
-            [stored.proposalSetId]: {
-              ...updateCodeProposalOption(stored, option.id, {
-                status: "ready",
-              }),
-              status: "failed",
-              error: message,
-              updatedAt: Date.now(),
-            },
-          },
-        };
-      });
-    }
-  }
-
-  async function finalizeCodeProposalTurn(
-    projectId: string,
-    proposalSetId: string,
-    turnId: string,
-    latestPrompt?: string,
-  ) {
-    const previewSet = desktopRef.current.codeProposalSets[proposalSetId];
-    if (!previewSet) return;
-    try {
-      const diffs = (
-        await Promise.all(
-        previewSet.options.map((option) =>
-          desktopInvoke<ProposalWorkspaceDiffResult>(
-            "proposal_workspace_diff",
-            { workspacePath: option.workspacePath },
-          ),
-        ),
-        )
-      ).filter((diff): diff is ProposalWorkspaceDiffResult => Boolean(diff));
-      setDesktop((current) => {
-        const stored = current.codeProposalSets[proposalSetId];
-        if (!stored) return current;
-        const updatedOptions = stored.options.map((option) => {
-          const diff = diffs.find((candidate) => candidate.optionId === option.id);
-          return {
-            ...option,
-            previewOwnerId: diff?.previewOwnerId || option.previewOwnerId,
-            status: "ready" as const,
-            changedFiles: diff?.changedFiles ?? [],
-            summary: codeProposalChangeSummary(diff?.changedFiles ?? []),
-          };
-        });
-        return {
-          ...current,
-          codeProposalSets: {
-            ...current.codeProposalSets,
-            [proposalSetId]: {
-              ...stored,
-              turnId,
-              originalPrompt: latestPrompt?.trim() || stored.originalPrompt,
-              options: updatedOptions,
-              selectedOptionId:
-                stored.selectedOptionId ?? updatedOptions[0]?.id ?? null,
-              status: "ready",
-              updatedAt: Date.now(),
-            },
-          },
-          codeProposalActiveSetIdsByThreadId: stored.threadId
-            ? {
-                ...current.codeProposalActiveSetIdsByThreadId,
-                [stored.threadId]: proposalSetId,
-              }
-            : current.codeProposalActiveSetIdsByThreadId,
-          codeProposalCompareSetIdsByThreadId: stored.threadId
-            ? {
-                ...current.codeProposalCompareSetIdsByThreadId,
-                [stored.threadId]: proposalSetId,
-              }
-            : current.codeProposalCompareSetIdsByThreadId,
-        };
-      });
-      openCodeProposalInspector(projectId, proposalSetId);
-    } catch (error) {
-      setSendError(`Could not finalize proposal workspaces: ${errorMessage(error)}`);
-      setDesktop((current) => {
-        const stored = current.codeProposalSets[proposalSetId];
-        if (!stored) return current;
-        return {
-          ...current,
-          codeProposalSets: {
-            ...current.codeProposalSets,
-            [proposalSetId]: {
-              ...stored,
-              status: "failed",
-              error: errorMessage(error),
-              updatedAt: Date.now(),
-            },
-          },
-        };
-      });
-    }
   }
 
   async function refreshProjectEmptyStatus(
@@ -2356,7 +2294,7 @@ export function App() {
         mockups: result.mockups,
       };
       if (previewSet.mockups.length === 0) {
-        setMockupPreviewSets((current) => {
+        setSavedMockupReviewSets((current) => {
           if (!current[proposalSetId]) return current;
           const next = { ...current };
           delete next[proposalSetId];
@@ -2367,7 +2305,7 @@ export function App() {
         }
         return;
       }
-      setMockupPreviewSets((current) => ({
+      setSavedMockupReviewSets((current) => ({
         ...current,
         [previewSet.proposalSetId]: {
           ...previewSet,
@@ -2390,7 +2328,7 @@ export function App() {
   }
 
   function selectMockup(proposalSetId: string, mockupId: string) {
-    setMockupPreviewSets((current) => {
+    setSavedMockupReviewSets((current) => {
       const previewSet = current[proposalSetId];
       if (!previewSet) return current;
       return {
@@ -2424,75 +2362,6 @@ export function App() {
     if (!desktop.activeThreadId) {
       setActiveDraftProjectId(project.id);
     }
-  }
-
-  function stageBuildCodeProposal(
-    previewSet: CodeProposalSet,
-    option: CodeProposalOption,
-  ) {
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === previewSet.projectId,
-    );
-    if (!project) {
-      setSendError(
-        "That proposal belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    setVisualDecisionComposerAction(null);
-    setComposerText(`Implement option ${option.id}`);
-    setAttachments([]);
-    selectCodeProposal(previewSet.proposalSetId, option.id);
-    updateProject(project.id, (candidate) => ({
-      ...candidate,
-      settings: { ...candidate.settings, planMode: false },
-    }));
-    openCodeProposalInspector(previewSet.projectId, previewSet.proposalSetId);
-    if (!desktop.activeThreadId) {
-      setActiveDraftProjectId(project.id);
-    }
-    setSendError(null);
-    window.requestAnimationFrame(() => {
-      document.querySelector<HTMLTextAreaElement>(".composer textarea")?.focus();
-    });
-  }
-
-  function transferCodeProposalLane(
-    previewSet: CodeProposalSet,
-    from: "live" | "A" | "B" | "C",
-    to: "live" | "A" | "B" | "C",
-  ) {
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === previewSet.projectId,
-    );
-    if (!project) {
-      setSendError(
-        "That proposal belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    const visiblePrompt =
-      to === "live"
-        ? `Update Live with option ${from.toUpperCase()}`
-        : from === "live"
-          ? `Update option ${to.toUpperCase()} from Live`
-          : `Update option ${to.toUpperCase()} from option ${from.toUpperCase()}`;
-    void sendDraft(
-      {
-        prompt: visiblePrompt,
-        visiblePrompt,
-        projectId: project.id,
-        settings: project.settings,
-        attachments: [],
-        contexts: [],
-        createdAt: Date.now(),
-        targetThreadId: desktop.activeThreadId,
-        proposalSetId: previewSet.proposalSetId,
-        codeProposalHistoryOnComplete: to === "live",
-        codeProposalOnComplete: to !== "live",
-      },
-      { clearComposer: true },
-    );
   }
 
   function chooseVisualDecisionOption(
@@ -2556,13 +2425,14 @@ export function App() {
     setActionError(null);
     setSendError(null);
     setRetryDraft(null);
-    const nextSelection = preferredLivePreviewSelection(
-      project.id,
-      desktop.activeThreadId,
-    );
-    if (nextSelection.type === "mockupPreview") {
-      setMockupPreviewLiveResetToken((value) => value + 1);
-    }
+    const nextSelection = preferredLivePreviewSelection({
+      projects: desktop.projects,
+      featureDrafts: desktop.featureDrafts,
+      featureDraftActiveIdsByThreadId:
+        desktop.featureDraftActiveIdsByThreadId,
+      projectId: project.id,
+      threadId: desktop.activeThreadId,
+    });
     setInspector(nextSelection);
     inspectorRetargetThreadIdRef.current = null;
     const preferredWidth = preferredPreviewInspectorWidth();
@@ -2582,7 +2452,10 @@ export function App() {
   }
 
   function showPlanUiImpact(proposal: PlanProposal) {
-    selectPlanProposalPreview(proposal);
+    const project = desktop.projects.find(
+      (candidate) => candidate.id === proposal.projectId,
+    );
+    if (project) selectAppPreview(project);
   }
 
   function selectPlanProposalPreview(proposal: PlanProposal) {
@@ -2596,18 +2469,10 @@ export function App() {
       );
       return;
     }
-    if (!latestProposal.previewSpec) {
-      setSendError("That plan does not have a live app preview.");
-      return;
-    }
     setActionError(null);
     setSendError(null);
     setRetryDraft(null);
-    setInspector({
-      type: "planPreview",
-      projectId: project.id,
-      proposalTurnId: latestProposal.turnId,
-    });
+    setInspector({ type: "appPreview", projectId: project.id });
     inspectorRetargetThreadIdRef.current = null;
     const preferredWidth = preferredPreviewInspectorWidth();
     setDesktop((current) => ({
@@ -2714,161 +2579,24 @@ export function App() {
     areaMark: PlanPreviewAreaMark | null,
     meta: {
       previewUrl: string;
+      route?: string;
       viewport: "desktop" | "mobile";
       thumbnailDataUrl?: string;
       label?: string;
-      source?: ComposerAppPreviewContext["source"];
-      highlightId?: string;
+      surface?: ComposerAppPreviewContext["surface"];
+      draftId?: string;
+      threadId?: string | null;
     } & CanvasVisualReferenceMeta,
   ) {
-    setComposerContexts((current) => {
-      if (!areaMark) {
-        return current.filter(
-          (context) =>
-            context.type !== "appPreview" || context.projectId !== project.id,
-        );
-      }
-      const source = meta.source ?? "userMark";
-      const existingContext = current.find(
-        (context): context is ComposerAppPreviewContext =>
-          context.type === "appPreview" &&
-          context.projectId === project.id &&
-          (source === "proposalHighlight"
-            ? context.source === "proposalHighlight" &&
-              context.highlightId === meta.highlightId
-            : context.areaMark.createdAt === areaMark.createdAt),
-      );
-      const markNumber =
-        existingContext?.markNumber ??
-        (source === "proposalHighlight"
-          ? nextAppPreviewChangeNumber(current, project.id)
-          : nextAppPreviewMarkNumber(current, project.id));
-      const highlightLabel =
-        source === "proposalHighlight" ? `Change ${markNumber}` : null;
-      const nextContext: ComposerAppPreviewContext = {
-        type: "appPreview",
-        id:
-          existingContext?.id ??
-          (source === "proposalHighlight"
-            ? `app-preview:${project.id}:proposal-highlight:${meta.highlightId ?? areaMark.createdAt}`
-            : `app-preview:${project.id}:${areaMark.createdAt}`),
-        projectId: project.id,
-        projectName: project.name,
-        previewUrl: meta.previewUrl,
-        viewport: meta.viewport,
-        markLabel: highlightLabel ?? existingContext?.markLabel ?? `Mark ${markNumber}`,
-        markNumber,
+    setComposerContexts((current) =>
+      upsertAppPreviewMarkContext({
+        contexts: current,
+        project,
         areaMark,
-        thumbnailDataUrl:
-          meta.thumbnailDataUrl ?? existingContext?.thumbnailDataUrl,
-        source,
-        highlightId: meta.highlightId,
-        threadId: meta.threadId ?? existingContext?.threadId,
-        proposalTurnId:
-          meta.proposalTurnId ?? existingContext?.proposalTurnId,
-        proposalOptionId:
-          meta.proposalOptionId ?? existingContext?.proposalOptionId,
-        canvasLane: meta.canvasLane ?? existingContext?.canvasLane,
-        canvasId: meta.canvasId ?? existingContext?.canvasId,
-        sourceFile: meta.sourceFile ?? existingContext?.sourceFile,
-        componentName: meta.componentName ?? existingContext?.componentName,
-        screenshotRef: meta.screenshotRef ?? existingContext?.screenshotRef,
-        targetResolutionKind:
-          meta.targetResolutionKind ?? existingContext?.targetResolutionKind,
-        targetResolutionConfidence:
-          meta.targetResolutionConfidence ??
-          existingContext?.targetResolutionConfidence,
-      };
-      const withoutCurrentMark = current.filter(
-        (context) =>
-          context.type !== "appPreview" ||
-          context.projectId !== project.id ||
-          (source === "proposalHighlight"
-            ? context.source !== "proposalHighlight" ||
-              context.highlightId !== nextContext.highlightId
-            : context.areaMark.createdAt !== areaMark.createdAt),
-      );
-      return [...withoutCurrentMark, nextContext];
-    });
-    if (!desktop.activeThreadId) {
-      setActiveDraftProjectId(project.id);
-    }
-    setSendError(null);
-  }
-
-  function attachMockupPreviewMark(
-    previewSet: MockupPreviewSet,
-    mockup: SavedMockup,
-    areaMark: PlanPreviewAreaMark,
-    meta?: {
-      label?: string;
-      source?: ComposerMockupPreviewContext["source"];
-      viewport?: ComposerMockupPreviewContext["viewport"];
-      highlightId?: string;
-      thumbnailDataUrl?: string;
-    },
-  ) {
-    const project = desktop.projects.find(
-      (candidate) => candidate.id === previewSet.projectId,
+        meta,
+        activeThreadId: desktop.activeThreadId,
+      }),
     );
-    if (!project) {
-      setSendError(
-        "That mockup belongs to a project that is no longer available.",
-      );
-      return;
-    }
-    setComposerContexts((current) => {
-      const source = meta?.source ?? "userMark";
-      const markNumber =
-        source === "proposalHighlight"
-          ? nextMockupChangeNumber(
-              current,
-              previewSet.projectId,
-              previewSet.proposalSetId,
-              mockup.id,
-            )
-          : nextMockupMarkNumber(
-              current,
-              previewSet.projectId,
-              previewSet.proposalSetId,
-              mockup.id,
-            );
-      const nextContext: ComposerMockupPreviewContext = {
-        type: "mockupPreview",
-        id: `mockup-preview:${previewSet.projectId}:${mockup.id}:${meta?.source ?? "userMark"}:${areaMark.createdAt}`,
-        projectId: previewSet.projectId,
-        projectName: project.name,
-        proposalSetId: previewSet.proposalSetId,
-        artifactKind: previewSet.artifactKind,
-        mockupId: mockup.id,
-        mockupLabel: mockup.label || mockup.id,
-        mockupTitle: mockup.title,
-        markLabel:
-          source === "proposalHighlight"
-            ? `Change ${markNumber}`
-            : `Mark ${markNumber}`,
-        markNumber,
-        filePath: mockup.filePath,
-        viewport: meta?.viewport === "mobile" ? "mobile" : "desktop",
-        areaMark,
-        thumbnailDataUrl: meta?.thumbnailDataUrl,
-        source,
-        highlightId: meta?.highlightId,
-      };
-      const withoutPreviousProposalHighlight =
-        meta?.source === "proposalHighlight"
-          ? current.filter(
-              (context) =>
-                context.type !== "mockupPreview" ||
-                context.projectId !== previewSet.projectId ||
-                context.proposalSetId !== previewSet.proposalSetId ||
-                context.mockupId !== mockup.id ||
-                context.source !== "proposalHighlight" ||
-                context.highlightId !== nextContext.highlightId,
-            )
-          : current;
-      return [...withoutPreviousProposalHighlight, nextContext];
-    });
     if (!desktop.activeThreadId) {
       setActiveDraftProjectId(project.id);
     }
@@ -2877,30 +2605,7 @@ export function App() {
 
   function removeComposerContext(context: ComposerContextReference) {
     setComposerContexts((current) =>
-      current.filter(
-        (candidate) =>
-          candidate.type !== context.type ||
-          composerContextIdentity(candidate) !==
-            composerContextIdentity(context),
-      ),
-    );
-  }
-
-  function resetMockupProposalHighlights(
-    previewSet: MockupPreviewSet,
-    mockup: SavedMockup,
-    viewport: ComposerMockupPreviewContext["viewport"],
-  ) {
-    setComposerContexts((current) =>
-      current.filter(
-        (context) =>
-          context.type !== "mockupPreview" ||
-          context.projectId !== previewSet.projectId ||
-          context.proposalSetId !== previewSet.proposalSetId ||
-          context.mockupId !== mockup.id ||
-          context.source !== "proposalHighlight" ||
-          context.viewport !== viewport,
-      ),
+      removeComposerContextByIdentity(current, context),
     );
   }
 
@@ -2939,9 +2644,7 @@ export function App() {
     setInspector((current) =>
       current.type === "appPreview"
         ? { type: "appPreview", projectId: project.id }
-        : current.type === "mockupPreview" ||
-            current.type === "draftPreview" ||
-            current.type === "codeProposalPreview"
+        : current.type === "draftPreview"
           ? { type: "empty" }
           : { type: "empty" },
     );
@@ -2976,14 +2679,17 @@ export function App() {
       activeProject;
     clearActiveDraftSelection();
     setInspector((current) =>
-      (current.type === "appPreview" ||
-        current.type === "mockupPreview" ||
-        current.type === "codeProposalPreview") &&
+      current.type === "appPreview" &&
       projectForThread
-        ? preferredLivePreviewSelection(projectForThread.id, threadId)
-        : current.type === "appPreview" ||
-            current.type === "mockupPreview" ||
-            current.type === "codeProposalPreview"
+        ? preferredLivePreviewSelection({
+            projects: desktop.projects,
+            featureDrafts: desktop.featureDrafts,
+            featureDraftActiveIdsByThreadId:
+              desktop.featureDraftActiveIdsByThreadId,
+            projectId: projectForThread.id,
+            threadId,
+          })
+        : current.type === "appPreview"
           ? current
           : { type: "empty" },
     );
@@ -3195,135 +2901,157 @@ export function App() {
   }
 
   function clearComposerAfterLocalAction() {
+    clearSentComposerPayload([]);
+    setVisualDecisionComposerAction(null);
+    setPendingComposerSend(null);
+  }
+
+  function clearSentComposerPayload(sentContexts: ComposerContextReference[]) {
+    const sentContextIds = new Set(sentContexts.map(composerContextIdentity));
     setComposerText("");
     setAttachments([]);
+    setComposerContexts((current) =>
+      sentContextIds.size > 0
+        ? current.filter(
+            (context) => !sentContextIds.has(composerContextIdentity(context)),
+          )
+        : [],
+    );
     setVisualDecisionComposerAction(null);
+  }
+
+  function showPendingComposerSend(
+    project: Project,
+    prompt: string,
+    pendingAttachments = attachments,
+    pendingContexts = activeComposerContexts,
+  ) {
+    setPendingComposerSend({
+      projectId: project.id,
+      prompt: prompt.trim() || "Use the attached project context.",
+      attachments: [...pendingAttachments],
+      contexts: [...pendingContexts],
+      createdAt: Date.now(),
+    });
   }
 
   async function sendPrompt(event?: FormEvent) {
     event?.preventDefault();
-    if (!activeProject) {
-      setSendError("Add or select a local project before sending.");
+    const visiblePrompt = composerText.trim();
+    const initialBlocked = sendBlockReason({
+      activeProject,
+      connectionStatus,
+      missingOpenAiAuth,
+      hasUnsupportedAttachments:
+        unsupportedAttachments(attachments).length > 0,
+      pendingApprovals,
+      promptReady: hasDraftContent({
+        text: visiblePrompt,
+        attachments,
+        contexts: activeComposerContexts,
+      }),
+      sendStarting: sendStartingRef.current || sendStarting,
+      runningTurnId: runningTurnIdRef.current ?? runningTurnId,
+    });
+    if (initialBlocked) {
+      setSendError(initialBlocked);
       return;
     }
-    const visiblePrompt = composerText.trim();
+    if (!activeProject) return;
+    sendStartingRef.current = true;
+    setSendStarting(true);
+    let sentToTurn = false;
+    try {
     const planModeWasOn = activeProject.settings.planMode;
     const status = activeProjectEmptyStatus;
     const liveContext = liveAppReviewContext(
       activeProject,
       activeComposerContexts,
     );
-    const selectedMockupIsHistory = Boolean(
-      selectedMockupPreviewSet &&
-        desktop.mockupHistoryProposalSetIds[
-          selectedMockupPreviewSet.proposalSetId
-        ],
-    );
-    const selectedCodeProposalSet =
-      inspector.type === "codeProposalPreview"
-        ? (desktop.codeProposalSets[inspector.proposalSetId] ?? null)
-        : activeThreadCodeProposalSetId
-          ? (desktop.codeProposalSets[activeThreadCodeProposalSetId] ?? null)
-        : null;
-    const selectedCodeProposalRoutingSet = codeProposalSetIsActiveForRouting(
-      selectedCodeProposalSet,
-      activeProject.id,
-    )
-      ? selectedCodeProposalSet
-      : null;
+    const featureDraftThreadIdForRouting =
+      desktop.activeThreadId ?? activeProject.lastActiveThreadId ?? null;
     const activeThreadFeatureDraftId =
-      desktop.activeThreadId != null
-        ? desktop.featureDraftActiveIdsByThreadId[desktop.activeThreadId]?.trim() ||
-          ""
+      featureDraftThreadIdForRouting != null
+        ? desktop.featureDraftActiveIdsByThreadId[
+            featureDraftThreadIdForRouting
+          ]?.trim() || ""
         : "";
+    const fallbackActiveProjectFeatureDraftId =
+      (activeThreadFeatureDraftId || inspector.type === "draftPreview")
+        ? ""
+        : Object.values(desktop.featureDrafts)
+            .filter(
+              (draft) =>
+                draft.projectId === activeProject.id &&
+                draft.lifecycle === "active" &&
+                draft.status !== "failed",
+            )
+            .sort((left, right) => right.updatedAt - left.updatedAt)[0]
+            ?.draftId ?? "";
     const selectedFeatureDraft =
       inspector.type === "draftPreview"
         ? (desktop.featureDrafts[inspector.draftId] ?? null)
         : activeThreadFeatureDraftId
           ? (desktop.featureDrafts[activeThreadFeatureDraftId] ?? null)
+          : fallbackActiveProjectFeatureDraftId
+            ? (desktop.featureDrafts[fallbackActiveProjectFeatureDraftId] ?? null)
           : null;
-    const selectedFeatureDraftRouting = featureDraftIsActiveForRouting(
-      selectedFeatureDraft,
-      activeProject.id,
-    )
+    const selectedFeatureDraftOwnsActiveThread =
+      Boolean(selectedFeatureDraft) &&
+      (Boolean(
+        selectedFeatureDraft?.threadId &&
+          featureDraftThreadIdForRouting &&
+          selectedFeatureDraft.threadId === featureDraftThreadIdForRouting,
+      ) ||
+        (inspector.type === "draftPreview" &&
+          inspector.draftId === selectedFeatureDraft?.draftId));
+    const selectedFeatureDraftCommandTarget = selectedFeatureDraftOwnsActiveThread
       ? selectedFeatureDraft
       : null;
+	    const selectedFeatureDraftRouting = featureDraftIsActiveForRouting(
+	      selectedFeatureDraftOwnsActiveThread ? selectedFeatureDraft : null,
+	      activeProject.id,
+	    )
+	      ? selectedFeatureDraft
+	      : null;
+	    const selectedFeatureDraftRecovery =
+	      selectedFeatureDraftCommandTarget &&
+	      featureDraftNeedsAttention(selectedFeatureDraftCommandTarget)
+	        ? selectedFeatureDraftCommandTarget
+	        : null;
     const activeLiveProposal =
       desktop.activeThreadId != null
         ? latestActiveLiveProposalForThread(desktop, desktop.activeThreadId)
         : null;
-    const rawCanvasResolution =
-      !planModeWasOn && visiblePrompt
-        ? resolveCanvasAction(
-            canvasResolverInput({
-              activeLiveProposal,
-              activeProject,
-              activeThreadId: desktop.activeThreadId,
-              attachmentsCount: attachments.length,
-              contexts: activeComposerContexts,
-              desktop,
-              inspector,
-              liveContext,
-              selectedCodeProposalSet,
-              selectedMockupIsHistory,
-              selectedMockupPreviewSet,
-              status,
-            }, visiblePrompt),
-          )
+	    const rawCanvasResolution =
+	      !planModeWasOn && visiblePrompt
+	        ? resolveCanvasAction(
+	            canvasResolverInput({
+	              activeLiveProposal,
+	              activeProject,
+	              activeThreadId: desktop.activeThreadId,
+	              attachmentsCount: attachments.length,
+	              contexts: activeComposerContexts,
+	              desktop,
+	              inspector,
+	              liveContext,
+	              selectedFeatureDraft,
+	              status,
+	            }, visiblePrompt),
+	          )
         : null;
-    const forceCodeBackedProposal =
-      !visualDecisionComposerAction &&
-      !selectedCodeProposalRoutingSet &&
-      visiblePrompt &&
-      isExplicitCodeBackedProposalRequest(visiblePrompt);
-    const canvasResolution =
-      forceCodeBackedProposal && rawCanvasResolution
-        ? {
-            ...rawCanvasResolution,
-            action: "CREATE_PROPOSAL" as const,
-            wantsOptions:
-              rawCanvasResolution.wantsOptions ||
-              isExplicitMultiOptionProposalRequest(visiblePrompt),
-            backingPreference: "code_backed_workspace" as const,
-            buildStrategy: "promote_code_workspace" as const,
-            reason:
-              "The user explicitly requested runnable proposal workspaces, so Canvas must use isolated code-backed proposals.",
-          }
-        : rawCanvasResolution;
+    const canvasResolution = rawCanvasResolution;
     const decisionCanvasAction =
       visualDecisionComposerAction?.option.canvasAction ?? null;
-    const addCodeProposalOptionRequest =
-      selectedCodeProposalRoutingSet &&
-      (!visualDecisionComposerAction ||
-        decisionCanvasAction === "add_option" ||
-        decisionCanvasAction === "replace_option") &&
-      canvasResolution?.action === "ADD_OPTION"
-        ? {
-            optionId:
-              canvasResolution.targetOptionId ??
-              nextMissingCodeProposalOptionId(selectedCodeProposalRoutingSet) ??
-              selectedCodeProposalRoutingSet.selectedOptionId ??
-              selectedCodeProposalRoutingSet.options[0]?.id ??
-              "A",
-            sourceOptionId:
-              canvasResolution.sourceOptionId ??
-              selectedCodeProposalRoutingSet.selectedOptionId ??
-              selectedCodeProposalRoutingSet.options[0]?.id ??
-              null,
-          }
-        : selectedCodeProposalRoutingSet
-          ? codeProposalAddOptionRequest(visiblePrompt, selectedCodeProposalRoutingSet)
-          : null;
     let prompt = visiblePrompt;
     let settings = { ...activeProject.settings };
     let contexts = [...activeComposerContexts];
     let openMockupsOnComplete = false;
     let liveOverlayProposalOnComplete = false;
     let liveProposalAcceptedForBuildTurnId: string | null = null;
-    let codeProposalOnComplete = false;
-    let codeProposalHistoryOnComplete = false;
     let featureDraftOnComplete = false;
     let featureDraftId: string | null = null;
+    let deferredFeatureDraft: DeferredFeatureDraftPreparation | null = null;
     let mockupHistoryOnComplete = false;
     let proposalSetId: string | null = null;
     let artifactKind: PreviewArtifactKind | null = null;
@@ -3346,45 +3074,71 @@ export function App() {
       settings = { ...settings, planMode: false };
     } else if (
       !visualDecisionComposerAction &&
-      selectedFeatureDraft &&
+      selectedFeatureDraftCommandTarget &&
       isFeatureDraftParkRequest(visiblePrompt)
     ) {
-      if (await parkFeatureDraft(selectedFeatureDraft)) {
+      if (await parkFeatureDraft(selectedFeatureDraftCommandTarget)) {
         clearComposerAfterLocalAction();
       }
       return;
     } else if (
       !visualDecisionComposerAction &&
-      selectedFeatureDraft &&
+      selectedFeatureDraftCommandTarget &&
       isFeatureDraftResumeRequest(visiblePrompt)
     ) {
-      if (await resumeFeatureDraft(selectedFeatureDraft)) {
+      if (await resumeFeatureDraft(selectedFeatureDraftCommandTarget)) {
         clearComposerAfterLocalAction();
       }
       return;
     } else if (
       !visualDecisionComposerAction &&
-      selectedFeatureDraft &&
+      selectedFeatureDraftCommandTarget &&
       isFeatureDraftDiscardRequest(visiblePrompt)
     ) {
-      if (await discardFeatureDraft(selectedFeatureDraft)) {
+      if (await discardFeatureDraft(selectedFeatureDraftCommandTarget)) {
         clearComposerAfterLocalAction();
       }
       return;
-    } else if (
-      !visualDecisionComposerAction &&
-      selectedFeatureDraft &&
-      isFeatureDraftBuildRequest(visiblePrompt)
-    ) {
-      if (await buildFeatureDraft(selectedFeatureDraft)) {
-        clearComposerAfterLocalAction();
-      }
-      return;
-    } else if (
-      !visualDecisionComposerAction &&
-      selectedFeatureDraftRouting &&
-      shouldRouteToFeatureDraftPrompt({
+	    } else if (
+	      !visualDecisionComposerAction &&
+	      selectedFeatureDraftCommandTarget &&
+	      isFeatureDraftContinueRequest(visiblePrompt)
+	    ) {
+	      sentToTurn = await continueFeatureDraft(selectedFeatureDraftCommandTarget);
+	      return;
+	    } else if (
+	      !visualDecisionComposerAction &&
+	      selectedFeatureDraftCommandTarget &&
+	      isFeatureDraftBuildRequest(visiblePrompt)
+	    ) {
+	      if (await buildFeatureDraft(selectedFeatureDraftCommandTarget)) {
+	        clearComposerAfterLocalAction();
+	      }
+	      return;
+	    } else if (
+	      !visualDecisionComposerAction &&
+	      selectedFeatureDraftRecovery &&
+	      shouldRouteToFeatureDraftRecoveryPrompt({
+	        inspectorIsDraft: inspector.type === "draftPreview",
+	        inspectorDraftOwnsActiveThread: selectedFeatureDraftOwnsActiveThread,
+	        prompt: visiblePrompt,
+	      })
+	    ) {
+	      featureDraftId = selectedFeatureDraftRecovery.draftId;
+	      cwdOverride = selectedFeatureDraftRecovery.workspacePath;
+	      prompt = featureDraftRevisionPrompt(
+	        selectedFeatureDraftRecovery,
+	        visiblePrompt,
+	        liveContext,
+	      );
+	      settings = { ...settings, planMode: false };
+	      featureDraftOnComplete = true;
+	    } else if (
+	      !visualDecisionComposerAction &&
+	      selectedFeatureDraftRouting &&
+	      shouldRouteToFeatureDraftPrompt({
         inspectorIsDraft: inspector.type === "draftPreview",
+        inspectorDraftOwnsActiveThread: selectedFeatureDraftOwnsActiveThread,
         prompt: visiblePrompt,
       })
     ) {
@@ -3397,204 +3151,54 @@ export function App() {
       );
       settings = { ...settings, planMode: false };
       featureDraftOnComplete = true;
-    } else if (
-      !visualDecisionComposerAction &&
-      selectedCodeProposalRoutingSet &&
-      canvasResolution?.action === "BUILD_SELECTED"
-    ) {
-      const requestedOptionId =
-        canvasResolution.targetOptionId ??
-        optionIdFromText(visiblePrompt) ??
-        selectedCodeProposalRoutingSet.selectedOptionId ??
-        selectedCodeProposalRoutingSet.options[0]?.id ??
-        null;
-      const option = requestedOptionId
-        ? selectedCodeProposalRoutingSet.options.find(
-            (candidate) => candidate.id === requestedOptionId,
-          )
-        : null;
-      if (!option) {
-        setSendError("Choose a proposal option before applying it.");
-        return;
-      }
-      proposalSetId = selectedCodeProposalRoutingSet.proposalSetId;
-      prompt = codeProposalReviewPrompt(
-        visiblePrompt,
-        activeProject,
-        status,
-        planModeWasOn,
-        liveContext,
-        selectedCodeProposalRoutingSet,
-        requestedOptionId,
-      );
-      settings = { ...settings, planMode: false };
-      codeProposalHistoryOnComplete = true;
-    } else if (
-      !visualDecisionComposerAction &&
-      selectedCodeProposalRoutingSet &&
-      canvasResolution?.action === "REVISE_PROPOSAL"
-    ) {
-      const requestedOptionId =
-        canvasResolution.targetOptionId ??
-        optionIdFromText(visiblePrompt) ??
-        selectedCodeProposalRoutingSet.selectedOptionId ??
-        selectedCodeProposalRoutingSet.options[0]?.id ??
-        null;
-      proposalSetId = selectedCodeProposalRoutingSet.proposalSetId;
-      prompt = codeProposalReviewPrompt(
-        visiblePrompt,
-        activeProject,
-        status,
-        planModeWasOn,
-        liveContext,
-        selectedCodeProposalRoutingSet,
-        requestedOptionId,
-      );
-      settings = { ...settings, planMode: false };
-      codeProposalOnComplete = true;
-    } else if (selectedCodeProposalRoutingSet && addCodeProposalOptionRequest) {
-      proposalSetId = selectedCodeProposalRoutingSet.proposalSetId;
-      const codeProposal = await prepareAdditionalCodeProposalOption(
-        activeProject,
-        selectedCodeProposalRoutingSet,
-        addCodeProposalOptionRequest,
-      );
-      cwdOverride = codeProposal.rootPath;
-      prompt = codeProposalAddOptionPrompt(
-        visiblePrompt,
-        activeProject,
-        status,
-        planModeWasOn,
-        liveContext,
-        selectedCodeProposalRoutingSet,
-        codeProposal,
-        addCodeProposalOptionRequest,
-      );
-      settings = { ...settings, planMode: false };
-      codeProposalOnComplete = true;
-    } else if (
-      !visualDecisionComposerAction &&
-      activeLiveProposal &&
-      canvasResolution?.action === "BUILD_SELECTED"
-    ) {
-      const proposalStaleness = liveProposalBuildStaleness(
-        activeLiveProposal,
-        activeProject,
-      );
-      if (proposalStaleness.stale) {
-        setSendError(staleProposalBuildMessage(proposalStaleness));
-        return;
-      }
-      liveProposalAcceptedForBuildTurnId = activeLiveProposal.turnId;
-      prompt = liveOverlayProposalAcceptPrompt(
-        activeLiveProposal,
-        planPreviewDecisionSummary(activeLiveProposal),
-      );
-      settings = { ...settings, planMode: false };
-    } else if (
-      !visualDecisionComposerAction &&
-      activeLiveProposal &&
-      canvasResolution?.action === "REVISE_PROPOSAL"
-    ) {
-      prompt = liveOverlayProposalRevisionPrompt(
-        activeLiveProposal,
-        visiblePrompt,
-        planPreviewDecisionSummary(activeLiveProposal),
-      );
-      settings = { ...settings, planMode: false };
-      liveOverlayProposalOnComplete = true;
-    } else if (
-      !visualDecisionComposerAction &&
-      canvasResolution?.action === "ARCHIVE_PROPOSALS"
-    ) {
-      setDesktop((current) =>
-        archiveCanvasProposalsForThread(current, desktop.activeThreadId),
-      );
-      prompt = canvasArchivePrompt(visiblePrompt, canvasResolution);
-      settings = { ...settings, planMode: false };
     } else if (visualDecisionComposerAction) {
       if (decisionCanvasAction === "start_fresh") {
         setDesktop((current) =>
           archiveCanvasProposalsForThread(current, desktop.activeThreadId),
         );
       }
-      const createsCodeProposal =
-        visualDecisionOptionCreatesCodeProposal(
-          visualDecisionComposerAction.option,
-        ) &&
-        shouldUseCodeProposalWorkspace(
-          [
-            visiblePrompt,
-            visualDecisionComposerText(visualDecisionComposerAction.option),
-            visualDecisionComposerAction.option.prompt,
-          ].join(" "),
-        );
-      const createsLiveOverlay = visualDecisionOptionCreatesLiveOverlay(
+      const createsFeatureDraft = visualDecisionOptionCreatesFeatureDraft(
         visualDecisionComposerAction.option,
       );
-      const createsMockups =
-        !createsCodeProposal &&
-        !createsLiveOverlay &&
-        visualDecisionOptionCreatesMockups(visualDecisionComposerAction.option);
-      let codeProposal: PreparedProposalWorkspaces | null = null;
-      if (createsCodeProposal) {
-        proposalSetId = createProposalSetId(
+      const createsMockups = false;
+      const decisionDraftRequest = visualDecisionFeatureDraftRequest(
+        visualDecisionComposerAction.option,
+        visiblePrompt,
+      );
+      if (createsFeatureDraft) {
+        featureDraftId = createFeatureDraftId(
           activeThread?.id ?? activeProject.id,
         );
-        codeProposal = await prepareCodeProposalSet(
-          activeProject,
-          proposalSetId,
-          codeProposalOptionIds(visualDecisionComposerAction.option),
-          visiblePrompt || visualDecisionComposerText(visualDecisionComposerAction.option),
-        );
-        cwdOverride = codeProposal.rootPath;
+        deferredFeatureDraft = {
+          draftId: featureDraftId,
+          originalPrompt: decisionDraftRequest,
+          status,
+          planModeWasOn,
+          liveContext: liveContextWithVisualDecisionGuidance(
+            liveContext,
+            visualDecisionComposerAction,
+          ),
+        };
       }
-      if (createsMockups) {
-        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
-        artifactKind = visualDecisionArtifactKind(
-          visualDecisionComposerAction.option,
-        );
-      }
-      prompt = visualDecisionSelectionPrompt(
-        visualDecisionComposerAction,
-        visiblePrompt,
-        proposalSetId,
-        artifactKind,
-        activeThread?.id ?? null,
-        liveContext,
-        codeProposal,
-      );
+      prompt = createsFeatureDraft
+        ? decisionDraftRequest
+        : visualDecisionSelectionPrompt(
+            visualDecisionComposerAction,
+            visiblePrompt,
+            null,
+            null,
+            activeThread?.id ?? null,
+            liveContext,
+          );
       settings = { ...settings, planMode: false };
-      openMockupsOnComplete = createsMockups;
-      liveOverlayProposalOnComplete = createsLiveOverlay;
-      codeProposalOnComplete = createsCodeProposal;
-    } else if (
-      selectedMockupPreviewSet &&
-      inspector.type === "mockupPreview" &&
-      !selectedMockupIsHistory &&
-      visiblePrompt
-    ) {
-      const commitsToLive = isSavedMockupImplementationCommitment(
-        visiblePrompt,
-      );
-      proposalSetId = selectedMockupPreviewSet.proposalSetId;
-      artifactKind = selectedMockupPreviewSet.artifactKind;
-      prompt = savedMockupReviewPrompt(visiblePrompt, selectedMockupPreviewSet);
-      settings = { ...settings, planMode: false };
-      openMockupsOnComplete = !commitsToLive;
-      mockupHistoryOnComplete = commitsToLive;
+      openMockupsOnComplete = false;
+      liveOverlayProposalOnComplete = false;
+      featureDraftOnComplete = createsFeatureDraft;
     } else if (
       shouldCreateFeatureDraftFromCanvasPrompt({
         backingPreference: canvasResolution?.backingPreference,
-        hasActiveProposal: Boolean(
-          activeLiveProposal ||
-            selectedCodeProposalRoutingSet ||
-            (selectedMockupPreviewSet && !selectedMockupIsHistory),
-        ),
-        hasSelectedPreview:
-          inspector.type === "mockupPreview" ||
-          inspector.type === "codeProposalPreview" ||
-          inspector.type === "planPreview",
+        hasActiveProposal: Boolean(activeLiveProposal),
+        hasSelectedPreview: false,
         isExistingProject: status?.empty === false,
         planMode: planModeWasOn,
         prompt: visiblePrompt,
@@ -3603,104 +3207,31 @@ export function App() {
       })
     ) {
       featureDraftId = createFeatureDraftId(activeThread?.id ?? activeProject.id);
-      const draftWorkspace = await prepareFeatureDraft(
-        activeProject,
-        featureDraftId,
-        visiblePrompt,
-      );
-      cwdOverride = draftWorkspace.workspacePath;
-      prompt = featureDraftWorkspacePrompt(
-        visiblePrompt,
-        activeProject,
-        status ?? {
-          empty: false,
-          reason: "",
-          meaningfulEntries: [],
-          ignoredEntries: [],
-        },
+      deferredFeatureDraft = {
+        draftId: featureDraftId,
+        originalPrompt: visiblePrompt,
+        status,
         planModeWasOn,
         liveContext,
-        draftWorkspace,
-      );
+      };
+      prompt = visiblePrompt;
       settings = { ...settings, planMode: false };
       featureDraftOnComplete = true;
-    } else if (canvasResolution?.action === "CREATE_PROPOSAL") {
-      const wantsOptions = canvasResolution.wantsOptions;
-      const backing = canvasResolution.backingPreference ?? "live_dom_patch";
-      if (backing === "code_backed_workspace") {
-        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
-        const codeProposal = await prepareCodeProposalSet(
-          activeProject,
-          proposalSetId,
-          canvasProposalOptionIds(visiblePrompt, wantsOptions),
-          visiblePrompt,
-        );
-        cwdOverride = codeProposal.rootPath;
-        prompt = codeProposalWorkspacePrompt(
-          visiblePrompt,
-          activeProject,
-          status ?? {
-            empty: false,
-            reason: "",
-            meaningfulEntries: [],
-            ignoredEntries: [],
-          },
-          wantsOptions,
-          planModeWasOn,
-          liveContext,
-          codeProposal,
-          canvasResolution,
-        );
-        codeProposalOnComplete = true;
-      } else if (
-        backing === "mockup_artifact" ||
-        backing === "wireframe_artifact"
-      ) {
-        proposalSetId = createProposalSetId(activeThread?.id ?? activeProject.id);
-        artifactKind =
-          backing === "wireframe_artifact"
-            ? "wireframe"
-            : explicitPreviewArtifactKind(
-                visiblePrompt,
-                wantsOptions ? "mockup" : "preview",
-              );
-        prompt = savedPreviewArtifactPrompt(
-          visiblePrompt,
-          activeProject,
-          status ?? {
-            empty: true,
-            reason: "",
-            meaningfulEntries: [],
-            ignoredEntries: [],
-          },
-          wantsOptions,
-          planModeWasOn,
-          liveContext,
-          proposalSetId,
-          artifactKind,
-          activeThread?.id ?? null,
-          canvasResolution,
-        );
-        openMockupsOnComplete = true;
-      } else {
-        prompt = liveOverlayProposalPrompt(
-          visiblePrompt,
-          activeProject,
-          status ?? {
-            empty: false,
-            reason: "",
-            meaningfulEntries: [],
-            ignoredEntries: [],
-          },
-          wantsOptions,
-          planModeWasOn,
-          liveContext,
-          canvasResolution,
-        );
-        liveOverlayProposalOnComplete = true;
-      }
+    } else if (canvasResolution?.action === "CREATE_DRAFT") {
+      featureDraftId = createFeatureDraftId(activeThread?.id ?? activeProject.id);
+      deferredFeatureDraft = {
+        draftId: featureDraftId,
+        originalPrompt: visiblePrompt,
+        status,
+        planModeWasOn,
+        liveContext,
+      };
+      prompt = visiblePrompt;
       settings = { ...settings, planMode: false };
+      featureDraftOnComplete = true;
     }
+
+    showPendingComposerSend(activeProject, visiblePrompt, attachments, contexts);
 
     const draft: SubmissionDraft = {
       prompt,
@@ -3716,15 +3247,26 @@ export function App() {
       openMockupsOnComplete,
       liveOverlayProposalOnComplete,
       liveProposalAcceptedForBuildTurnId,
-      codeProposalOnComplete,
-      codeProposalHistoryOnComplete,
       featureDraftOnComplete,
       featureDraftId,
       mockupHistoryOnComplete,
       proposalSetId,
       artifactKind,
+      deferredFeatureDraft,
     };
-    await sendDraft(draft, { clearComposer: true });
+    sentToTurn = await sendDraft(draft, {
+      clearComposer: true,
+      sendStartingClaimed: true,
+    });
+    } catch (error) {
+      setSendError(sendFailureMessage(error));
+      setPendingComposerSend(null);
+    } finally {
+      if (!sentToTurn && sendStartingRef.current) {
+        sendStartingRef.current = false;
+        setSendStarting(false);
+      }
+    }
   }
 
   async function retryPrompt() {
@@ -3738,6 +3280,7 @@ export function App() {
       clearComposer: boolean;
       retry?: boolean;
       desktopOverride?: DesktopState;
+      sendStartingClaimed?: boolean;
     },
   ) {
     const promptDesktop = options.desktopOverride ?? desktop;
@@ -3757,7 +3300,9 @@ export function App() {
         attachments: draft.attachments,
         contexts: draft.contexts,
       }),
-      sendStarting: sendStartingRef.current || sendStarting,
+      sendStarting: options.sendStartingClaimed
+        ? false
+        : sendStartingRef.current || sendStarting,
       runningTurnId: runningTurnIdRef.current ?? runningTurnId,
     });
     if (blocked) {
@@ -3772,11 +3317,15 @@ export function App() {
     const sendingLocalDraft =
       draft.localDraftProjectId === project.id &&
       activeDraftProjectId === project.id;
+    const shouldClearComposer = options.clearComposer || sendingLocalDraft;
     sendStartingRef.current = true;
     setSendStarting(true);
     try {
       setSendError(null);
       if (!options.retry) setRetryDraft(null);
+      if (shouldClearComposer) {
+        clearSentComposerPayload(draft.contexts);
+      }
       const explicitThread = draft.targetThreadId
         ? (threadsRef.current[draft.targetThreadId] ??
           threads[draft.targetThreadId] ??
@@ -3793,6 +3342,61 @@ export function App() {
         draft.settings,
       );
       if (!targetThread) throw new Error("Could not create a chat thread.");
+      if (draft.deferredFeatureDraft) {
+        const optimisticThread = targetThread;
+        activeThreadIdRef.current = optimisticThread.id;
+        threadsRef.current = {
+          ...threadsRef.current,
+          [optimisticThread.id]: optimisticThread,
+        };
+        setThreads((current) => ({
+          ...current,
+          [optimisticThread.id]: optimisticThread,
+        }));
+        setDesktop((current) => ({
+          ...current,
+          activeProjectId: project.id,
+          activeThreadId: optimisticThread.id,
+          projects: current.projects.map((stored) =>
+            stored.id === project.id
+              ? { ...stored, lastActiveThreadId: optimisticThread.id }
+              : stored,
+          ),
+        }));
+        showPendingComposerSend(
+          project,
+          draft.visiblePrompt?.trim() ||
+            draft.deferredFeatureDraft.originalPrompt ||
+            draft.prompt,
+          draft.attachments,
+          draft.contexts,
+        );
+        const preparedDraft = await prepareFeatureDraft(
+          project,
+          draft.deferredFeatureDraft.draftId,
+          draft.deferredFeatureDraft.originalPrompt,
+          targetThread.id,
+        );
+        draft = {
+          ...draft,
+          prompt: featureDraftWorkspacePrompt(
+            draft.deferredFeatureDraft.originalPrompt,
+            project,
+            draft.deferredFeatureDraft.status ?? {
+              empty: false,
+              reason: "",
+              meaningfulEntries: [],
+              ignoredEntries: [],
+            },
+            draft.deferredFeatureDraft.planModeWasOn,
+            draft.deferredFeatureDraft.liveContext,
+            preparedDraft,
+          ),
+          cwdOverride: preparedDraft.workspacePath,
+          featureDraftId: preparedDraft.draftId,
+          deferredFeatureDraft: null,
+        };
+      }
       const userPrompt =
         draft.prompt.trim() || "Use the attached project context.";
       const visibleUserPrompt = draft.visiblePrompt?.trim() || userPrompt;
@@ -3903,22 +3507,6 @@ export function App() {
           current === draft.localDraftProjectId ? null : current,
         );
       }
-      if (options.clearComposer || sendingLocalDraft) {
-        const sentContextIds = new Set(
-          draft.contexts.map(composerContextIdentity),
-        );
-        setComposerText("");
-        setAttachments([]);
-        setComposerContexts((current) =>
-          sentContextIds.size > 0
-            ? current.filter(
-                (context) =>
-                  !sentContextIds.has(composerContextIdentity(context)),
-              )
-            : [],
-        );
-        setVisualDecisionComposerAction(null);
-      }
       const targetThreadWithTurn = {
         ...targetThread,
         turns: ensureTurn(targetThread.turns, visibleTurn),
@@ -3931,6 +3519,7 @@ export function App() {
         ...current,
         [targetThread.id]: targetThreadWithTurn,
       }));
+      setPendingComposerSend(null);
       setDesktop((current) => {
         const targetProposalSetId = draft.proposalSetId?.trim() || "";
         const targetFeatureDraftId = draft.featureDraftId?.trim() || "";
@@ -3948,32 +3537,6 @@ export function App() {
                   [response.turn.id]: draft.contexts,
                 })
               : current.sentComposerContextsByTurnId,
-          codeProposalActiveSetIdsByThreadId:
-            draft.codeProposalOnComplete && targetProposalSetId
-              ? {
-                  ...current.codeProposalActiveSetIdsByThreadId,
-                  [targetThread.id]: targetProposalSetId,
-                }
-              : current.codeProposalActiveSetIdsByThreadId,
-          codeProposalCompareSetIdsByThreadId:
-            draft.codeProposalOnComplete && targetProposalSetId
-              ? {
-                  ...current.codeProposalCompareSetIdsByThreadId,
-                  [targetThread.id]: targetProposalSetId,
-                }
-              : current.codeProposalCompareSetIdsByThreadId,
-          codeProposalSets:
-            draft.codeProposalOnComplete && targetProposalSetId
-              ? {
-                  ...current.codeProposalSets,
-                  [targetProposalSetId]: {
-                    ...current.codeProposalSets[targetProposalSetId],
-                    threadId: targetThread.id,
-                    turnId: response.turn.id,
-                    updatedAt: Date.now(),
-                  },
-                }
-              : current.codeProposalSets,
           featureDraftActiveIdsByThreadId:
             draft.featureDraftOnComplete && targetFeatureDraftId
               ? {
@@ -4044,6 +3607,7 @@ export function App() {
     } catch (error) {
       setRetryDraft(draft);
       setSendError(sendFailureMessage(error));
+      setPendingComposerSend(null);
       sendStartingRef.current = false;
       setSendStarting(false);
       runningTurnIdRef.current = null;
@@ -4090,7 +3654,7 @@ export function App() {
             )
           : planProposalAcceptPrompt(acceptedPreviewContext),
         visiblePrompt: isLiveProposal
-          ? "Build selected."
+          ? "Build this."
           : "I accept this plan. Implement it now.",
         projectId: project.id,
         settings: {
@@ -4230,12 +3794,6 @@ export function App() {
 
   function declinePlanProposal(proposal: PlanProposal) {
     const latestProposal = desktop.planProposals[proposal.turnId] ?? proposal;
-    const closeProposalInspector =
-      inspector.type === "planPreview" &&
-      inspector.proposalTurnId === latestProposal.turnId;
-    if (closeProposalInspector) {
-      inspectorRetargetThreadIdRef.current = null;
-    }
     setDesktop((current) => ({
       ...current,
       planProposals: updatePlanProposalStatus(
@@ -4243,16 +3801,8 @@ export function App() {
         latestProposal.turnId,
         "declined",
       ),
-      layout: closeProposalInspector
-        ? {
-            ...current.layout,
-            inspectorOpen: false,
-          }
-        : current.layout,
+      layout: current.layout,
     }));
-    if (closeProposalInspector) {
-      setInspector({ type: "empty" });
-    }
     setPlanProposalFeedbackDrafts((current) => {
       const next = { ...current };
       delete next[latestProposal.turnId];
@@ -4454,7 +4004,7 @@ export function App() {
       for (const threadId of removedThreadIds) delete next[threadId];
       return next;
     });
-    setMockupPreviewSets((current) => {
+    setSavedMockupReviewSets((current) => {
       const nextEntries = Object.entries(current).filter(
         ([, previewSet]) => previewSet.projectId !== projectId,
       );
@@ -4500,7 +4050,7 @@ export function App() {
         mockupHistoryProposalSetIds: Object.fromEntries(
           Object.entries(current.mockupHistoryProposalSetIds).filter(
             ([proposalSetId]) =>
-              !Object.values(mockupPreviewSets).some(
+              !Object.values(savedMockupReviewSets).some(
                 (previewSet) =>
                   previewSet.projectId === projectId &&
                   previewSet.proposalSetId === proposalSetId,
@@ -5091,145 +4641,42 @@ export function App() {
   const projectThreads = activeProject
     ? (threadsByProject.get(activeProject.id) ?? [])
     : [];
-  const activeThreadMockupPreviewSet =
-    activeThreadProposalSetId
-      ? (mockupPreviewSets[activeThreadProposalSetId] ?? null)
-      : null;
-  const activeThreadCodeProposalSet =
-    activeThreadCodeProposalSetId
-      ? (desktop.codeProposalSets[activeThreadCodeProposalSetId] ?? null)
-      : null;
-  const activeThreadCodeProposalCompareSet =
-    activeThreadCodeProposalCompareSetId
-      ? (desktop.codeProposalSets[activeThreadCodeProposalCompareSetId] ?? null)
-      : null;
   const activeThreadFeatureDraft =
     activeThreadFeatureDraftId
       ? (desktop.featureDrafts[activeThreadFeatureDraftId] ?? null)
       : null;
-  const activeThreadFeatureDrafts = activeProject
-    ? Object.values(desktop.featureDrafts)
-        .filter(
-          (draft) =>
-            draft.projectId === activeProject.id &&
-            (activeFeatureDraftThreadId == null ||
-              draft.threadId === activeFeatureDraftThreadId) &&
-            (draft.lifecycle === "active" || draft.lifecycle === "parked"),
-        )
-        .sort((left, right) => right.updatedAt - left.updatedAt)
-    : [];
   const previewProject = activePreviewProjectId
     ? (desktop.projects.find(
         (project) => project.id === activePreviewProjectId,
       ) ?? null)
     : null;
-  const selectedPlanPreviewProposal =
-    inspector.type === "planPreview"
-      ? (desktop.planProposals[inspector.proposalTurnId] ?? null)
-      : null;
   const selectedAppPreviewContexts =
     inspector.type === "appPreview" ||
-    inspector.type === "mockupPreview" ||
-    inspector.type === "draftPreview" ||
-    inspector.type === "codeProposalPreview"
+    inspector.type === "draftPreview"
       ? activeComposerContexts.filter(
           (context): context is ComposerAppPreviewContext =>
             context.type === "appPreview" &&
             context.projectId === inspector.projectId,
         )
       : [];
-  const selectedCodeProposalSet =
-    inspector.type === "codeProposalPreview"
-      ? (desktop.codeProposalSets[inspector.proposalSetId] ?? null)
-      : (activeThreadCodeProposalSet ?? activeThreadCodeProposalCompareSet);
   const selectedFeatureDraft =
     inspector.type === "draftPreview"
       ? (desktop.featureDrafts[inspector.draftId] ?? null)
       : activeThreadFeatureDraft;
-  const selectedMockupPreviewSet =
-    inspector.type === "mockupPreview"
-      ? (mockupPreviewSets[inspector.proposalSetId] ?? null)
-      : activeThreadMockupPreviewSet;
-  const composerMockupPreviewSet = activeThreadMockupPreviewSet;
-  const selectedMockupHistoryMode = Boolean(
-    selectedMockupPreviewSet &&
-      desktop.mockupHistoryProposalSetIds[
-        selectedMockupPreviewSet.proposalSetId
-      ],
-  );
-  const selectedMockupCanShowLive = Boolean(
-    selectedMockupPreviewSet &&
-      !selectedMockupHistoryMode,
-  );
-  const selectedCodeProposalCanShowLive = Boolean(
-    selectedCodeProposalSet &&
-      projectEmptyStatusById[selectedCodeProposalSet.projectId] &&
-      !projectEmptyStatusById[selectedCodeProposalSet.projectId].empty,
-  );
   const selectedFeatureDraftCanShowLive = Boolean(
     selectedFeatureDraft &&
       projectEmptyStatusById[selectedFeatureDraft.projectId] &&
       !projectEmptyStatusById[selectedFeatureDraft.projectId].empty,
   );
 
-  useEffect(() => {
-    if (!activeProject || !activeThread || !activeThreadCodeProposalSet) return;
-    if (
-      !codeProposalSetIsActiveForRouting(
-        activeThreadCodeProposalSet,
-        activeProject.id,
-      )
-    ) {
-      return;
-    }
-    if (
-      !shouldRecoverAppliedCodeProposalFromThread(
-        activeThreadCodeProposalSet,
-        activeThread,
-      )
-    ) {
-      return;
-    }
-    setDesktop((current) => {
-      const stored =
-        current.codeProposalSets[activeThreadCodeProposalSet.proposalSetId];
-      if (!codeProposalSetIsActiveForRouting(stored ?? null, activeProject.id)) {
-        return current;
-      }
-      return markCodeProposalSetAsApplied(
-        current,
-        activeThreadCodeProposalSet.proposalSetId,
-      );
-    });
-  }, [
-    activeProject,
-    activeThread,
-    activeThreadCodeProposalSet,
-  ]);
-
-  const mockupPreviewMarks = composerContexts.filter(
-    (context): context is ComposerMockupPreviewContext =>
-      context.type === "mockupPreview" &&
-      Boolean(
-        selectedMockupPreviewSet &&
-          context.projectId === selectedMockupPreviewSet.projectId &&
-          context.proposalSetId === selectedMockupPreviewSet.proposalSetId,
-      ),
-  );
   const activeAppPreviewSelected = Boolean(
     desktop.layout.inspectorOpen &&
       activeProject &&
       ((inspector.type === "appPreview" &&
         inspector.projectId === activeProject.id) ||
-        (inspector.type === "mockupPreview" &&
-          inspector.projectId === activeProject.id &&
-          inspector.proposalSetId === activeThreadProposalSetId) ||
         (inspector.type === "draftPreview" &&
           inspector.projectId === activeProject.id &&
-          inspector.draftId === activeThreadFeatureDraftId) ||
-        (inspector.type === "codeProposalPreview" &&
-          inspector.projectId === activeProject.id &&
-          inspector.proposalSetId === activeThreadCodeProposalSetId)),
+          inspector.draftId === activeThreadFeatureDraftId)),
   );
   const activeThreadRunning = Boolean(
     runningTurnId &&
@@ -5364,6 +4811,7 @@ export function App() {
             onSelect={selectInspector}
             planProposalFeedbackDrafts={planProposalFeedbackDrafts}
             planProposals={desktop.planProposals}
+            pendingComposerSend={pendingComposerSend}
             sentComposerContextsByTurnId={desktop.sentComposerContextsByTurnId}
           />
         </section>
@@ -5377,57 +4825,6 @@ export function App() {
             }
           />
         )}
-
-        {activeThreadFeatureDrafts.length > 0 && !activeVisualDecision && (
-          <FeatureDraftStrip
-            activeDraftId={activeThreadFeatureDraftId}
-            drafts={activeThreadFeatureDrafts}
-            onDiscard={(draft) => void discardFeatureDraft(draft)}
-            onOpen={(draft) =>
-              openFeatureDraftInspector(draft.projectId, draft.draftId)
-            }
-            onPark={(draft) => void parkFeatureDraft(draft)}
-            onResume={(draft) => void resumeFeatureDraft(draft)}
-          />
-        )}
-
-        {activeThreadCodeProposalSet?.status === "ready" &&
-          activeThreadCodeProposalSet.options.length > 0 &&
-          !activeVisualDecision && (
-            <CodeProposalOptionStrip
-              previewSet={activeThreadCodeProposalSet}
-              onOpen={() =>
-                openCodeProposalInspector(
-                  activeThreadCodeProposalSet.projectId,
-                  activeThreadCodeProposalSet.proposalSetId,
-                )
-              }
-              onSelect={(optionId) =>
-                selectCodeProposal(
-                  activeThreadCodeProposalSet.proposalSetId,
-                  optionId,
-                )
-              }
-            />
-          )}
-
-        {composerMockupPreviewSet &&
-          composerMockupPreviewSet.mockups.length > 0 &&
-          !selectedMockupHistoryMode &&
-          !activeVisualDecision && (
-            <MockupOptionStrip
-              previewSet={composerMockupPreviewSet}
-              onOpen={() =>
-                openMockupInspector(
-                  composerMockupPreviewSet.projectId,
-                  composerMockupPreviewSet.proposalSetId,
-                )
-              }
-              onSelect={(mockupId) =>
-                selectMockup(composerMockupPreviewSet.proposalSetId, mockupId)
-              }
-            />
-          )}
 
         <Composer
           attachments={attachments}
@@ -5480,17 +4877,17 @@ export function App() {
           activeProject={activeProject}
           activeThread={activeThread}
           previewProject={previewProject}
-          planPreviewProposal={selectedPlanPreviewProposal}
           appPreviewContexts={selectedAppPreviewContexts}
-          codeProposalCanShowLive={selectedCodeProposalCanShowLive}
-          codeProposalSet={selectedCodeProposalSet}
           featureDraft={selectedFeatureDraft}
           featureDraftCanShowLive={selectedFeatureDraftCanShowLive}
-          mockupPreviewSet={selectedMockupPreviewSet}
-          mockupCanShowLive={selectedMockupCanShowLive}
-          mockupPreviewLiveResetToken={mockupPreviewLiveResetToken}
-          mockupPreviewMarks={mockupPreviewMarks}
-          mockupPreviewMode={selectedMockupHistoryMode ? "history" : "active"}
+          featureDraftRefreshNonce={
+            selectedFeatureDraft
+              ? (draftPreviewRefreshNonces[selectedFeatureDraft.draftId] ?? 0)
+              : 0
+          }
+          livePreviewAutoStartNonce={
+            previewProject ? (livePreviewAutoStartNonces[previewProject.id] ?? 0) : 0
+          }
           onAnswerApproval={answerApproval}
           onOpenDocument={(path) => selectInspector({ type: "document", path })}
           onResizePointerDown={beginInspectorResize}
@@ -5498,27 +4895,14 @@ export function App() {
           onReviewChanges={() => void reviewChanges()}
           onRollback={() => void rollbackChat()}
           onSelect={selectInspector}
-          onUpdatePlanPreviewAreaMark={updatePlanPreviewAreaMark}
-          onUpdatePlanPreviewSession={updatePlanPreviewSession}
           onAttachAppPreviewMark={attachAppPreviewMark}
-          onAttachMockupPreviewMark={attachMockupPreviewMark}
           onBuildBaselineApp={requestBaselineApp}
-          onBuildPlanProposal={(proposal) => void acceptPlanProposal(proposal)}
-          onBuildCodeProposal={(previewSet, option) =>
-            stageBuildCodeProposal(previewSet, option)
-          }
           onBuildFeatureDraft={(draft) => void buildFeatureDraft(draft)}
+          onContinueFeatureDraft={(draft) => void continueFeatureDraft(draft)}
           onDiscardFeatureDraft={(draft) => void discardFeatureDraft(draft)}
           onParkFeatureDraft={(draft) => void parkFeatureDraft(draft)}
+          onRefreshFeatureDraft={(draft) => refreshFeatureDraftPreview(draft)}
           onResumeFeatureDraft={(draft) => void resumeFeatureDraft(draft)}
-          onTransferCodeProposalLane={transferCodeProposalLane}
-          onSelectCodeProposal={selectCodeProposal}
-          onBuildMockup={(previewSet, mockup) =>
-            stageBuildMockup(previewSet, mockup)
-          }
-          onResetMockupProposalHighlights={resetMockupProposalHighlights}
-          onSelectMockup={selectMockup}
-          onUpdatePlanPreviewVariant={updatePlanPreviewVariant}
 
           selection={inspector}
           activeTurn={activeTurnState}
@@ -5624,227 +5008,10 @@ function ActiveTurnProgressPill(props: {
   );
 }
 
-function turnWithOptimisticUserMessage(
-  turn: Turn,
-  visibleUserPrompt: string,
-  attachments: ComposerAttachment[],
-): Turn {
-  if (turn.items.some((item) => item.type === "userMessage")) return turn;
-  const text = visibleUserPrompt.trim() || "Use the attached project context.";
-  const content: Extract<ThreadItem, { type: "userMessage" }>["content"] = [
-    { type: "text", text, text_elements: [] },
-    ...attachments
-      .filter((attachment) => attachment.kind === "image")
-      .map((attachment) => ({
-        type: "localImage" as const,
-        path: attachment.path,
-      })),
-  ];
-  return {
-    ...turn,
-    items: [
-      {
-        type: "userMessage",
-        id: `optimistic-user:${turn.id}`,
-        content,
-      },
-      ...turn.items,
-    ],
-  };
-}
-
-function shouldPreserveLocalThreadDuringRefresh(thread: Thread) {
-  return thread.turns.some(
-    (turn) => turn.status === "inProgress" || Boolean(turn.error),
-  );
-}
-
-function sendBlockReason(args: {
-  activeProject: Project | null;
-  connectionStatus: string;
-  missingOpenAiAuth: boolean;
-  hasUnsupportedAttachments: boolean;
-  pendingApprovals: PendingApproval[];
-  promptReady: boolean;
-  sendStarting: boolean;
-  runningTurnId: string | null;
-}) {
-  if (args.connectionStatus !== "connected") {
-    return "Codex is still connecting. Try again when the status says Connected.";
-  }
-  if (!args.activeProject)
-    return "Add or select a local project before sending.";
-  if (args.missingOpenAiAuth) {
-    return "Sign in before sending prompts to OpenAI-hosted models.";
-  }
-  if (args.sendStarting) {
-    return "Codex is starting your message. Wait for it to begin before sending again.";
-  }
-  if (args.runningTurnId) {
-    return "Codex is already working on another turn. Wait for it to finish before sending again.";
-  }
-  if (args.pendingApprovals.length > 0) {
-    return "Answer the pending approval before sending another message.";
-  }
-  if (args.hasUnsupportedAttachments)
-    return "Remove unsupported files before sending.";
-  if (!args.promptReady) return "Type a message to send.";
-  return null;
-}
-
-function finalAgentText(turn: Turn) {
-  return turn.items
-    .filter(
-      (item): item is Extract<ThreadItem, { type: "agentMessage" }> =>
-        item.type === "agentMessage" &&
-        (item.phase === "final_answer" || item.phase === null),
-    )
-    .map((item) => item.text)
-    .join("\n\n");
-}
-
-type VisualDecisionValidityContext = {
-  hasActiveCanvasProposal: boolean;
-  projectEmptyStatus: ProjectEmptyStatus | null;
-  hasSavedMockups: boolean;
-};
-
-function latestVisualDecision(
-  thread: Thread | null,
-  dismissed: Record<string, true>,
-  context: VisualDecisionValidityContext,
-): ActiveVisualDecision | null {
-  if (!thread) return null;
-  for (const turn of [...thread.turns].reverse()) {
-    if (turn.status === "inProgress") continue;
-    if (turnContainsText(turn, SAVED_MOCKUP_REVIEW_SENTINEL)) continue;
-    if (turnContainsText(turn, FEATURE_DRAFT_WORKSPACE_SENTINEL)) continue;
-    const decision = parseVisualDecisionStrip(finalAgentText(turn));
-    if (!decision) continue;
-    const id = `${thread.id}:${turn.id}`;
-    if (dismissed[id]) return null;
-    if (!visualDecisionStillValid(decision, context)) continue;
-    return { id, turnId: turn.id, decision };
-  }
-  return null;
-}
-
-function turnContainsText(turn: Turn, needle: string) {
-  return turn.items.some((item) => threadItemContainsText(item, needle));
-}
-
-function threadItemContainsText(item: ThreadItem, needle: string): boolean {
-  if (item.type === "userMessage") {
-    return item.content.some(
-      (part) =>
-        part.type === "text" &&
-        typeof part.text === "string" &&
-        part.text.includes(needle),
-    );
-  }
-  if (
-    (item.type === "agentMessage" || item.type === "reasoning") &&
-    "text" in item &&
-    typeof item.text === "string"
-  ) {
-    return item.text.includes(needle);
-  }
-  return false;
-}
-
-function visualDecisionStillValid(
-  decision: VisualDecisionStrip,
-  context: VisualDecisionValidityContext,
-) {
-  if (visualDecisionLooksProposalReplacement(decision)) {
-    return context.hasActiveCanvasProposal;
-  }
-  if (!visualDecisionLooksEmptyProjectOnly(decision)) return true;
-  if (!context.projectEmptyStatus) return false;
-  return context.projectEmptyStatus.empty && !context.hasSavedMockups;
-}
-
-function visualDecisionLooksProposalReplacement(decision: VisualDecisionStrip) {
-  return decision.options.some((option) =>
-    ["replace_option", "add_option", "start_fresh"].includes(
-      option.canvasAction ?? "",
-    ),
-  );
-}
-
-function visualDecisionLooksEmptyProjectOnly(decision: VisualDecisionStrip) {
-  const text = [
-    decision.title,
-    decision.summary,
-    ...decision.options.flatMap((option) => [
-      option.id,
-      option.label,
-      option.description,
-      option.prompt,
-    ]),
-  ]
-    .join(" ")
-    .toLowerCase();
-  return (
-    text.includes("project is empty") ||
-    text.includes("empty project") ||
-    text.includes("empty-project") ||
-    text.includes("no app structure")
-  );
-}
-
-const DISMISSED_VISUAL_DECISIONS_STORAGE_KEY =
-  "codex.visualDecision.dismissed.v1";
-
-function loadDismissedVisualDecisionIds(): Record<string, true> {
-  if (typeof window === "undefined") return {};
-  try {
-    const parsed = JSON.parse(
-      window.localStorage.getItem(DISMISSED_VISUAL_DECISIONS_STORAGE_KEY) ||
-        "{}",
-    );
-    if (!parsed || typeof parsed !== "object") return {};
-    const record: Record<string, true> = {};
-    for (const [key, value] of Object.entries(parsed)) {
-      if (value === true) record[key] = true;
-    }
-    return record;
-  } catch {
-    return {};
-  }
-}
-
-function saveDismissedVisualDecisionIds(dismissed: Record<string, true>) {
-  if (typeof window === "undefined") return;
-  try {
-    window.localStorage.setItem(
-      DISMISSED_VISUAL_DECISIONS_STORAGE_KEY,
-      JSON.stringify(dismissed),
-    );
-  } catch {
-    // Ignore storage failures; state validity still prevents stale decisions.
-  }
-}
-
-function isAcceptedPlanImplementationTurn(turn: Turn) {
-  return turn.items.some((item) => {
-    if (item.type !== "userMessage") return false;
-    return item.content.some(
-      (part) =>
-        part.type === "text" && isAcceptedPlanImplementationPrompt(part.text),
-    );
-  });
-}
-
-function isAcceptedPlanImplementationPrompt(prompt: string) {
-  return prompt.trim().startsWith("I accept this plan. Implement it now");
-}
-
 const MOCKUP_TASK_SENTINEL = "[Codex Mockup Artifact Task]";
 const LIVE_OVERLAY_PROPOSAL_SENTINEL = "[Codex Live Overlay Proposal Context]";
 const CODE_PROPOSAL_WORKSPACE_SENTINEL =
   "[Codex Code Proposal Workspace Context]";
-const FEATURE_DRAFT_WORKSPACE_SENTINEL = "[Codex Feature Draft Context]";
 const SAVED_MOCKUP_REVIEW_SENTINEL = "[Codex Saved Mockup Review Context]";
 const VISUAL_DECISION_SELECTION_SENTINEL = "[Codex Visual Decision Selection]";
 const CANVAS_QUESTION_SENTINEL = "[Codex Canvas Question Context]";
@@ -5864,8 +5031,8 @@ function previewArtifactStorageRules(
   return [
     `- Save standalone HTML files under ${baseDir}.`,
     `- Save ${baseDir}/manifest.json with version 1, proposalSetId "${proposalSetId}", threadId "${threadId ?? "unknown"}", artifactKind "${artifactKind}", originalPrompt, depth "quick" or "full", selectedMockupId, and one mockups entry per file: id, label, title, summary, file.`,
-    `- Use labels A, B, and C. A single generated proposal must be labeled "A", not "Preview".`,
-    `- Use file names such as ${filePrefix}-a.html, ${filePrefix}-b.html, and ${filePrefix}-c.html inside ${baseDir}.`,
+    `- Use product-facing labels such as "Draft" or a short direction name; do not use lettered labels.`,
+    `- Use file names such as ${filePrefix}-draft.html or ${filePrefix}-<short-direction>.html inside ${baseDir}.`,
     "- Keep every updated artifact for this turn inside the same proposalSetId folder instead of writing to the root .codex/mockups folder.",
   ].join("\n");
 }
@@ -5876,142 +5043,6 @@ function isMockupGenerationPrompt(prompt: string) {
 
 function isLiveOverlayProposalPrompt(prompt: string) {
   return prompt.trimStart().startsWith(LIVE_OVERLAY_PROPOSAL_SENTINEL);
-}
-
-function isExplicitCodeBackedProposalRequest(prompt: string) {
-  const text = prompt.toLowerCase().replace(/\s+/g, " ").trim();
-  return (
-    /\bproposal workspaces?\b/.test(text) ||
-    /\brunnable\s+(?:option|options|proposal|proposals|candidate|candidates|app|apps)\b/.test(
-      text,
-    ) ||
-    /\bcode[-\s]?backed\s+(?:option|options|proposal|proposals)\b/.test(text)
-  );
-}
-
-function isExplicitMultiOptionProposalRequest(prompt: string) {
-  const text = prompt.toLowerCase().replace(/\s+/g, " ").trim();
-  return (
-    /\b(?:two|three|2|3)\s+(?:(?:different|runnable|reviewable|visual|separate)\s+){0,4}(?:options|directions|variants|proposals|candidates|layouts|previews|mockups|wireframes)\b/.test(
-      text,
-    ) ||
-    /\b(?:a\/b|a\/b\/c|abc|a,\s*b,?\s*(?:and\s+)?c)\b/.test(text)
-  );
-}
-
-export function shouldCreateFeatureDraftFromCanvasPrompt(args: {
-  backingPreference?: string | null;
-  hasActiveProposal: boolean;
-  hasSelectedPreview: boolean;
-  isExistingProject: boolean;
-  planMode: boolean;
-  prompt: string;
-  resolutionAction?: string | null;
-  wantsOptions?: boolean | null;
-}) {
-  const text = normalizedPromptText(args.prompt);
-  if (!text) return false;
-  if (!args.isExistingProject || args.planMode) return false;
-  if (args.resolutionAction !== "CREATE_PROPOSAL") return false;
-  if (args.wantsOptions || args.hasActiveProposal || args.hasSelectedPreview) {
-    return false;
-  }
-  if (isFeatureDraftBuildRequest(text) || isFeatureDraftDiscardRequest(text)) {
-    return false;
-  }
-  if (isFeatureDraftParkRequest(text) || isFeatureDraftResumeRequest(text)) {
-    return false;
-  }
-  if (isExplicitMultiOptionProposalRequest(text)) return false;
-  if (isExplicitCodeBackedProposalRequest(text)) return false;
-  if (/\b(?:mockup|mockups|wireframe|wireframes|a\/b|options?)\b/.test(text)) {
-    return false;
-  }
-  if (
-    /\b(?:implement|apply|build)\b/.test(text) &&
-    !/\b(?:show|preview|draft|try|explore|could|would|where|before)\b/.test(text)
-  ) {
-    return false;
-  }
-  return (
-    /\bshow\s+me\b.*\b(?:feature|flow|workflow|screen|page|experience|mode|panel|drawer|dashboard|onboarding|checkout|settings|search|filter|upload|import|export|notification)\b/.test(
-      text,
-    ) ||
-    /\b(?:show|preview|draft|try|explore|prototype|sketch)\b.*\b(?:feature|flow|workflow|screen|page|experience|mode|panel|drawer|dashboard|onboarding|checkout|settings|search|filter|upload|import|export|notification)\b/.test(
-      text,
-    ) ||
-    /\b(?:how|what)\b.*\b(?:would|could|should)\b.*\b(?:work|look|feel)\b/.test(
-      text,
-    ) ||
-    /\b(?:show|preview|draft|try|explore)\b.*\b(?:before|first)\b/.test(text)
-  );
-}
-
-export function shouldRouteToFeatureDraftPrompt(args: {
-  inspectorIsDraft: boolean;
-  prompt: string;
-}) {
-  const text = normalizedPromptText(args.prompt);
-  if (!text) return false;
-  if (isFeatureDraftBuildRequest(text) || isFeatureDraftDiscardRequest(text)) {
-    return false;
-  }
-  if (isFeatureDraftParkRequest(text) || isFeatureDraftResumeRequest(text)) {
-    return false;
-  }
-  if (args.inspectorIsDraft) return true;
-  return (
-    /\b(?:draft|this)\b.*\b(?:revise|change|tweak|adjust|update|make|add|remove|try)\b/.test(
-      text,
-    ) ||
-    /\b(?:revise|change|tweak|adjust|update|make|add|remove|try)\b.*\bdraft\b/.test(
-      text,
-    )
-  );
-}
-
-export function isFeatureDraftBuildRequest(prompt: string) {
-  const text = normalizedPromptText(prompt);
-  return (
-    /\bbuild\s+this\b/.test(text) ||
-    /\bbuild\s+(?:the\s+)?draft\b/.test(text) ||
-    /\bmake\s+this\s+real\b/.test(text) ||
-    /\bimplement\s+(?:this|the\s+draft)\b/.test(text) ||
-    /\bapply\s+(?:this|the\s+draft)\b/.test(text)
-  );
-}
-
-export function isFeatureDraftDiscardRequest(prompt: string) {
-  const text = normalizedPromptText(prompt);
-  return (
-    /\bdiscard\s+(?:this\s+)?draft\b/.test(text) ||
-    /\bdiscard\s+this\b/.test(text) ||
-    /\bdrop\s+(?:this\s+)?draft\b/.test(text) ||
-    /\bcancel\s+(?:this\s+)?draft\b/.test(text)
-  );
-}
-
-export function isFeatureDraftParkRequest(prompt: string) {
-  const text = normalizedPromptText(prompt);
-  return (
-    /\bpark\s+(?:this\s+)?draft\b/.test(text) ||
-    /\bpark\s+this\b/.test(text) ||
-    /\bsave\s+(?:this\s+)?draft\s+for\s+later\b/.test(text)
-  );
-}
-
-export function isFeatureDraftResumeRequest(prompt: string) {
-  const text = normalizedPromptText(prompt);
-  return (
-    /\bresume\s+(?:this\s+)?draft\b/.test(text) ||
-    /\bresume\s+this\b/.test(text) ||
-    /\breopen\s+(?:this\s+)?draft\b/.test(text) ||
-    /\bcontinue\s+(?:this\s+)?draft\b/.test(text)
-  );
-}
-
-function normalizedPromptText(prompt: string) {
-  return prompt.toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 function isMockupReviewPrompt(prompt: string) {
@@ -6034,198 +5065,6 @@ function isSavedMockupArtifactRequest(prompt: string) {
   );
 }
 
-function turnTouchesSavedMockups(turn: Turn) {
-  return turn.items.some((item) => {
-    if (item.type !== "fileChange") return false;
-    return item.changes.some((change) => {
-      const path = change.path.replace(/\\/g, "/").toLowerCase();
-      return path.includes("/.codex/mockups/");
-    });
-  });
-}
-
-function visualDecisionComposerText(option: VisualDecisionOption) {
-  return option.description
-    ? `${option.label}: ${option.description}`
-    : option.label;
-}
-
-export function visualDecisionOptionCreatesMockups(option: VisualDecisionOption) {
-  const text = [option.id, option.label, option.description, option.prompt]
-    .join(" ")
-    .toLowerCase();
-  if (visualDecisionOptionCreatesCodeProposal(option)) return false;
-  if (visualDecisionOptionCreatesLiveOverlay(option)) return false;
-  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
-  return /\b(mockup|mockups|wireframe|wireframes|preview|previews|layout option|layout options|visual option|visual options|visual direction|visual directions|direction|directions|concept|concepts)\b/.test(
-    text,
-  );
-}
-
-export function visualDecisionOptionCreatesCodeProposal(option: VisualDecisionOption) {
-  const text = [option.id, option.label, option.description, option.prompt]
-    .join(" ")
-    .toLowerCase();
-  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
-  return /\b(runnable\s+proposal|proposal\s+workspace|code[-\s]?backed|temporary\s+workspace|candidate\s+app|candidate\s+apps)\b/.test(
-    text,
-  );
-}
-
-function codeProposalOptionIds(
-  option: VisualDecisionOption,
-): Array<"A" | "B" | "C"> {
-  const text = [option.id, option.label, option.description, option.prompt]
-    .join(" ")
-    .toLowerCase();
-  if (/\b(3|three)\b/.test(text)) return ["A", "B", "C"];
-  if (/\b(2|two)\b/.test(text)) return ["A", "B"];
-  if (/\b(options|directions|variants|candidates|concepts)\b/.test(text)) {
-    return ["A", "B", "C"];
-  }
-  return ["A"];
-}
-
-function codeProposalOptionIdsForPrompt(
-  prompt: string,
-  wantsOptions: boolean,
-): Array<"A" | "B" | "C"> {
-  const text = prompt.toLowerCase();
-  if (/\b(3|three)\b/.test(text)) return ["A", "B", "C"];
-  if (/\b(2|two)\b/.test(text)) {
-    return ["A", "B"];
-  }
-  if (wantsOptions || /\b(options|directions|variants|candidates|concepts)\b/.test(text)) {
-    return ["A", "B", "C"];
-  }
-  return ["A"];
-}
-
-function codeProposalAddOptionRequest(
-  prompt: string,
-  previewSet: CodeProposalSet,
-): CodeProposalAddOptionRequest | null {
-  const text = prompt.toLowerCase();
-  if (isCodeProposalImplementationCommitment(prompt)) return null;
-  const requestedOptionId = requestedCodeProposalTargetOptionId(prompt);
-  const hasAddIntent =
-    /\b(add|create|new|another|additional|one more|replace|refresh)\b/.test(text) ||
-    Boolean(requestedOptionId);
-  if (!hasAddIntent) return null;
-  const optionId = requestedOptionId ?? nextMissingCodeProposalOptionId(previewSet);
-  if (!optionId) return null;
-  const sourceOptionId =
-    sourceCodeProposalOptionId(prompt, previewSet) ??
-    previewSet.selectedOptionId ??
-    previewSet.options[0]?.id ??
-    null;
-  return { optionId, sourceOptionId };
-}
-
-function requestedCodeProposalTargetOptionId(
-  prompt: string,
-): "A" | "B" | "C" | null {
-  const value = requestedCodeProposalTargetLabel(prompt);
-  return isCodeProposalOptionId(value) ? value : null;
-}
-
-function requestedCodeProposalTargetLabel(prompt: string): string | null {
-  const matches = [
-    ...prompt.matchAll(
-      /\b(?:add|create|new|another|additional|one\s+more|make|as|called|label(?:ed)?|replace|refresh|put(?:\s+it)?\s+in)\s+(?:it\s+)?(?:an?\s+)?(?:option\s+)?([a-z])\b/gi,
-    ),
-  ];
-  const last = matches[matches.length - 1]?.[1]?.toUpperCase();
-  if (last) return last;
-  const addMatch = prompt.match(/\badd\s+option\s+([a-z])\b/i);
-  return addMatch?.[1]?.toUpperCase() ?? null;
-}
-
-function sourceCodeProposalOptionId(
-  prompt: string,
-  previewSet: CodeProposalSet,
-): "A" | "B" | "C" | null {
-  const value = sourceCodeProposalOptionLabel(prompt);
-  if (!isCodeProposalOptionId(value)) return null;
-  return previewSet.options.some((option) => option.id === value)
-    ? value
-    : null;
-}
-
-function sourceCodeProposalOptionLabel(prompt: string): string | null {
-  const match = prompt.match(
-    /\b(?:based\s+on|from|like|derive(?:d)?\s+from|using)\s+(?:option\s+)?([a-z])\b/i,
-  );
-  return match?.[1]?.toUpperCase() ?? null;
-}
-
-function isCodeProposalOptionId(
-  value: string | null | undefined,
-): value is "A" | "B" | "C" {
-  return value === "A" || value === "B" || value === "C";
-}
-
-function nextMissingCodeProposalOptionId(
-  previewSet: CodeProposalSet,
-): "A" | "B" | "C" | null {
-  const existing = new Set(previewSet.options.map((option) => option.id));
-  return (["A", "B", "C"] as const).find((id) => !existing.has(id)) ?? null;
-}
-
-export function visualDecisionOptionCreatesLiveOverlay(option: VisualDecisionOption) {
-  const text = [option.id, option.label, option.description, option.prompt]
-    .join(" ")
-    .toLowerCase();
-  if (/\bbuild\s+direct(?:ly)?\b/.test(text)) return false;
-  if (
-    option.canvasAction === "show_preview" ||
-    option.canvasAction === "show_options"
-  ) {
-    if (visualDecisionOptionCreatesCodeProposal(option)) return false;
-    if (
-      /\b(mockup|mockups|wireframe|wireframes|standalone\s+html|static\s+html)\b/.test(
-        text,
-      )
-    ) {
-      return false;
-    }
-    return shouldUseLiveOverlayProposal(text);
-  }
-  return (
-    text.includes("codex-plan-preview") ||
-    /\blive\s+(?:overlay|proposal|preview\s+proposal|preview\s+option)/.test(
-      text,
-    ) ||
-    /\btemporary\s+(?:live\s+)?(?:overlay|proposal|preview)\b/.test(text)
-  );
-}
-
-function shouldUseLiveOverlayProposal(prompt: string) {
-  const text = prompt.toLowerCase();
-  if (
-    /\b(mockup|mockups|wireframe|wireframes|standalone\s+html|static\s+html)\b/.test(
-      text,
-    )
-  ) {
-    return false;
-  }
-  if (
-    /\b(new\s+(?:page|route)|multi[-\s]?page|whole\s+app|entire\s+app|redesign\s+(?:the\s+)?(?:whole|entire)|navigation\s+structure|full\s+dashboard)\b/.test(
-      text,
-    )
-  ) {
-    return false;
-  }
-  if (
-    /\b(settings|button|filter|menu|modal|drawer|panel|sheet|popover|toolbar|header|footer|nav|tab|placement|somewhere|where|option|options|direction|directions|variant|variants|preview)\b/.test(
-      text,
-    )
-  ) {
-    return true;
-  }
-  return text.length <= 220 && shouldOfferPlanPreview(prompt);
-}
-
 function shouldUseCodeProposalWorkspace(prompt: string) {
   const text = prompt.toLowerCase();
   if (/\b(runnable\s+proposal|proposal\s+workspace|candidate\s+app)\b/.test(text)) {
@@ -6243,41 +5082,6 @@ function shouldUseCodeProposalWorkspace(prompt: string) {
   );
 }
 
-function visualDecisionArtifactKind(option: VisualDecisionOption) {
-  return previewArtifactKindFromText(
-    [option.id, option.label, option.description, option.prompt].join(" "),
-    "mockup",
-  );
-}
-
-function explicitPreviewArtifactKind(
-  prompt: string,
-  fallback: PreviewArtifactKind,
-) {
-  return previewArtifactKindFromText(prompt, fallback);
-}
-
-function selectedMockupIdForLoadedSet(
-  previewSet: MockupPreviewSet,
-  preferredId: string | null | undefined,
-) {
-  if (
-    preferredId &&
-    previewSet.mockups.some((mockup) => mockup.id === preferredId)
-  ) {
-    return preferredId;
-  }
-  if (
-    previewSet.selectedMockupId &&
-    previewSet.mockups.some(
-      (mockup) => mockup.id === previewSet.selectedMockupId,
-    )
-  ) {
-    return previewSet.selectedMockupId;
-  }
-  return previewSet.mockups[0]?.id ?? null;
-}
-
 function visualDecisionSelectionPrompt(
   action: VisualDecisionComposerAction,
   visiblePrompt: string,
@@ -6285,7 +5089,6 @@ function visualDecisionSelectionPrompt(
   artifactKind: PreviewArtifactKind | null,
   threadId: string | null,
   liveContext = "",
-  codeProposal: PreparedProposalWorkspaces | null = null,
 ) {
   const storageRules =
     proposalSetId && artifactKind
@@ -6296,30 +5099,22 @@ function visualDecisionSelectionPrompt(
         )}`
       : "";
   const liveOverlayRules = visualDecisionOptionCreatesLiveOverlay(action.option)
-    ? `\n\n${liveOverlayProposalOutputRules(
-        /\b(2|3|two|three|options|directions|variants)\b/i.test(
-          action.option.prompt,
-        ),
-      )}\n${liveContext}`
-    : "";
-  const codeProposalRules = codeProposal
-    ? `\n\n${codeProposalWorkspaceRules(codeProposal)}`
+    ? `\n\n${liveOverlayProposalOutputRules()}\n${liveContext}`
     : "";
   return `${VISUAL_DECISION_SELECTION_SENTINEL}
 
-Selected desktop decision option:
+Selected desktop Draft action:
 - Decision id: ${action.decisionId}
 - Option id: ${action.option.id}
 - Label: ${action.option.label}
 - Description: ${action.option.description || "none"}
 
-Selected option prompt for supporting context:
+Selected Draft action prompt for supporting context:
 ${action.option.prompt}
 
-The selected option is supporting context. The user-visible composer text below is authoritative if it differs from that context.
+The selected Draft action is supporting context. The user-visible composer text below is authoritative if it differs from that context.
 ${storageRules}
 ${liveOverlayRules}
-${codeProposalRules}
 
 User-visible composer text:
 ${visiblePrompt.trim() || visualDecisionComposerText(action.option)}`;
@@ -6348,9 +5143,9 @@ function liveAppReviewContext(
     for (const mark of appMarks) {
       const area = mark.areaMark;
       const target = [
-        mark.proposalTurnId ? `proposal=${quotePromptValue(mark.proposalTurnId, 80)}` : "",
-        mark.proposalOptionId ? `option=${mark.proposalOptionId}` : "",
-        mark.canvasLane ? `lane=${mark.canvasLane}` : "",
+        mark.surface === "draft" && mark.draftId
+          ? `draft=${quotePromptValue(mark.draftId, 80)}`
+          : "",
         mark.canvasId ? `canvasId=${quotePromptValue(mark.canvasId, 80)}` : "",
         mark.sourceFile ? `sourceFile=${quotePromptValue(mark.sourceFile, 120)}` : "",
         mark.componentName ? `component=${quotePromptValue(mark.componentName, 80)}` : "",
@@ -6361,9 +5156,7 @@ function liveAppReviewContext(
         `  - ${mark.markLabel || "Mark"} route=${quotePromptValue(
           area.route ?? mark.previewUrl,
           180,
-        )} source=${
-          mark.source === "proposalHighlight" ? "proposal-highlight" : "user-mark"
-        } viewport=${mark.viewport} rect=${Math.round(area.x)},${Math.round(
+        )} surface=${mark.surface} viewport=${mark.viewport} rect=${Math.round(area.x)},${Math.round(
           area.y,
         )},${Math.round(area.width)},${Math.round(
           area.height,
@@ -6385,6 +5178,34 @@ function rememberedPreviewUrlForProject(projectId: string) {
   }
 }
 
+function liveContextWithSelectedProposalGuidance(
+  liveContext: string,
+  proposal: PlanProposal,
+) {
+  const proposalGuidance = planPreviewDecisionSummary(proposal).trim();
+  if (!proposalGuidance) return liveContext;
+  return `${liveContext}
+
+Selected proposal guidance:
+${proposalGuidance}
+
+Use the selected proposal only as Draft guidance. Build the actual visible change in the isolated Draft workspace.`;
+}
+
+function liveContextWithVisualDecisionGuidance(
+  liveContext: string,
+  action: VisualDecisionComposerAction,
+) {
+  return `${liveContext}
+
+Selected decision guidance:
+- Label: ${action.option.label}
+- Description: ${action.option.description || "none"}
+- Prompt: ${action.option.prompt}
+
+Use the selected decision only as Draft guidance. Build the actual visible change in the isolated Draft workspace.`;
+}
+
 function canvasResolverInput(
   state: {
     activeLiveProposal: PlanProposal | null;
@@ -6395,309 +5216,46 @@ function canvasResolverInput(
     desktop: DesktopState;
     inspector: InspectorSelection;
     liveContext: string;
-    selectedCodeProposalSet: CodeProposalSet | null;
-    selectedMockupIsHistory: boolean;
-    selectedMockupPreviewSet: MockupPreviewSet | null;
+    selectedFeatureDraft: FeatureDraft | null;
     status: ProjectEmptyStatus | null;
   },
   message: string,
 ) {
-  const activeProposalSet =
-    canvasActiveProposalSet({
-      activeLiveProposal: state.activeLiveProposal,
-      activeProjectId: state.activeProject.id,
-      selectedCodeProposalSet: state.selectedCodeProposalSet,
-      selectedMockupIsHistory: state.selectedMockupIsHistory,
-      selectedMockupPreviewSet: state.selectedMockupPreviewSet,
-    }) ?? null;
-  return {
-    message,
-    live: {
-      exists: !state.status?.empty,
-      running: Boolean(rememberedPreviewUrlForProject(state.activeProject.id)),
-      previewUrl: rememberedPreviewUrlForProject(state.activeProject.id),
-    },
-    selectedSurface: selectedCanvasSurface({
-      activeProposalSet,
-      activeLiveProposal: state.activeLiveProposal,
-      inspector: state.inspector,
-      selectedCodeProposalSet: state.selectedCodeProposalSet,
-      selectedMockupPreviewSet: state.selectedMockupPreviewSet,
-    }),
-    activeProposalSet,
-    historicalProposalSets: canvasHistoricalProposalSets({
-      activeProjectId: state.activeProject.id,
-      desktop: state.desktop,
-      selectedMockupPreviewSet: state.selectedMockupPreviewSet,
-    }),
+  void state.activeLiveProposal;
+  void state.activeThreadId;
+  void state.liveContext;
+  const selectedSurface: CanvasSurface =
+    state.inspector.type === "draftPreview" ? "Draft" : "Live";
+  const liveExists = !state.status?.empty;
+  const workflowLedger = deriveCanvasWorkflowLedger({
+    liveExists,
+    selectedSurface,
+    activeDraft: state.selectedFeatureDraft,
+    selectedDraft: state.selectedFeatureDraft,
+  });
+	  return {
+	    message,
+	    live: {
+	      exists: liveExists,
+	      running: Boolean(rememberedPreviewUrlForProject(state.activeProject.id)),
+	      previewUrl: rememberedPreviewUrlForProject(state.activeProject.id),
+	    },
+	    selectedSurface,
+	    workflowLedger,
+    activeProposalSet: null,
+    historicalProposalSets: [],
     marks: state.contexts.map(canvasMarkState),
     attachmentCount: state.attachmentsCount,
     planMode: state.activeProject.settings.planMode,
   };
 }
 
-function canvasActiveProposalSet(state: {
-  activeLiveProposal: PlanProposal | null;
-  activeProjectId: string;
-  selectedCodeProposalSet: CodeProposalSet | null;
-  selectedMockupIsHistory: boolean;
-  selectedMockupPreviewSet: MockupPreviewSet | null;
-}): CanvasProposalState | null {
-  if (
-    state.selectedCodeProposalSet &&
-    state.selectedCodeProposalSet.projectId === state.activeProjectId &&
-    state.selectedCodeProposalSet.status !== "history" &&
-    state.selectedCodeProposalSet.status !== "applied"
-  ) {
-    return {
-      id: state.selectedCodeProposalSet.proposalSetId,
-      backing: state.selectedCodeProposalSet.proposalBacking,
-      buildStrategy: state.selectedCodeProposalSet.buildStrategy,
-      lifecycle: "active",
-      proposalLifecycle: "shown",
-      selectedOptionId: state.selectedCodeProposalSet.selectedOptionId,
-      options: state.selectedCodeProposalSet.options.map((option) => ({
-        id: option.id,
-        title: option.title,
-        hasAgentMarks: option.changedFiles.length > 0,
-      })),
-    };
-  }
-  if (
-    state.selectedMockupPreviewSet &&
-    state.selectedMockupPreviewSet.projectId === state.activeProjectId &&
-    !state.selectedMockupIsHistory
-  ) {
-    const total = state.selectedMockupPreviewSet.mockups.length;
-    return {
-      id: state.selectedMockupPreviewSet.proposalSetId,
-      backing: state.selectedMockupPreviewSet.proposalBacking,
-      buildStrategy: state.selectedMockupPreviewSet.buildStrategy,
-      lifecycle: "active",
-      proposalLifecycle: "shown",
-      selectedOptionId: mockupCanvasOptionId(
-        state.selectedMockupPreviewSet,
-        state.selectedMockupPreviewSet.selectedMockupId,
-      ),
-      options: state.selectedMockupPreviewSet.mockups.map((mockup, index) => ({
-        id: savedMockupCanvasSurface(mockup, index, total),
-        title: mockup.title,
-        hasAgentMarks: Boolean(mockup.highlights?.length),
-      })),
-    };
-  }
-  if (
-    state.activeLiveProposal &&
-    state.activeLiveProposal.projectId === state.activeProjectId &&
-    state.activeLiveProposal.status === "pending"
-  ) {
-    const variants = state.activeLiveProposal.previewSpec?.variants ?? [];
-    return {
-      id: state.activeLiveProposal.turnId,
-      backing: state.activeLiveProposal.proposalBacking ?? "live_dom_patch",
-      buildStrategy:
-        state.activeLiveProposal.buildStrategy ?? "convert_dom_patch_to_code",
-      lifecycle: "active",
-      proposalLifecycle: state.activeLiveProposal.proposalLifecycle ?? "shown",
-      selectedOptionId:
-        variants.length <= 1
-          ? "A"
-          : planVariantCanvasSurface(
-              state.activeLiveProposal.previewSelectedVariantId,
-            ),
-      options:
-        variants.length > 0
-          ? variants.map((variant) => ({
-              id: (variants.length <= 1 ? "A" : variant.id) as CanvasSurface,
-              title: variant.title,
-              hasAgentMarks: Boolean(variant.highlights?.length),
-            }))
-          : [{ id: "A" }],
-    };
-  }
-  return null;
-}
-
-function canvasHistoricalProposalSets(state: {
-  activeProjectId: string;
-  desktop: DesktopState;
-  selectedMockupPreviewSet: MockupPreviewSet | null;
-}): CanvasProposalState[] {
-  const codeHistory = Object.values(state.desktop.codeProposalSets)
-    .filter(
-      (proposal) =>
-        proposal.projectId === state.activeProjectId &&
-        (proposal.status === "applied" || proposal.status === "history"),
-    )
-    .map((proposal): CanvasProposalState => ({
-      id: proposal.proposalSetId,
-      backing: proposal.proposalBacking,
-      buildStrategy: proposal.buildStrategy,
-      lifecycle: proposal.status === "applied" ? "accepted" : "history",
-      proposalLifecycle:
-        proposal.status === "applied" ? "promoted_to_live" : "archived",
-      selectedOptionId: proposal.selectedOptionId,
-      options: proposal.options.map((option) => ({
-        id: option.id,
-        title: option.title,
-        hasAgentMarks: option.changedFiles.length > 0,
-      })),
-    }));
-  const mockupHistory =
-    state.selectedMockupPreviewSet &&
-    state.desktop.mockupHistoryProposalSetIds[
-      state.selectedMockupPreviewSet.proposalSetId
-    ]
-      ? [
-          {
-            id: state.selectedMockupPreviewSet.proposalSetId,
-            backing: state.selectedMockupPreviewSet.proposalBacking,
-            buildStrategy: state.selectedMockupPreviewSet.buildStrategy,
-            lifecycle: "history" as const,
-            proposalLifecycle: "archived" as const,
-            selectedOptionId: mockupCanvasOptionId(
-              state.selectedMockupPreviewSet,
-              state.selectedMockupPreviewSet.selectedMockupId,
-            ),
-            options: state.selectedMockupPreviewSet.mockups.map(
-              (mockup, index) => ({
-                id: savedMockupCanvasSurface(
-                  mockup,
-                  index,
-                  state.selectedMockupPreviewSet?.mockups.length ?? 1,
-                ),
-                title: mockup.title,
-                hasAgentMarks: Boolean(mockup.highlights?.length),
-              }),
-            ),
-          },
-        ]
-      : [];
-  const liveProposalHistory = Object.values(state.desktop.planProposals)
-    .filter(
-      (proposal) =>
-        proposal.projectId === state.activeProjectId &&
-        proposal.proposalKind === "live_proposal" &&
-        proposal.status === "accepted" &&
-        Boolean(proposal.previewSpec),
-    )
-    .map((proposal): CanvasProposalState => {
-      const variants = proposal.previewSpec?.variants ?? [];
-      return {
-        id: proposal.turnId,
-        backing: proposal.proposalBacking ?? "live_dom_patch",
-        buildStrategy: proposal.buildStrategy ?? "convert_dom_patch_to_code",
-        lifecycle: "accepted",
-        proposalLifecycle:
-          proposal.proposalLifecycle ?? "accepted_for_build",
-        selectedOptionId:
-          variants.length <= 1
-            ? "A"
-            : planVariantCanvasSurface(proposal.previewSelectedVariantId),
-        options:
-          variants.length > 0
-            ? variants.map((variant) => ({
-                id: (variants.length <= 1 ? "A" : variant.id) as CanvasSurface,
-                title: variant.title,
-                hasAgentMarks: Boolean(variant.highlights?.length),
-              }))
-            : [{ id: "A" }],
-      };
-    });
-  return [...codeHistory, ...mockupHistory, ...liveProposalHistory];
-}
-
-function selectedCanvasSurface(state: {
-  activeProposalSet: CanvasProposalState | null;
-  activeLiveProposal: PlanProposal | null;
-  inspector: InspectorSelection;
-  selectedCodeProposalSet: CodeProposalSet | null;
-  selectedMockupPreviewSet: MockupPreviewSet | null;
-}): CanvasSurface {
-  if (state.inspector.type === "codeProposalPreview") {
-    return state.selectedCodeProposalSet?.selectedOptionId ?? "A";
-  }
-  if (state.inspector.type === "mockupPreview" && state.selectedMockupPreviewSet) {
-    return (
-      mockupCanvasOptionId(
-        state.selectedMockupPreviewSet,
-        state.selectedMockupPreviewSet.selectedMockupId,
-      ) ?? "A"
-    );
-  }
-  if (state.inspector.type === "planPreview" && state.activeLiveProposal) {
-    const variants = state.activeLiveProposal.previewSpec?.variants ?? [];
-    return variants.length <= 1
-      ? "A"
-      : planVariantCanvasSurface(state.activeLiveProposal.previewSelectedVariantId);
-  }
-  return state.activeProposalSet?.selectedOptionId ?? "Live";
-}
-
-function planVariantCanvasSurface(
-  value: string | null | undefined,
-): CanvasSurface {
-  return value === "A" || value === "B" || value === "C" ? value : "A";
-}
-
 function canvasMarkState(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return {
-      id: context.id,
-      source:
-        context.source === "proposalHighlight"
-          ? ("agent_change_mark" as const)
-          : ("user_mark" as const),
-      surface: "Live" as const,
-    };
-  }
   return {
     id: context.id,
-    source:
-      context.source === "proposalHighlight"
-        ? ("agent_change_mark" as const)
-        : ("user_mark" as const),
-    surface: mockupCanvasSurfaceFromLabel(context.mockupLabel) ?? "A",
-    proposalSetId: context.proposalSetId,
-    optionId: mockupCanvasSurfaceFromLabel(context.mockupLabel) ?? "A",
+    source: "user_mark" as const,
+    surface: context.surface === "draft" ? ("Draft" as const) : ("Live" as const),
   };
-}
-
-function mockupCanvasOptionId(
-  previewSet: MockupPreviewSet,
-  selectedMockupId: string | null | undefined,
-): CanvasSurface | null {
-  const total = previewSet.mockups.length;
-  const selectedIndex = previewSet.mockups.findIndex(
-    (mockup) => mockup.id === selectedMockupId,
-  );
-  const index = selectedIndex >= 0 ? selectedIndex : 0;
-  const mockup = previewSet.mockups[index];
-  return mockup ? savedMockupCanvasSurface(mockup, index, total) : null;
-}
-
-function savedMockupCanvasSurface(
-  mockup: SavedMockup,
-  index: number,
-  total: number,
-): CanvasSurface {
-  if (total <= 1) return "A";
-  return mockupCanvasSurfaceFromLabel(mockup.label || mockup.id) ??
-    (index === 0 ? "A" : index === 1 ? "B" : "C");
-}
-
-function mockupCanvasSurfaceFromLabel(
-  label: string | null | undefined,
-): CanvasSurface | null {
-  const normalized = (label || "").trim().toUpperCase();
-  return normalized === "A" ||
-    normalized === "B" ||
-    normalized === "C" ||
-    normalized === "PREVIEW"
-    ? normalized === "PREVIEW"
-      ? "A"
-      : normalized
-    : null;
 }
 
 function latestActiveLiveProposalForThread(
@@ -6722,41 +5280,11 @@ function archiveCanvasProposalsForThread(
   threadId: string | null,
 ): DesktopState {
   if (!threadId) return desktop;
-  const codeProposalSetId =
-    desktop.codeProposalActiveSetIdsByThreadId[threadId] ?? null;
-  const codeProposalCompareSetId =
-    desktop.codeProposalCompareSetIdsByThreadId[threadId] ?? null;
   const mockupProposalSetId =
     desktop.mockupActiveProposalSetIdsByThreadId[threadId] ?? null;
   let next = desktop;
   if (mockupProposalSetId) {
     next = markMockupProposalSetAsHistory(next, mockupProposalSetId);
-  }
-  if (codeProposalSetId && next.codeProposalSets[codeProposalSetId]) {
-    next = {
-      ...next,
-      codeProposalActiveSetIdsByThreadId: removeRecordKey(
-        next.codeProposalActiveSetIdsByThreadId,
-        threadId,
-      ),
-      codeProposalSets: {
-        ...next.codeProposalSets,
-        [codeProposalSetId]: {
-          ...next.codeProposalSets[codeProposalSetId],
-          status: "history",
-          updatedAt: Date.now(),
-        },
-      },
-    };
-  }
-  if (codeProposalCompareSetId) {
-    next = {
-      ...next,
-      codeProposalCompareSetIdsByThreadId: removeRecordKey(
-        next.codeProposalCompareSetIdsByThreadId,
-        threadId,
-      ),
-    };
   }
   const planProposals = Object.fromEntries(
     Object.entries(next.planProposals).map(([turnId, proposal]) => [
@@ -6769,136 +5297,6 @@ function archiveCanvasProposalsForThread(
     ]),
   );
   return { ...next, planProposals };
-}
-
-function markCodeProposalSetAsApplied(
-  desktop: DesktopState,
-  proposalSetId: string,
-): DesktopState {
-  const stored = desktop.codeProposalSets[proposalSetId];
-  if (!stored) return desktop;
-  const now = Date.now();
-  const selectedOptionId =
-    stored.selectedOptionId ?? stored.options[0]?.id ?? null;
-  const activeThreadId = stored.threadId ?? "";
-  return {
-    ...desktop,
-    codeProposalActiveSetIdsByThreadId: activeThreadId
-      ? removeRecordKey(desktop.codeProposalActiveSetIdsByThreadId, activeThreadId)
-      : desktop.codeProposalActiveSetIdsByThreadId,
-    codeProposalCompareSetIdsByThreadId: activeThreadId
-      ? {
-          ...desktop.codeProposalCompareSetIdsByThreadId,
-          [activeThreadId]: proposalSetId,
-        }
-      : desktop.codeProposalCompareSetIdsByThreadId,
-    codeProposalSets: {
-      ...desktop.codeProposalSets,
-      [proposalSetId]: {
-        ...stored,
-        selectedOptionId,
-        status: "applied",
-        options: stored.options.map((option) =>
-          option.id === selectedOptionId
-            ? {
-                ...option,
-                status: "applied",
-                appliedAt: option.appliedAt ?? now,
-              }
-            : option,
-        ),
-        updatedAt: now,
-      },
-    },
-  };
-}
-
-function codeProposalSetIsActiveForRouting(
-  previewSet: CodeProposalSet | null,
-  activeProjectId: string,
-) {
-  return Boolean(
-    previewSet &&
-      previewSet.projectId === activeProjectId &&
-      previewSet.status !== "applied" &&
-      previewSet.status !== "history",
-  );
-}
-
-export function shouldRecoverAppliedCodeProposalFromThread(
-  previewSet: CodeProposalSet,
-  thread: Thread,
-) {
-  if (!previewSet.turnId) return false;
-  const proposalTurnIndex = thread.turns.findIndex(
-    (turn) => turn.id === previewSet.turnId,
-  );
-  if (proposalTurnIndex < 0) return false;
-  const selectedOptionId = previewSet.selectedOptionId ?? previewSet.options[0]?.id ?? null;
-  const candidateTurns = thread.turns
-    .slice(proposalTurnIndex + 1)
-    .filter((turn): turn is Turn => Boolean(turn));
-  return candidateTurns.some((turn) => {
-    if (turn.status !== "completed") return false;
-    const userText = turn.items
-      .filter((item): item is Extract<ThreadItem, { type: "userMessage" }> =>
-        item.type === "userMessage",
-      )
-      .flatMap((item) =>
-        item.content.flatMap((input) =>
-          input.type === "text" ? [input.text] : [],
-        ),
-      )
-      .join("\n");
-    const agentText = finalAgentText(turn);
-    if (
-      !isCodeProposalImplementationCommitment(userText) &&
-      !agentTextLooksLikeCodeProposalBuiltLive(agentText, selectedOptionId)
-    ) {
-      return false;
-    }
-    const requestedOptionId = optionIdFromText(userText);
-    if (
-      selectedOptionId &&
-      requestedOptionId &&
-      requestedOptionId !== selectedOptionId
-    ) {
-      return false;
-    }
-    return turn.items.some(
-      (item) =>
-        item.type === "fileChange" &&
-        Array.isArray(item.changes) &&
-        item.changes.length > 0,
-    );
-  });
-}
-
-function agentTextLooksLikeCodeProposalBuiltLive(
-  text: string,
-  selectedOptionId: "A" | "B" | "C" | null,
-) {
-  const normalized = text.toLowerCase();
-  if (!normalized) return false;
-  const optionPattern = selectedOptionId
-    ? `(?:option\\s+${selectedOptionId.toLowerCase()}|${selectedOptionId.toLowerCase()})`
-    : "(?:option\\s+[abc]|[abc])";
-  return (
-    new RegExp(`\\b(?:built|implemented|applied)\\s+${optionPattern}\\s+into\\s+live\\b`).test(
-      normalized,
-    ) ||
-    /\b(?:built|implemented|applied)\b[\s\S]{0,80}\binto\s+live\b/.test(
-      normalized,
-    ) ||
-    /\blive project now contains\b/.test(normalized)
-  );
-}
-
-function canvasProposalOptionIds(
-  prompt: string,
-  wantsOptions: boolean,
-): Array<"A" | "B" | "C"> {
-  return codeProposalOptionIdsForPrompt(prompt, wantsOptions);
 }
 
 function canvasOperatingPromptSection(resolution?: CanvasActionResolution) {
@@ -6942,7 +5340,7 @@ ${liveContext}
 Agent Question Placeholder:
 - Decision focus: ${question.title}
 - Why Canvas is asking: ${question.reason}
-- This turn is decision-only. Do not run commands, edit files, create mockup artifacts, or create proposal workspaces in this turn.
+- This turn is decision-only. Do not run commands, edit files, create mockup artifacts, or create temporary workspaces in this turn.
 - Reason about the user's request and author the questionnaire yourself.
 - Return one short product-facing sentence plus exactly one fenced \`\`\`codex-decision-strip JSON block.
 - Do not copy fixed default wording unless it genuinely fits the user's intent.
@@ -6954,11 +5352,8 @@ Agent Question Placeholder:
 
 Allowed canvasAction values:
 - build_directly: implement in the real Live app.
-- show_preview: create one reviewable proposal lane before implementation.
-- show_options: create two or three proposal lanes before implementation.
-- add_option: add or refresh one option in an active proposal set.
-- replace_option: replace one option in an active proposal set.
-- start_fresh: archive the current proposal context and begin a fresh proposal set.
+- show_draft: create one reviewable Draft in the real app context before implementation.
+- start_fresh: park the current Draft context and begin a fresh Draft direction.
 
 Decision strip JSON shape:
 {
@@ -6970,16 +5365,16 @@ Decision strip JSON shape:
       "label": "15 chars max",
       "description": "One concise sentence.",
       "prompt": "Self-contained instruction for the next Codex turn.",
-      "canvasAction": "build_directly | show_preview | show_options | add_option | replace_option | start_fresh"
+      "canvasAction": "build_directly | show_draft | start_fresh"
     }
   ]
 }
 
 Routing guidance for authored choices:
-- For small current-app visual ideas, a one-option preview should ask for a temporary live proposal with codex-plan-preview metadata and no real app file changes.
-- For multiple current-app directions, ask for two or three proposal variants; choose live proposal metadata for small placement/control work and runnable proposal workspaces for serious page/workflow/redesign work.
-- For blank-project or serious runnable proposal choices, mention runnable proposal workspaces in the option prompt so the desktop prepares isolated A/B/C folders.
-- Avoid asking a questionnaire if the user's wording already clearly chooses direct build, one proposal, or multiple options; in that case the resolver should not have selected this decision-only turn.
+- For existing apps, a one-feature "show me first" or "preview first" path should use canvasAction "show_draft". The label can be "Show Draft" or a short feature-specific phrase. The option prompt must describe the actual feature/change to try in the Draft.
+- For multiple current-app directions, ask the agent to create one named Draft direction first or to name the Draft direction it recommends. Do not use letter labels or compare lanes.
+- If a current Draft exists and the target is unclear, offer "Revise Draft", "New Draft", and when appropriate "Build now".
+- Avoid asking a questionnaire if the user's wording already clearly chooses direct build or Draft preview; in that case the resolver should not have selected this decision-only turn.
 
 Original user request:
 ${originalPrompt.trim()}`;
@@ -7035,13 +5430,13 @@ Desktop state:
 ${liveContext}
 
 Task:
-- Create ${wantsOptions ? "2 or 3" : "one"} saved HTML review preview${wantsOptions ? " directions" : ""} under .codex/mockups for the requested current-app change.
+- Create one saved HTML review preview under .codex/mockups for the requested current-app change. If the request contains multiple directions, name them in the summary and choose the single most useful Draft-style preview to create first.
 - Do not change real app implementation files in this turn.
 - Stop after the review artifact is ready; the desktop will open it automatically.
 
 Rules:
 ${previewArtifactStorageRules(proposalSetId, artifactKind, threadId)}
-- Name proposed options after user-facing workflow concepts from the plan, not after placement or component buckets.
+- Name the review preview after a user-facing workflow concept from the request, not after placement or component buckets.
 - Read the current project enough to reflect existing UI, brand, layout, route shape, palette, typography, and density. Do not overbuild platform logic or fake backend routes.
 - If a Live/App mark is attached below, scope the review preview to that area unless the user text says otherwise.
 - Add a highlights array to each manifest mockup entry when useful. Each highlight should name a visual area added or changed and include x, y, width, height, viewportWidth, viewportHeight, and a short note. These are review overlays only; they must not appear in accepted app UI.
@@ -7076,239 +5471,21 @@ Desktop state:
 - The user asked to review a visual direction before implementation.
 ${liveContext}
 
-${liveOverlayProposalOutputRules(wantsOptions)}
+${liveOverlayProposalOutputRules()}
 
 Original user request:
 ${originalPrompt.trim()}`;
 }
 
-function codeProposalWorkspacePrompt(
-  originalPrompt: string,
-  project: Project,
-  status: ProjectEmptyStatus,
-  wantsOptions: boolean,
-  planModeWasOn: boolean,
-  liveContext: string,
-  prepared: PreparedProposalWorkspaces,
-  resolution?: CanvasActionResolution,
-) {
-  const entries = status.meaningfulEntries.length
-    ? status.meaningfulEntries.slice(0, 12).join(", ")
-    : "app files detected";
-  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
-
-${canvasOperatingPromptSection(resolution)}
-
-Desktop state:
-- Project: ${project.name}
-- Project already has app files: ${status.empty ? "no" : "yes"}
-- Meaningful entries: ${entries}
-- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
-- The user asked to review ${wantsOptions ? "runnable options" : "a runnable proposal"} before implementation.
-${liveContext}
-
-${codeProposalWorkspaceRules(prepared)}
-
-Original user request:
-${originalPrompt.trim()}`;
-}
-
-function codeProposalAddOptionPrompt(
-  originalPrompt: string,
-  project: Project,
-  status: ProjectEmptyStatus | null,
-  planModeWasOn: boolean,
-  liveContext: string,
-  previewSet: CodeProposalSet,
-  prepared: PreparedProposalWorkspaces,
-  request: CodeProposalAddOptionRequest,
-) {
-  const entries = status?.meaningfulEntries.length
-    ? status.meaningfulEntries.slice(0, 12).join(", ")
-    : "app files detected";
-  const existingOptions = previewSet.options.map((option) => {
-    const source = option.id === request.sourceOptionId ? " [source]" : "";
-    return `- Option ${option.id}: ${option.workspacePath}${source}`;
-  });
-  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
-
-${canvasOperatingPromptSection()}
-
-Desktop state:
-- Project: ${project.name}
-- Project already has app files: ${status?.empty ? "no" : "yes"}
-- Meaningful entries: ${entries}
-- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
-- The user is adding or revising Option ${request.optionId} inside an existing runnable proposal set.
-- Keep the existing proposal set active so the user can compare ${previewSet.options.map((option) => option.id).join("/")} with Option ${request.optionId}.
-${liveContext}
-
-Existing proposal options:
-${existingOptions.join("\n")}
-
-${codeProposalWorkspaceRules(prepared)}
-
-Additional proposal rules:
-- Work only inside the prepared Option ${request.optionId} folder. Do not edit the live project and do not edit existing option folders such as A or B.
-- Keep the option label as Option ${request.optionId}; do not rename it to Option A just because this turn has one prepared folder.
-- The desktop supports at most three active comparison options at once: A, B, and C. If the user asks for Option D or more simultaneous options in follow-up, say that honestly and ask whether to revise/replace A, B, or C or start a fresh proposal set.
-${request.sourceOptionId ? `- Use Option ${request.sourceOptionId} as the visual/code starting point when useful, then apply the user's requested differences in Option ${request.optionId}.` : "- Use the current live project and existing options as visual context, then create the requested option."}
-- Stop when Option ${request.optionId} is ready. The desktop will keep it beside the existing options for comparison.
-
-Original user request:
-${originalPrompt.trim()}`;
-}
-
-function codeProposalReviewPrompt(
-  originalPrompt: string,
-  project: Project,
-  status: ProjectEmptyStatus | null,
-  planModeWasOn: boolean,
-  liveContext: string,
-  previewSet: CodeProposalSet,
-  requestedOptionId: "A" | "B" | "C" | null,
-) {
-  const entries = status?.meaningfulEntries.length
-    ? status.meaningfulEntries.slice(0, 12).join(", ")
-    : "app files detected";
-  const selected =
-    previewSet.options.find((option) => option.id === requestedOptionId) ??
-    previewSet.options.find(
-      (option) => option.id === previewSet.selectedOptionId,
-    ) ??
-    previewSet.options[0] ??
-    null;
-  const existingOptions = previewSet.options.map(
-    (option) =>
-      `- Option ${option.id}: ${option.title}; ${option.summary || "No summary saved."}; workspace=${option.workspacePath}${option.id === selected?.id ? " [selected]" : ""}`,
-  );
-  return `${CODE_PROPOSAL_WORKSPACE_SENTINEL}
-
-${canvasOperatingPromptSection()}
-
-Desktop state:
-- Project: ${project.name}
-- Project path: ${project.path}
-- Project already has app files: ${status?.empty ? "no" : "yes"}
-- Meaningful entries: ${entries}
-- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
-- The user is responding to an existing runnable proposal set.
-- Selected option: ${selected ? `Option ${selected.id} (${selected.workspacePath})` : "none"}
-- This request was sent to the agent instead of being desktop-fast-applied. The composer is the decision surface; the agent must decide whether to revise the proposal or build Live.
-${liveContext}
-
-Existing proposal options:
-${existingOptions.join("\n")}
-
-Decision policy:
-- The visible user request is authoritative. Do not silently promote a proposal to Live if the user is really asking to revise the proposal first.
-- If the user explicitly asks to build/implement/apply the selected option into Live, edit the real project at ${project.path}. Use the selected option workspace as source/reference and incorporate any attached marks or extra typed changes.
-- If the user asks to tweak, revise, compare, or show changes before implementation, edit only the relevant proposal option workspace and stop before changing Live.
-- If the intent is ambiguous between revising the proposal and implementing Live, ask one concise product-facing question instead of applying.
-- Do not rename Option ${selected?.id ?? "A"} or create a fresh A-only proposal when the user is referring to an existing option.
-- Canvas v2 supports at most three active comparison options: A, B, and C. If the user asks for more, say that plainly.
-- Keep the final response product-facing and summarize whether you changed Live, changed a proposal option, or need a decision.
-
-Original user request:
-${originalPrompt.trim()}`;
-}
-
-function featureDraftWorkspacePrompt(
-  originalPrompt: string,
-  project: Project,
-  status: ProjectEmptyStatus | null,
-  planModeWasOn: boolean,
-  liveContext: string,
-  draft: FeatureDraft,
-) {
-  const entries = status?.meaningfulEntries.length
-    ? status.meaningfulEntries.slice(0, 12).join(", ")
-    : "app files detected";
-  return `${FEATURE_DRAFT_WORKSPACE_SENTINEL}
-
-${canvasOperatingPromptSection()}
-
-Desktop state:
-- Project: ${project.name}
-- Project already has app files: ${status?.empty ? "no" : "yes"}
-- Meaningful entries: ${entries}
-- Original composer Plan Mode was: ${planModeWasOn ? "on" : "off"}
-- The user asked for one reviewable Draft in the real app context.
-- Draft name: ${draft.name}
-${liveContext}
-
-Draft rules:
-- This is a review-only Draft turn. The current working directory is an isolated Draft copy of Live.
-- Work only in the current Draft workspace. Do not edit the real Live project source in this turn.
-- Create one coherent Draft, not A/B/C options, mockup files, wireframe artifacts, or a decision strip.
-- Preserve the existing project conventions and make the Draft runnable in App Preview.
-- Use product-facing language in the visible response. Do not mention internal paths, workspace IDs, registry IDs, selectors, source paths, hidden JSON, or coordinates.
-- Stop after the Draft is ready. The desktop will show it as Draft and will only update Live if the user chooses Build this.
-
-User request:
-${originalPrompt.trim()}`;
-}
-
-function featureDraftRevisionPrompt(
-  draft: FeatureDraft,
-  userPrompt: string,
-  liveContext: string,
-) {
-  return `${FEATURE_DRAFT_WORKSPACE_SENTINEL}
-
-${canvasOperatingPromptSection()}
-
-Desktop state:
-- The user is revising an active Draft.
-- Draft name: ${draft.name}
-- Current Draft summary: ${draft.summary || "Draft ready for review."}
-${liveContext}
-
-Draft revision rules:
-- The current working directory is the isolated Draft copy. Revise only this Draft.
-- Do not edit the real Live project source unless the user explicitly says Build this.
-- Keep this as one Draft. Do not create A/B/C options, mockup files, wireframe artifacts, or a decision strip.
-- Use product-facing language in the visible response. Do not mention internal paths, workspace IDs, registry IDs, selectors, source paths, hidden JSON, or coordinates.
-- Stop after the Draft is revised.
-
-User request:
-${userPrompt.trim() || "Revise the draft."}`;
-}
-
-function liveOverlayProposalOutputRules(wantsOptions: boolean) {
-  return `Live proposal metadata rules:
-- This is a review-only proposal turn. You may inspect the project, but do not edit app implementation files and do not create saved .codex/mockups artifacts.
-- Return a concise product-facing response plus exactly one fenced \`\`\`codex-plan-preview JSON block.
-- The JSON block must be a single object shaped like: {"version":1,"summary":"...","variants":[{"id":"A","title":"...","tradeoff":"...","placement":"topbar","summary":"...","route":"...","viewState":"...","targetRegion":"...","highlights":[],"components":[]}]}.
-- Use the Live app as the base. The desktop will select the proposal in Live Preview and use highlights for \`Show changes\`; it will not render fake Codex UI inside the user's app, so do not duplicate the full app into static HTML.
-- Do not describe or request visible Codex proposal chrome inside the app surface: no \`Proposed\` banners, fake CTA buttons, generic proposal cards, DOM tags, CSS boxes, or placeholder controls such as \`Open settings\`.
-- Return ${wantsOptions ? "two or three variants with ids A/B/C" : "one variant with id A"}.
-- Each variant must have version-compatible fields: id, title, tradeoff, placement, summary, and components.
-- placement must be one of: topbar, sidePanel, modal.
-- Components may use kind button, panel, menu, modal, input, or badge, with label, body, and optional actionLabel as metadata for implementation context, not as fake controls to render in the app.
-- Add route, viewState, or targetRegion on each variant when it helps the user understand where the proposal applies.
-- Add a highlights array for each variant when practical. Each highlight needs id, label, note, and areaMark with x, y, width, height, viewportWidth, viewportHeight, optional route, note, and createdAt. Use the current visible app viewport as the coordinate basis when known; otherwise use a reasonable 1440x900 desktop basis.
-- Highlights power the "Show changes" overlay and must not appear in accepted app UI.
-- If the request is too broad for honest Live proposal metadata, say that briefly and return the smallest useful proposal rather than editing files.
+function liveOverlayProposalOutputRules() {
+  return `Live review metadata rules:
+- This is review-only context. You may inspect the project, but do not edit app implementation files and do not create saved .codex/mockups artifacts.
+- Return a concise product-facing response that explains the single Draft direction to try next.
+- Do not return visual preview payloads, proposal options, or lettered variants.
+- Use the Live app as the base. If visual marks are useful, describe them in product language for the Draft follow-up; do not add fake Codex UI inside the app surface.
+- Do not describe or request visible Codex proposal chrome inside the app surface: no Proposed banners, fake CTA buttons, generic proposal cards, DOM tags, CSS boxes, or placeholder controls such as Open settings.
+- If the request is too broad for one honest Draft direction, say that briefly and ask one product-facing question.
 - Avoid debug text, internal logs, DOM tag editing UI, CSS property panels, and fake backend routes.`;
-}
-
-function codeProposalWorkspaceRules(prepared: PreparedProposalWorkspaces) {
-  const optionLines = prepared.options.map(
-    (option) => `- Option ${option.id}: ${option.workspacePath}`,
-  );
-  return `Runnable proposal workspace rules:
-- This is a review-only proposal turn. The desktop already copied the live project into isolated option folders under the current working directory.
-- Work only inside the listed option folders. Do not edit the original live project path and do not write .codex/mockups artifacts for this turn.
-- Build each requested option as a runnable candidate app in its own folder. Preserve the existing project conventions in that folder when present.
-- If the folder is empty, create the smallest complete runnable web app needed for that option, including index.html/CSS/JS or package files only when useful.
-- Keep options meaningfully distinct and label final answer sections by Option A/B/C.
-- In visible progress and final responses, use product-facing option names only. Do not mention prepared folders, workspace paths, proposal metadata files, temp paths, or storage locations.
-- The desktop supports at most three active comparison options at once: A, B, and C. If the user asks for Option D or more simultaneous options, say that plainly and ask whether to revise/replace A, B, or C or start a fresh proposal set instead.
-- Stop after the proposal workspaces are ready. The desktop will diff the selected option and apply it to Live if the user accepts it.
-
-Prepared proposal folders:
-${optionLines.join("\n")}`;
 }
 
 function savedMockupReviewPrompt(
@@ -7335,21 +5512,20 @@ Desktop state:
     previewSet.mockups.length,
     "lower",
   )} for this project.
-- Proposal set folder: ${previewSet.baseDir}
-- Selected option: ${selected ? `${selected.label || selected.id} — ${selected.title}` : "none"}
+- Saved review folder: ${previewSet.baseDir}
+- Selected saved preview: ${selected ? `${selected.label || selected.id} - ${selected.title}` : "none"}
 - Original request: ${previewSet.originalPrompt || "Not saved; use the saved manifest and chat context only as supporting context."}
 
-Saved options:
+Saved previews:
 ${optionLines.join("\n")}
 
 Decision policy:
 - Do not return a codex-decision-strip block, fixed questionnaire, or generic action choices for this saved mockup review path. Do the relevant saved preview work directly, then summarize what changed.
 - Let the user's request drive the next step; do not show or ask a fixed questionnaire.
-- The selected saved option is supporting context only. If the user-visible request conflicts with it, follow the user-visible request.
-- Treat exploratory implementation wording as review/proposal intent when placement or workflow is still vague. Phrases like "looking to implement", "thinking of adding", "somewhere", "where should", "show it first", or "where it should be" should update or create a proposal preview first, not change real app files.
-- If the user asks for another/new option and names a label such as "Option C", create or update that labeled saved option in the same proposal set folder. For example, "create another wireframe based on B, but make it C" means keep B untouched, derive a new C file from B, add C to manifest.json, and set selectedMockupId to C.
-- If the user asks for another option without a label, use the next available A/B/C label in the same proposal set.
-- Canvas v2 supports at most three active saved preview options at once: A, B, and C. If the user asks for Option D or more simultaneous options, do not silently relabel it as A/B/C; say the limit plainly and ask whether to revise/replace A, B, or C or start a fresh proposal set.
+- The selected saved preview is supporting context only. If the user-visible request conflicts with it, follow the user-visible request.
+- Treat exploratory implementation wording as Draft/review intent when placement or workflow is still vague. Phrases like "looking to implement", "thinking of adding", "somewhere", "where should", "show it first", or "where it should be" should update or create one saved review preview first, not change real app files.
+- If the user asks for another/new direction, create a product-named saved preview in the same review folder only when it is necessary for the request. Do not use letter labels.
+- If the user asks for many simultaneous directions, ask which single Draft direction to create first instead of generating lettered choices.
 - If they ask to combine, change, improve, explore, place, preview, show, or decide where something should go, update or create saved ${previewArtifactDisplayName(
     previewSet.artifactKind,
     2,
@@ -7359,9 +5535,9 @@ Decision policy:
     previewSet.artifactKind,
     2,
     "lower",
-  )}, update the manifest entry summaries and add or refresh a highlights array for each changed visual area whenever practical. Each highlight should name the changed area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. These highlights power the preview "Show changes" overlay and must not appear inside accepted app UI.
+  )}, update the manifest entry summaries and add or refresh a highlights array for each changed visual area whenever practical. Each highlight should name the changed area and include x, y, width, height, viewportWidth, viewportHeight, and a short note. These highlights are legacy artifact metadata and must not appear inside accepted app UI.
 - If a changed area cannot be bounded confidently, say that plainly in the response instead of inventing a fake highlight.
-- Only implement the real app when the user explicitly commits with wording such as "implement option A", "implement now", "build selected", "apply this", "make this real", or "use option A and implement". In that case, build from the selected or described ${previewArtifactActionName(
+- Only implement the real app when the user explicitly commits with wording such as "implement now", "build this", "apply this", or "make this real". In that case, build from the selected or described ${previewArtifactActionName(
     previewSet.artifactKind,
   )} direction.
 - If their intent is ambiguous between revising the ${previewArtifactActionName(
@@ -7374,9 +5550,7 @@ ${userPrompt.trim()}`;
 }
 
 function mockupVisibleOptionName(mockup: SavedMockup) {
-  const label = (mockup.label || "").trim();
-  if (/^[A-Z]$/i.test(label)) return `option ${label.toUpperCase()}`;
-  return "selected preview";
+  return (mockup.title || mockup.label || "").trim() || "selected preview";
 }
 
 function isSavedMockupImplementationCommitment(prompt: string) {
@@ -7390,183 +5564,23 @@ function isSavedMockupImplementationCommitment(prompt: string) {
     return false;
   }
   return (
-    /\bbuild\s+(?:selected|this|that|it|[abc]|option\s+[abc]|the\s+selected)\b/.test(
+    /\bbuild\s+(?:this|that|it|the\s+selected)\b/.test(
       text,
     ) ||
-    /\bapply\s+(?:this|that|it|[abc]|option\s+[abc]|the\s+selected)\b/.test(text) ||
-    /\bmake\s+(?:this|that|it|option\s+[abc]|the\s+selected)\s+real\b/.test(
+    /\bapply\s+(?:this|that|it|the\s+selected)\b/.test(text) ||
+    /\bmake\s+(?:this|that|it|the\s+selected)\s+real\b/.test(
       text,
     ) ||
-    /\bimplement\s+(?:now|this|that|it|[abc]|option\s+[abc]|the\s+selected|selected)\b/.test(
+    /\bimplement\s+(?:now|this|that|it|the\s+selected|selected)\b/.test(
       text,
     ) ||
-    /\buse\s+option\s+[abc]\b.*\bimplement\b/.test(text) ||
     /\bi\s+like\s+(?:this|that|it)\b.*\bimplement\b/.test(text) ||
-    /\bplease\s+implement\s+(?:this|that|it|option\s+[abc])\b/.test(text)
+    /\bplease\s+implement\s+(?:this|that|it)\b/.test(text)
   );
 }
 
 function isCodeProposalImplementationCommitment(prompt: string) {
   return isSavedMockupImplementationCommitment(prompt);
-}
-
-function optionIdFromText(prompt: string): "A" | "B" | "C" | null {
-  const match = prompt.match(/\boption\s+([abc])\b|\b([abc])\b/i);
-  const value = (match?.[1] || match?.[2] || "").toUpperCase();
-  return value === "A" || value === "B" || value === "C" ? value : null;
-}
-
-function updateCodeProposalOption(
-  previewSet: CodeProposalSet,
-  optionId: "A" | "B" | "C",
-  patch: Partial<CodeProposalOption>,
-): CodeProposalSet {
-  return {
-    ...previewSet,
-    options: previewSet.options.map((option) =>
-      option.id === optionId ? { ...option, ...patch } : option,
-    ),
-    updatedAt: Date.now(),
-  };
-}
-
-function sortCodeProposalOptions(options: CodeProposalOption[]) {
-  const order = new Map<"A" | "B" | "C", number>([
-    ["A", 0],
-    ["B", 1],
-    ["C", 2],
-  ]);
-  return [...options].sort(
-    (left, right) => (order.get(left.id) ?? 99) - (order.get(right.id) ?? 99),
-  );
-}
-
-function removeRecordKey<T>(
-  record: Record<string, T>,
-  key: string | null | undefined,
-) {
-  if (!key || !(key in record)) return record;
-  const next = { ...record };
-  delete next[key];
-  return next;
-}
-
-function codeProposalChangeSummary(changes: CodeProposalFileChange[]) {
-  if (changes.length === 0) return "No file changes detected yet.";
-  const created = changes.filter((change) => change.kind === "created").length;
-  const updated = changes.filter((change) => change.kind === "updated").length;
-  const deleted = changes.filter((change) => change.kind === "deleted").length;
-  return [
-    created ? `${created} created` : "",
-    updated ? `${updated} updated` : "",
-    deleted ? `${deleted} deleted` : "",
-  ]
-    .filter(Boolean)
-    .join(", ");
-}
-
-function createFeatureDraftId(seed: string) {
-  const random =
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID().slice(0, 8)
-      : Math.random().toString(36).slice(2, 10);
-  return `draft-${seed.replace(/[^a-zA-Z0-9_-]+/g, "-").slice(0, 24)}-${random}`;
-}
-
-function featureDraftName(prompt: string) {
-  const cleaned = prompt
-    .replace(/\s+/g, " ")
-    .replace(/[^\w\s-]/g, "")
-    .trim();
-  if (!cleaned) return "Feature draft";
-  const words = cleaned.split(/\s+/).slice(0, 6).join(" ");
-  return words.length > 60 ? `${words.slice(0, 57).trim()}...` : words;
-}
-
-function featureDraftIsActiveForRouting(
-  draft: FeatureDraft | null,
-  activeProjectId: string,
-) {
-  return (
-    Boolean(draft) &&
-    draft?.projectId === activeProjectId &&
-    draft.lifecycle === "active" &&
-    draft.status !== "failed"
-  );
-}
-
-function markFeatureDraftBuilt(
-  desktop: DesktopState,
-  draftId: string,
-): DesktopState {
-  const stored = desktop.featureDrafts[draftId];
-  if (!stored) return desktop;
-  return {
-    ...desktop,
-    featureDrafts: {
-      ...desktop.featureDrafts,
-      [draftId]: {
-        ...stored,
-        lifecycle: "built",
-        status: "ready",
-        updatedAt: Date.now(),
-      },
-    },
-    featureDraftActiveIdsByThreadId: Object.fromEntries(
-      Object.entries(desktop.featureDraftActiveIdsByThreadId).filter(
-        ([, activeDraftId]) => activeDraftId !== draftId,
-      ),
-    ),
-  };
-}
-
-function parkFeatureDraftInState(
-  desktop: DesktopState,
-  draftId: string,
-): DesktopState {
-  const stored = desktop.featureDrafts[draftId];
-  if (!stored) return desktop;
-  return {
-    ...desktop,
-    featureDrafts: {
-      ...desktop.featureDrafts,
-      [draftId]: {
-        ...stored,
-        lifecycle: "parked",
-        updatedAt: Date.now(),
-      },
-    },
-    featureDraftActiveIdsByThreadId: Object.fromEntries(
-      Object.entries(desktop.featureDraftActiveIdsByThreadId).filter(
-        ([, activeDraftId]) => activeDraftId !== draftId,
-      ),
-    ),
-  };
-}
-
-function resumeFeatureDraftInState(
-  desktop: DesktopState,
-  draftId: string,
-  threadId: string,
-): DesktopState {
-  const stored = desktop.featureDrafts[draftId];
-  if (!stored) return desktop;
-  return {
-    ...desktop,
-    featureDrafts: {
-      ...desktop.featureDrafts,
-      [draftId]: {
-        ...stored,
-        lifecycle: "active",
-        threadId,
-        updatedAt: Date.now(),
-      },
-    },
-    featureDraftActiveIdsByThreadId: {
-      ...desktop.featureDraftActiveIdsByThreadId,
-      [threadId]: draftId,
-    },
-  };
 }
 
 function markMockupProposalSetAsHistory(
@@ -7797,11 +5811,11 @@ function liveOverlayProposalRevisionPrompt(
   const feedbackText = feedback.trim();
   const visibleRequest = feedbackText || "Please revise the proposal.";
   const contextLines = [
-    "Live overlay proposal revision rules:",
-    "- Revise the previous temporary Live proposal; do not edit implementation files yet.",
-    "- Return a concise product-facing response plus exactly one fenced ```codex-plan-preview JSON block.",
-    "- Keep the proposal based on the current Live app, not copied static HTML.",
-    "- Keep option titles, tradeoffs, components, and highlights aligned.",
+    "Live review revision rules:",
+    "- Treat the previous temporary Live proposal as legacy review context; do not edit implementation files yet.",
+    "- Return a concise product-facing response that names the single Draft direction to try next.",
+    "- Do not return visual preview JSON, proposal options, or lettered variants.",
+    "- Keep the review based on the current Live app, not copied static HTML.",
     "- For menus, filters, drawers, hover states, and similar click consequences, describe the same-screen state clearly instead of inventing separate pages.",
   ];
   const previewText = attachedPreview.trim();
@@ -7876,12 +5890,12 @@ function liveOverlayProposalAcceptPrompt(
       })
       .join("\n") ?? "";
   return [
-    "Build selected.",
+    "Build this accepted preview.",
     "",
     "Project context explicitly attached by the user:",
-    "Selected live app proposal guidance. This supports the accepted change; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
+    "Selected live app review guidance. This supports the accepted change; if any user-visible instruction conflicts with this context, the user-visible instruction wins.",
     "",
-    `Build selected strategy: ${buildStrategy}.`,
+    `Build strategy: ${buildStrategy}.`,
     ...buildGuidance,
     "Do not add Codex proposal chrome, banners, fake controls, or temporary preview metadata to the accepted app UI.",
     "Do not start or stop local preview servers from this implementation turn; the App Preview toolbar owns that.",
@@ -7889,8 +5903,8 @@ function liveOverlayProposalAcceptPrompt(
     "",
     `Original proposal request: ${proposal.prompt}`,
     selectedVariant
-      ? `Selected option: ${selectedVariant.id} - ${selectedVariant.title}`
-      : "Selected option: A",
+      ? `Selected review: ${selectedVariant.title}`
+      : "Selected review: accepted preview",
     patchText
       ? `Accepted VisualPatch bundle:\n${patchText}`
       : "Accepted VisualPatch bundle: none recorded; use the selected proposal summary and attached visual references.",
@@ -7919,535 +5933,13 @@ function promptWithPlanModeContext(prompt: string) {
     CANVAS_OPERATING_PROMPT,
     "Plan Mode: investigate and propose the plan first.",
     "Do not edit app implementation files or run implementation commands unless the user accepts the plan.",
-    "When visual review is the plan itself, you may create review-only artifacts under .codex/mockups; these are preview records, not app implementation.",
-    "For an existing running app, prefer temporary live preview variants when enough context exists. The desktop uses proposal metadata and Show changes highlights, not visible Codex-authored UI inside the app. Use .codex/mockups for blank projects, missing surfaces, or when a saved review artifact is clearer.",
+    "When visual review is the plan itself, describe the Draft direction to create next instead of generating lettered variants.",
+    "For an existing running app, prefer a single Draft direction when visual review is useful. Do not create proposal metadata or saved lettered review artifacts from Plan Mode.",
     "If the user later accepts the plan, implementation can proceed in a separate turn.",
     "Return a clear product-facing plan. Keep source-level details only where they make the plan accurate.",
     "If the request creates hidden prompt/message state, parallel recovery paths, duplicated ownership, or estimate-vs-observed confusion, challenge the risky literal request and offer a safer plan in product language before implementation steps.",
-    "If you create .codex/mockups artifacts in Plan Mode, summarize them as review previews and stop before app implementation. The user can mark, revise, or accept from the preview surface.",
-    "When you create .codex/mockups review artifacts, include manifest highlights for important added or changed areas when useful. Highlights are review overlays only and must not become accepted app UI chrome.",
-    "When visual review of an existing running app would make the plan clearer, include one fenced ```codex-plan-preview JSON block after the written plan. The desktop strips this block from chat and uses it only for Live preview comparison.",
-    "The plan-preview JSON must have version 1, summary, and one to three variants with ids A/B/C, title, tradeoff, placement (topbar, sidePanel, or modal), summary, and components. Components need kind, label, body, and optional actionLabel.",
-    "Use option titles that name user-facing workflow concepts from the written plan, not placement buckets. The written plan and visual variants must use the same option names and tradeoffs.",
-    "Do not include a plan-preview block for backend-only or direct non-visual plans.",
+    "Do not create .codex/mockups artifacts from Plan Mode unless the user explicitly asks for a saved standalone mockup.",
+    "Do not include visual preview JSON blocks or lettered variant IDs. If a visual review is needed, propose the single Draft to create next.",
   ];
   return `${rules.join("\n")}\n\nUser request:\n${prompt}`;
-}
-
-function promptWithComposerContexts(
-  prompt: string,
-  contexts: ComposerContextReference[],
-) {
-  if (contexts.length === 0) return prompt;
-  const blocks = contexts
-    .map((context) => {
-      if (context.type === "appPreview") {
-        return serializeAppPreviewContext(context);
-      }
-      if (context.type === "mockupPreview") {
-        return serializeMockupPreviewContext(context);
-      }
-      return null;
-    })
-    .filter((block): block is string => Boolean(block));
-  if (blocks.length === 0) return prompt;
-  const hasAppPreview = contexts.some(
-    (context) => context.type === "appPreview",
-  );
-  const hasMockupPreview = contexts.some(
-    (context) => context.type === "mockupPreview",
-  );
-  const guidance = [
-    "The user-visible request remains authoritative. Use the attached context only as supporting visual guidance.",
-    "Use only the attached context unless the user asks you to inspect more.",
-    hasAppPreview
-      ? "For @AppMark context, treat the rectangle as visual intent in the live app preview. When target metadata such as canvasId, sourceFile, or component is present, use it as supporting evidence for the visual reference; still inspect the project before making source-level claims."
-      : null,
-    hasMockupPreview
-      ? "For @MockupMark context, treat each named rectangle as user feedback on a saved mockup option. Proposal highlights are adjustable suggested areas, while user marks are explicit user-drawn areas. Use mark names, option labels, selected files, and rectangles to revise, combine, or build the desired direction; do not claim exact DOM nodes unless you inspect the saved mockup file."
-      : null,
-    "Do not assume this context is attached to future prompts unless the user attaches it again.",
-  ].filter((line): line is string => Boolean(line));
-  return `${prompt}\n\nProject context explicitly attached by the user:\n${blocks.join(
-    "\n\n",
-  )}\n\n${guidance.join("\n")}`;
-}
-
-function serializeAppPreviewContext(context: ComposerAppPreviewContext) {
-  const mark = context.areaMark;
-  const lines = [
-    `@AppMark project="${quotePromptValue(context.projectName, 80)}"`,
-    `mark=${quotePromptValue(context.markLabel || "Mark 1", 80)}`,
-    `source=${context.source === "proposalHighlight" ? "proposal-highlight" : "user-mark"}`,
-    `previewUrl=${quotePromptValue(context.previewUrl, 160)}`,
-    `route=${quotePromptValue(mark.route ?? context.previewUrl, 180)}`,
-    `viewport=${context.viewport}`,
-    `areaRect=${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
-      mark.width,
-    )},${Math.round(mark.height)}`,
-    `previewSize=${Math.round(mark.viewportWidth)}x${Math.round(
-      mark.viewportHeight,
-    )}`,
-    `createdAt=${mark.createdAt}`,
-  ];
-  if (context.highlightId) {
-    lines.push(`highlightId=${quotePromptValue(context.highlightId, 80)}`);
-  }
-  if (context.threadId) {
-    lines.push(`threadId=${quotePromptValue(context.threadId, 120)}`);
-  }
-  if (context.proposalTurnId) {
-    lines.push(
-      `proposalTurnId=${quotePromptValue(context.proposalTurnId, 120)}`,
-    );
-  }
-  if (context.proposalOptionId) {
-    lines.push(`option=${quotePromptValue(context.proposalOptionId, 20)}`);
-  }
-  if (context.canvasLane) {
-    lines.push(`lane=${quotePromptValue(context.canvasLane, 20)}`);
-  }
-  if (context.canvasId) {
-    lines.push(`canvasId=${quotePromptValue(context.canvasId, 120)}`);
-  }
-  if (context.sourceFile) {
-    lines.push(`sourceFile=${quotePromptValue(context.sourceFile, 180)}`);
-  }
-  if (context.componentName) {
-    lines.push(`component=${quotePromptValue(context.componentName, 120)}`);
-  }
-  if (context.screenshotRef) {
-    lines.push(`screenshotRef=${quotePromptValue(context.screenshotRef, 160)}`);
-  }
-  if (context.targetResolutionKind || context.targetResolutionConfidence) {
-    lines.push(
-      `targetResolution=${context.targetResolutionKind ?? "unknown"}/${
-        context.targetResolutionConfidence ?? "unknown"
-      }`,
-    );
-  }
-  if (mark.note.trim()) {
-    lines.push(`note="${quotePromptValue(mark.note.trim(), 180)}"`);
-  }
-  return lines.join("\n");
-}
-
-function serializeMockupPreviewContext(context: ComposerMockupPreviewContext) {
-  const mark = context.areaMark;
-  const lines = [
-    `@MockupMark project="${quotePromptValue(context.projectName, 80)}"`,
-    `mark=${quotePromptValue(context.markLabel, 80)}`,
-    `source=${context.source === "proposalHighlight" ? "proposal-highlight" : "user-mark"}`,
-    `proposalSetId=${quotePromptValue(context.proposalSetId, 120)}`,
-    `artifactKind=${context.artifactKind}`,
-    `option=${quotePromptValue(context.mockupLabel, 40)}`,
-    `mockupId=${quotePromptValue(context.mockupId, 80)}`,
-    `title="${quotePromptValue(context.mockupTitle, 120)}"`,
-    `file=${quotePromptValue(context.filePath, 180)}`,
-    `viewport=${context.viewport}`,
-    `areaRect=${Math.round(mark.x)},${Math.round(mark.y)},${Math.round(
-      mark.width,
-    )},${Math.round(mark.height)}`,
-    `previewSize=${Math.round(mark.viewportWidth)}x${Math.round(
-      mark.viewportHeight,
-    )}`,
-    `createdAt=${mark.createdAt}`,
-  ];
-  if (context.highlightId) {
-    lines.push(`highlightId=${quotePromptValue(context.highlightId, 80)}`);
-  }
-  if (mark.note.trim()) {
-    lines.push(`note="${quotePromptValue(mark.note.trim(), 180)}"`);
-  }
-  return lines.join("\n");
-}
-
-function quotePromptValue(value: string, maxLength: number) {
-  const compact = value.replace(/\s+/g, " ").trim();
-  const clipped =
-    compact.length > maxLength
-      ? `${compact.slice(0, maxLength - 1)}...`
-      : compact;
-  return clipped.replace(/"/g, "'");
-}
-
-function visibleDraftForProject(
-  draft: LocalChatDraft | undefined,
-  activeDraftProjectId: string | null,
-) {
-  if (!draft) return null;
-  return draft.projectId === activeDraftProjectId || hasDraftContent(draft)
-    ? draft
-    : null;
-}
-
-function composerContextsForProject(
-  contexts: ComposerContextReference[],
-  projectId: string,
-) {
-  return contexts.filter((context) => context.projectId === projectId);
-}
-
-function dedupeComposerContexts(contexts: ComposerContextReference[]) {
-  const seen = new Set<string>();
-  const deduped: ComposerContextReference[] = [];
-  for (const context of contexts) {
-    const key = composerContextIdentity(context);
-    if (seen.has(key)) continue;
-    seen.add(key);
-    deduped.push(context);
-  }
-  return deduped;
-}
-
-function pruneSentComposerContextsByTurnId(
-  contextsByTurnId: Record<string, ComposerContextReference[]>,
-) {
-  const entries = Object.entries(contextsByTurnId).filter(
-    ([, contexts]) => contexts.length > 0,
-  );
-  return Object.fromEntries(entries.slice(-80));
-}
-
-function nextMockupMarkNumber(
-  contexts: ComposerContextReference[],
-  projectId: string,
-  proposalSetId: string,
-  mockupId: string,
-) {
-  return (
-    contexts.reduce((max, context) => {
-      if (
-        context.type !== "mockupPreview" ||
-        context.projectId !== projectId ||
-        context.proposalSetId !== proposalSetId ||
-        context.mockupId !== mockupId ||
-        context.source === "proposalHighlight"
-      ) {
-        return max;
-      }
-      return Math.max(max, context.markNumber || 0);
-    }, 0) + 1
-  );
-}
-
-function nextMockupChangeNumber(
-  contexts: ComposerContextReference[],
-  projectId: string,
-  proposalSetId: string,
-  mockupId: string,
-) {
-  return (
-    contexts.reduce((max, context) => {
-      if (
-        context.type !== "mockupPreview" ||
-        context.projectId !== projectId ||
-        context.proposalSetId !== proposalSetId ||
-        context.mockupId !== mockupId ||
-        context.source !== "proposalHighlight"
-      ) {
-        return max;
-      }
-      return Math.max(max, context.markNumber || 0);
-    }, 0) + 1
-  );
-}
-
-function composerContextIdentity(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${context.projectId}:app-preview:${context.id}`;
-  }
-  return `${context.projectId}:mockup-preview:${context.id}`;
-}
-
-function composerContextSearchLabel(context: ComposerContextReference) {
-  if (context.type === "appPreview") {
-    return `${context.projectName} App Preview ${
-      context.markLabel || "Mark 1"
-    } ${context.previewUrl}`;
-  }
-  return `${context.projectName} ${context.markLabel} ${previewArtifactDisplayName(
-    context.artifactKind,
-    1,
-    "title",
-  )} ${context.mockupLabel} ${context.mockupTitle} ${context.filePath}`;
-}
-
-function sameComposerContextList(
-  left: ComposerContextReference[],
-  right: ComposerContextReference[],
-) {
-  if (left.length !== right.length) return false;
-  return left.every((context, index) => {
-    const other = right[index];
-    return other
-      ? other.type === context.type &&
-          composerContextIdentity(other) === composerContextIdentity(context)
-      : false;
-  });
-}
-
-function firstMarkdownChangeSelection(
-  thread: Thread | null,
-  project: Project | null,
-): InspectorSelection {
-  if (!thread || !project) return { type: "empty" };
-  for (const turn of thread.turns) {
-    for (const item of turn.items) {
-      if (item.type !== "fileChange") continue;
-      for (const change of item.changes) {
-        if (!isMarkdownPath(change.path)) continue;
-        return {
-          type: "document",
-          path: documentPath(change.path, project),
-          title: friendlyPath(change.path, project),
-        };
-      }
-    }
-  }
-  return { type: "empty" };
-}
-
-function sameInspectorSelection(
-  left: InspectorSelection,
-  right: InspectorSelection,
-) {
-  if (left.type !== right.type) return false;
-  switch (left.type) {
-    case "document":
-      return (
-        right.type === "document" &&
-        left.path === right.path &&
-        left.title === right.title
-      );
-    case "fileChange":
-      return right.type === "fileChange" && left.item.id === right.item.id;
-    case "command":
-      return right.type === "command" && left.item.id === right.item.id;
-    case "approval":
-      return (
-        right.type === "approval" && left.approval.id === right.approval.id
-      );
-    case "appPreview":
-      return right.type === "appPreview" && left.projectId === right.projectId;
-    case "mockupPreview":
-      return (
-        right.type === "mockupPreview" &&
-        left.projectId === right.projectId &&
-        left.proposalSetId === right.proposalSetId
-      );
-    case "codeProposalPreview":
-      return (
-        right.type === "codeProposalPreview" &&
-        left.projectId === right.projectId &&
-        left.proposalSetId === right.proposalSetId
-      );
-    case "draftPreview":
-      return (
-        right.type === "draftPreview" &&
-        left.projectId === right.projectId &&
-        left.draftId === right.draftId
-      );
-    case "planPreview":
-      return (
-        right.type === "planPreview" &&
-        left.projectId === right.projectId &&
-        left.proposalTurnId === right.proposalTurnId
-      );
-    case "empty":
-      return true;
-  }
-}
-
-function preferredPreviewInspectorWidth() {
-  if (typeof window === "undefined") return 760;
-  const sidebarWidth = sidebarWidthForShell(window.innerWidth);
-  return clamp(
-    window.innerWidth - sidebarWidth - CHAT_COMFORT_WIDTH,
-    720,
-    maxInspectorWidthForShell(window.innerWidth, true),
-  );
-}
-
-function maxInspectorWidthForShell(shellWidth: number, previewFocused = false) {
-  const reservedChatWidth = previewFocused
-    ? PREVIEW_CHAT_MIN_WIDTH
-    : CHAT_COMFORT_WIDTH;
-  return Math.max(INSPECTOR_MIN_WIDTH, shellWidth - reservedChatWidth);
-}
-
-function sidebarWidthForShell(shellWidth: number) {
-  if (shellWidth <= 1240) {
-    return clamp(shellWidth * 0.22, 236, 280);
-  }
-  return clamp(shellWidth * 0.17, 248, 304);
-}
-
-function clamp(value: number, min: number, max: number) {
-  return Math.max(min, Math.min(max, value));
-}
-
-function isMarkdownPath(path: string) {
-  return /\.(md|mdx|markdown)$/i.test(path);
-}
-
-function documentPath(path: string, activeProject: Project) {
-  if (path.startsWith("/") || /^[A-Za-z]:[\\/]/.test(path)) return path;
-  return `${activeProject.path.replace(/[\\/]$/, "")}/${path}`;
-}
-
-function friendlyPath(path: string, activeProject: Project) {
-  const projectPath = activeProject.path.replace(/\\/g, "/").replace(/\/$/, "");
-  return path
-    .replace(new RegExp(escapeRegExp(projectPath), "g"), ".")
-    .replace(/^\.\//, "");
-}
-
-function escapeRegExp(value: string) {
-  return value.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-}
-
-function sendFailureMessage(error: unknown) {
-  const message = errorMessage(error);
-  if (message.includes("AbsolutePathBuf")) {
-    return "Codex could not use that project path with the current WSL runtime. Re-add the folder with a /mnt/c/... path or restart so the saved path can be normalized.";
-  }
-  if (message.includes("thread not found")) {
-    return "That saved chat is no longer available. Send again to start a fresh chat.";
-  }
-  if (message.includes("Not connected")) {
-    return "Codex is not connected to app-server yet. Retry after it reconnects.";
-  }
-  return `Send failed: ${message}`;
-}
-
-type ModelDisplay = {
-  label: string;
-  title: string;
-  tone: "ready" | "loading" | "error";
-};
-
-function resolveModelDisplay(
-  snapshot: AppServerSnapshot,
-  settings: ProjectSettings,
-): ModelDisplay {
-  if (settings.model) {
-    return {
-      label: modelDisplayName(snapshot, settings.model),
-      title: "Selected for this project",
-      tone: "ready",
-    };
-  }
-
-  if (snapshot.modelsError || snapshot.configError) {
-    return {
-      label: "Model unavailable",
-      title:
-        snapshot.modelsError ?? snapshot.configError ?? "Model unavailable",
-      tone: "error",
-    };
-  }
-
-  if (!snapshot.config) {
-    return {
-      label: "Loading model...",
-      title: "Reading model settings",
-      tone: "loading",
-    };
-  }
-
-  const configuredModel = configModel(snapshot.config);
-  if (configuredModel) {
-    return {
-      label: modelDisplayName(snapshot, configuredModel),
-      title: "Using the model from Codex settings",
-      tone: "ready",
-    };
-  }
-
-  return {
-    label: "Auto model",
-    title: "Codex will choose the configured default model",
-    tone: "ready",
-  };
-}
-
-function modelDisplayName(snapshot: AppServerSnapshot, modelId: string) {
-  return (
-    snapshot.models.find((model) => model.model === modelId)?.displayName ??
-    modelId
-  );
-}
-
-function configModel(config: unknown) {
-  if (!config || typeof config !== "object") return null;
-  const maybeConfig = "config" in config ? config.config : null;
-  if (!maybeConfig || typeof maybeConfig !== "object") return null;
-  const model = "model" in maybeConfig ? maybeConfig.model : null;
-  return typeof model === "string" && model.length > 0 ? model : null;
-}
-
-function errorMessage(error: unknown) {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isUnsupportedAttachmentError(error: string | null) {
-  if (!error) return false;
-  const message = error.toLowerCase();
-  return message.includes("unsupported") || message.includes("not supported");
-}
-
-function isKnownThreadForCwd(
-  threads: ThreadMap,
-  threadId: string,
-  cwd: string | null,
-  backendMode: BackendMode,
-) {
-  const thread = threads[threadId];
-  return Boolean(
-    thread && cwd && sameRuntimePath(thread.cwd, cwd, backendMode),
-  );
-}
-
-function isThreadNotFound(error: unknown) {
-  return errorMessage(error).includes("thread not found");
-}
-
-function isStaleThreadError(error: unknown) {
-  return isThreadNotFound(error) || isThreadNotMaterialized(error);
-}
-
-function isThreadNotMaterialized(error: unknown) {
-  const message = errorMessage(error);
-  return (
-    message.includes("no rollout found") ||
-    message.includes("not materialized yet") ||
-    message.includes("includeTurns is unavailable")
-  );
-}
-
-function withRequestTimeout<T>(
-  promise: Promise<T>,
-  ms: number,
-  message: string,
-) {
-  return new Promise<T>((resolve, reject) => {
-    const timer = window.setTimeout(() => reject(new Error(message)), ms);
-    promise.then(
-      (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-      (error) => {
-        window.clearTimeout(timer);
-        reject(error);
-      },
-    );
-  });
-}
-
-function wait(ms: number) {
-  return new Promise((resolve) => {
-    window.setTimeout(resolve, ms);
-  });
 }

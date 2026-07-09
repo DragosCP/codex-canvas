@@ -11,6 +11,9 @@ export type RuntimeInfo = {
 };
 
 const desktopRuntime = hasDesktopBridge();
+const defaultProjectPathHint = desktopRuntime
+  ? ""
+  : ".cache/p03-desktop-demo-workspace";
 
 export const runtimeInfo: RuntimeInfo = {
   appServerUrl:
@@ -25,10 +28,7 @@ export const runtimeInfo: RuntimeInfo = {
     (desktopRuntime ? "real-native" : "mock-dev")) as BackendMode,
   autoConnect: import.meta.env.VITE_CODEX_AUTO_CONNECT !== "false",
   projectPathHint:
-    import.meta.env.VITE_CODEX_PROJECT_PATH_HINT ??
-    (desktopRuntime
-      ? "C:\\Users\\drago\\Desktop\\harnesses\\codex-main"
-      : "/mnt/c/Users/drago/Desktop/harnesses/codex-main/.cache/p03-desktop-demo-workspace"),
+    import.meta.env.VITE_CODEX_PROJECT_PATH_HINT ?? defaultProjectPathHint,
 };
 
 export async function loadRuntimeInfo() {

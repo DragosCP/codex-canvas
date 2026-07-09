@@ -12,6 +12,7 @@ const fsp = fs.promises;
 
 const REGISTRY_FILE = "registry.json";
 const DRAFT_STATUS = new Set(["active", "parked", "built", "discarded"]);
+const draftRegistryWriteQueues = new Map();
 
 async function prepareDraftWorkspace(args) {
   const projectPath = path.resolve(String(args.projectPath ?? ""));
@@ -28,6 +29,7 @@ async function prepareDraftWorkspace(args) {
     projectPath,
     proposalSetId: draftId,
     optionIds: ["A"],
+    reuseDependencies: true,
   });
   const option = backing.options[0];
   if (!option?.workspacePath) {
@@ -89,6 +91,18 @@ async function diffDraftWorkspace(args) {
     previewOwnerId: record.previewOwnerId,
     changedFiles: diff.changedFiles,
   };
+}
+
+async function listDraftWorkspaces(args) {
+  const cacheRoot = path.resolve(String(args.cacheRoot ?? ""));
+  const projectPath = args.projectPath ? path.resolve(String(args.projectPath)) : "";
+  const registry = await readDraftRegistry(cacheRoot);
+  return Object.values(registry.drafts)
+    .map(normalizeDraftRecord)
+    .filter(Boolean)
+    .filter((record) => !projectPath || samePath(record.projectPath, projectPath))
+    .sort((left, right) => right.updatedAt - left.updatedAt)
+    .map(publicDraftRecord);
 }
 
 async function applyDraftWorkspace(args) {
@@ -261,9 +275,14 @@ async function writeDraftRegistry(cacheRoot, registry) {
 }
 
 async function upsertDraftRecord(cacheRoot, record) {
-  const registry = await readDraftRegistry(cacheRoot);
-  registry.drafts[record.draftId] = normalizeDraftRecord(record);
-  await writeDraftRegistry(cacheRoot, registry);
+  return withDraftRegistryWriteQueue(cacheRoot, async () => {
+    const registry = await readDraftRegistry(cacheRoot);
+    const normalized = normalizeDraftRecord(record);
+    if (!normalized) throw new Error("Draft workspace record is not valid.");
+    registry.drafts[normalized.draftId] = normalized;
+    await writeDraftRegistry(cacheRoot, registry);
+    return normalized;
+  });
 }
 
 async function registeredDraftRecord(cacheRoot, draftId, options = {}) {
@@ -313,6 +332,19 @@ function normalizeDraftRecord(value) {
 
 function publicDraftRecord(record) {
   return { ...record };
+}
+
+function withDraftRegistryWriteQueue(cacheRoot, task) {
+  const key = path.resolve(String(cacheRoot ?? ""));
+  const previous = draftRegistryWriteQueues.get(key) || Promise.resolve();
+  const run = previous.catch(() => null).then(task);
+  const tail = run.catch(() => null);
+  draftRegistryWriteQueues.set(key, tail);
+  return run.finally(() => {
+    if (draftRegistryWriteQueues.get(key) === tail) {
+      draftRegistryWriteQueues.delete(key);
+    }
+  });
 }
 
 function listSection(title, values) {
@@ -417,6 +449,7 @@ function samePath(left, right) {
 module.exports = {
   applyDraftWorkspace,
   diffDraftWorkspace,
+  listDraftWorkspaces,
   prepareDraftWorkspace,
   updateDraftBrief,
   updateDraftLifecycle,
