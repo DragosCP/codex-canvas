@@ -85,6 +85,11 @@ artifacts/
 .analyser/
 .lovable/
 
+# local/internal project notes
+/AGENTS.md
+/docs/
+/plans/
+
 # personal files
 personal/
 vision-weaver-main/

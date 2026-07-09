@@ -1,47 +1,95 @@
 # Codex Local Desktop
 
-Codex Local Desktop is a local Electron app built on top of the Codex runtime. It is a workbench for opening a local project, chatting with Codex, reviewing file changes, managing approvals, and using a Live/Draft preview loop before source changes are promoted.
+Codex Local Desktop is an experimental desktop workbench for builders who use coding agents to make apps. It keeps the familiar Codex-style chat and local project workflow, then adds a visual app preview and Draft UI direction: preview the user experience of a new feature inside the real app before committing to backend, database, API, or infrastructure changes.
 
-This repository is a product fork/workspace around Codex. The upstream Codex CLI and Rust app-server remain the runtime foundation; the desktop app adds the local project shell, preview workflow, and Canvas-oriented product layer.
+This project is not an official OpenAI product. It is a product fork/workspace built around the open-source Codex runtime and an Electron desktop shell.
 
-## Current Status
+## Download
 
-- Desktop shell: implemented for local development.
-- Live App Preview: implemented for runnable local projects.
-- Draft workflow: implemented as the current preview-before-build path.
-- Canvas proposal lanes: removed from the active product model; current visual work uses `Live` and `Draft`.
-- Windows sidecar staging: implemented for development/release preparation.
-- Unsigned Windows installer packaging: implemented for local release artifacts.
+Windows prerelease installer:
 
-## What The App Does
+[Download Codex Local 0.1.0 for Windows](https://github.com/agent4cat-cpu/codex-clone/releases/download/v0.1.0/Codex.Local-0.1.0-win-x64.exe)
 
-- Opens local project folders.
+Release page:
+
+[Codex Local 0.1.0](https://github.com/agent4cat-cpu/codex-clone/releases/tag/v0.1.0)
+
+The current installer is unsigned, so Windows may show a SmartScreen warning. Until the repository is public, only GitHub users with access to this repository can download the release asset.
+
+## Why This Exists
+
+Agentic coding is powerful, but feature planning can become too abstract. A builder may spend a long conversation explaining product behavior, edge cases, screens, and workflow details, then accept a long plan that is hard to fully evaluate. If the agent builds the wrong UX first, fixing it later can create messy backend routes, temporary debug logic, duplicated flows, and hard-to-remove code.
+
+Codex Local is exploring a different workflow: make the next feature visible before making it real.
+
+The product direction is Draft UI mode:
+
+- ask for a feature;
+- let the agent create the UI and workflow first;
+- preview it inside the real local app context;
+- refine the user experience while it is still cheap to change;
+- approve or discard the draft;
+- only then convert it into real implementation work.
+
+## What It Does Today
+
+- Opens local project folders in a desktop app.
 - Keeps chats scoped to projects and threads.
 - Streams Codex progress, commands, approvals, and file changes.
 - Shows changed-file summaries and review entry points.
 - Starts or connects to a local app preview.
-- Lets the user mark Live/Draft preview areas as visual context.
-- Creates source-safe Draft workspaces for reviewable UI/workflow changes.
-- Applies a Draft to the real project only after an explicit build action.
+- Lets the user mark areas in Live/Draft previews as visual context.
+- Creates Draft workspaces for reviewable UI/workflow changes before source changes are promoted.
+- Packages as an unsigned Windows Electron installer.
 
-## Repository Layout
+## How It Is Different From Plain Codex
 
-- `apps/desktop/` - React/Electron desktop app.
-- `apps/desktop/electron/` - Electron host, preview helpers, sidecar launch, and desktop IPC.
-- `codex-rs/` - upstream Rust Codex runtime and app-server.
-- `docs/` - durable product, architecture, and UI/UX direction for this desktop product.
-- `plans/` - active and completed implementation plans.
-- `scripts/` - focused verification, dogfood, and sidecar staging scripts.
+Plain Codex is centered on the agent conversation, terminal work, approvals, and source edits.
 
-## Prerequisites
+Codex Local keeps that foundation, but aims to add a builder-facing canvas around it:
 
-- Windows for the current desktop sidecar staging path.
-- Node.js 22 or newer.
-- pnpm 10.33 or newer.
-- Rust/Cargo for building the Codex sidecar.
-- `rg.exe` available on `PATH` when staging the Windows sidecar.
+- **Live preview**: see the running app while talking to the agent.
+- **Draft preview**: explore the next feature as a temporary UI/workflow before real implementation.
+- **Visual context**: mark parts of the app so the agent and builder refer to the same screen areas.
+- **Draft-to-build path**: use the approved draft as a bridge into real source changes.
+- **Future tagging direction**: create a shared project vocabulary for screens, panels, buttons, and flows so prompts and plans use the builder's language.
 
-## Run From Source
+## Draft UI Mode
+
+Draft UI mode is the main product idea.
+
+In Draft UI mode, the agent should create the visible experience of a feature without immediately committing to production backend work. It can use fake data, local state, temporary UI, fixture objects, and structured draft notes. The goal is not to fake production. The goal is to let the builder feel the workflow before the app pays the cost of real implementation.
+
+Draft UI mode should help avoid:
+
+- long plans that are hard to read;
+- UX mistakes discovered only after backend work is done;
+- repeated back-and-forth implementation churn;
+- temporary backend routes and debug panels that become permanent;
+- hard-to-discard work when the first implementation direction is wrong.
+
+## Status
+
+This is an early prerelease. The desktop shell, local project workflow, Live preview, visual marking, Draft workspace path, and Windows packaging are in place. The broader Draft UI product direction is still being shaped and hardened.
+
+Not done yet:
+
+- signed installer;
+- automatic updates;
+- polished product icon;
+- public release workflow;
+- complete Draft UI contract for every app type;
+- the future tagging/vocabulary system.
+
+## Build From Source
+
+Requirements:
+
+- Windows for the current packaged desktop path;
+- Node.js 22 or newer;
+- pnpm 10.33 or newer;
+- Rust/Cargo for building the native Codex sidecar;
+- `rg.exe` on `PATH` when staging the Windows sidecar.
 
 Install dependencies:
 
@@ -61,52 +109,25 @@ Build the desktop renderer:
 npm --prefix apps/desktop run build
 ```
 
-Stage the Windows native sidecar and build the desktop renderer:
-
-```powershell
-npm --prefix apps/desktop run electron:build
-```
-
-Create an unpacked desktop app for local smoke testing:
+Create an unpacked desktop app using the already staged sidecar:
 
 ```powershell
 npm --prefix apps/desktop run electron:pack
 ```
 
-Create an unsigned Windows installer:
+Create an unsigned Windows installer from already staged sidecar binaries:
+
+```powershell
+npm --prefix apps/desktop run electron:dist:staged
+```
+
+Run the full sidecar stage and installer build:
 
 ```powershell
 npm --prefix apps/desktop run electron:dist
 ```
 
-`electron:build` stages the native sidecar under `apps/desktop/electron/resources/codex-sidecar` and builds the renderer. `electron:dist` runs that full sidecar stage before creating the installer, so the first run can be slow while Rust release binaries are rebuilt.
-
-`electron:pack` reuses the already staged sidecar and creates an unpacked app for faster local smoke tests. After a successful `electron:build`, `electron:dist:staged` can rebuild the unsigned installer without rerunning the Rust sidecar stage. Packaging artifacts are written under `apps/desktop/release/`.
-
-## Focused Verification
-
-Useful checks while working on the current Live/Draft desktop path:
-
-```powershell
-git diff --check
-npm --prefix apps/desktop run test:p34
-npm --prefix apps/desktop run test:p35
-npm --prefix apps/desktop run test:p36
-npm --prefix apps/desktop run build
-```
-
-Broader product-flow changes should also run the relevant P33/P33b/P33c/P33d checks and Electron dogfood scripts documented in the plans.
-
-## Release Readiness
-
-Before publishing a first downloadable desktop release:
-
-- replace development-only metadata and screenshots with public-facing material;
-- add a real product icon and signed release certificate;
-- verify the app from a clean clone;
-- confirm the native sidecar is included in the package;
-- decide on update strategy;
-- add a release workflow that builds reproducible artifacts.
+The full sidecar stage can be slow because it rebuilds Rust release binaries.
 
 ## License
 
