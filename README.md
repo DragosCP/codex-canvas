@@ -1,6 +1,6 @@
-# Codex Local Desktop
+# Codex Canvas
 
-Codex Local Desktop is an experimental desktop workbench for builders who use coding agents to make apps. It keeps the familiar Codex-style chat and local project workflow, then adds a visual app preview and Draft UI direction: preview the user experience of a new feature inside the real app before committing to backend, database, API, or infrastructure changes.
+Codex Canvas is an experimental desktop workbench for builders who use coding agents to make apps. It keeps the familiar Codex-style chat and local project workflow, then adds a visual app preview and "Draft" direction via "Canvas": preview the user experience of a new feature inside the real app before committing to backend, database, API, or infrastructure changes.
 
 This project is not an official OpenAI product. It is a product fork/workspace built around the open-source Codex runtime and an Electron desktop shell.
 
@@ -8,11 +8,11 @@ This project is not an official OpenAI product. It is a product fork/workspace b
 
 Windows prerelease installer:
 
-[Download Codex Local 0.1.0 for Windows](https://github.com/agent4cat-cpu/codex-clone/releases/download/v0.1.0/Codex.Local-0.1.0-win-x64.exe)
+[Download Codex Local 0.1.0 for Windows](https://github.com/dragosCP/codex-canvas/releases/download/v0.1.0/Codex.Local-0.1.0-win-x64.exe)
 
 Release page:
 
-[Codex Local 0.1.0](https://github.com/agent4cat-cpu/codex-clone/releases/tag/v0.1.0)
+[Codex Local 0.1.0](https://github.com/dragosCP/codex-canvas/releases/tag/v0.1.0)
 
 The current installer is unsigned, so Windows may show a SmartScreen warning. Until the repository is public, only GitHub users with access to this repository can download the release asset.
 
@@ -22,7 +22,7 @@ Agentic coding is powerful, but feature planning can become too abstract. A buil
 
 Codex Local is exploring a different workflow: make the next feature visible before making it real.
 
-The product direction is Draft UI mode:
+The product direction is "Draft" mode:
 
 - ask for a feature;
 - let the agent create the UI and workflow first;
@@ -54,13 +54,13 @@ Codex Local keeps that foundation, but aims to add a builder-facing canvas aroun
 - **Draft-to-build path**: use the approved draft as a bridge into real source changes.
 - **Future tagging direction**: create a shared project vocabulary for screens, panels, buttons, and flows so prompts and plans use the builder's language.
 
-## Draft UI Mode
+## Draft Mode
 
-Draft UI mode is the main product idea.
+Draft mode is the main product idea.
 
-In Draft UI mode, the agent should create the visible experience of a feature without immediately committing to production backend work. It can use fake data, local state, temporary UI, fixture objects, and structured draft notes. The goal is not to fake production. The goal is to let the builder feel the workflow before the app pays the cost of real implementation.
+In Draft mode, the agent should create the visible experience of a feature without immediately committing to production backend work. It can use fake data, local state, temporary UI, fixture objects, and structured draft notes. The goal is not to fake production. The goal is to let the builder feel the workflow before the app pays the cost of real implementation.
 
-Draft UI mode should help avoid:
+Draft mode should help avoid:
 
 - long plans that are hard to read;
 - UX mistakes discovered only after backend work is done;
@@ -70,7 +70,7 @@ Draft UI mode should help avoid:
 
 ## Status
 
-This is an early prerelease. The desktop shell, local project workflow, Live preview, visual marking, Draft workspace path, and Windows packaging are in place. The broader Draft UI product direction is still being shaped and hardened.
+This is an early prerelease. The desktop shell, local project workflow, Live preview, visual marking, Draft workspace path, and Windows packaging are in place. The broader Draft product direction is still being shaped and hardened.
 
 Not done yet:
 
@@ -78,7 +78,7 @@ Not done yet:
 - automatic updates;
 - polished product icon;
 - public release workflow;
-- complete Draft UI contract for every app type;
+- complete Draft contract for every app type;
 - the future tagging/vocabulary system.
 
 ## Build From Source
